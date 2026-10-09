@@ -15,7 +15,7 @@ from datetime import datetime
 
 from config import (
     DAILY_LIMIT, COOLDOWN, BLOCK_MODE, ENFORCE_EVERY, TICK_CLAMP,
-    fmt_hm
+    DEV_MODE, fmt_hm
 )
 
 
@@ -24,10 +24,18 @@ class NetGuard:
     申请制联网:
       request() → 冷静期(COOLDOWN) → 自动联网 → 额度耗尽/提前结束 → 断网
     设计原则 fail-closed:启动、退出、异常时一律断网;冷静期中的申请重启即作废。
+
+    开发者模式(config.DEV_MODE = True):
+      enabled 为 False,断网功能整体失效——不再执行任何禁用网卡/防火墙的命令,
+      其余界面逻辑照常。
+      此外,启动时会把之前正常模式遗留的封锁主动解除掉(见 release_block),
+      避免"上次跑完仍处于断网状态"时打开程序却上不了网。
     """
 
     def __init__(self, data_dir: str):
         self.dead = False            # 卸载后置 True:不再写盘、不再断网
+        self.enabled = not DEV_MODE  # 开发者模式:不主动断网
+        self._release_pending = False  # 开发者模式:启动时的解除封锁命令是否还没执行完
         self.state_file = os.path.join(data_dir, "net_state.json")
         self.log_file = os.path.join(data_dir, "net_requests.log")
         self.q = queue.Queue()
@@ -40,7 +48,10 @@ class NetGuard:
         self._load()
         self._last_save = time.monotonic()
         self._last_enforce = time.monotonic()
-        self.block()                 # 启动即断网
+        if self.enabled:
+            self.block()             # 正常模式:启动即断网
+        else:
+            self.release_block()     # 开发者模式:解除之前遗留的网络封锁
 
     # ── 状态属性 ──
     @property
@@ -53,6 +64,8 @@ class NetGuard:
 
     @property
     def mode(self) -> str:
+        if not self.enabled:
+            return "dev"
         if self.online:
             return "online"
         if self.pending:
@@ -100,7 +113,13 @@ class NetGuard:
                 f'netsh advfirewall firewall add rule name="{rule}" dir=out action=block profile=any')
 
     @staticmethod
-    def _run(cmd: str):
+    def _release_cmd() -> str:
+        """彻底解除封锁:两种模式(BLOCK_MODE=adapter / firewall)的残留一起清掉"""
+        rule = "FocusNet_BLOCK"
+        return ('Get-NetAdapter -Physical | Enable-NetAdapter -Confirm:$false; '
+                f'netsh advfirewall firewall delete rule name="{rule}"')
+
+    def _run(self, cmd: str):
         if sys.platform != "win32":
             return
         try:
@@ -115,10 +134,25 @@ class NetGuard:
     def _worker(self):
         # 单线程顺序执行,保证 block/unblock 不会乱序,也不阻塞界面
         while True:
-            self._run(self.q.get())
+            cmd = self.q.get()
+            self._run(cmd)
+            if cmd == self._release_cmd():
+                self._release_pending = False
+
+    def release_block(self):
+        """开发者模式专用:把之前正常模式设下的封锁解除掉(启用网卡 + 删除防火墙规则)
+
+        命令走同一队列,因此不会阻塞界面;退出时 shutdown() 还会同步兜底一次,
+        确保"打开程序 → 立刻关闭"这种情况下网络也一定恢复。
+        """
+        if self.enabled:
+            return
+        self._log("RELEASE  developer mode: undoing leftover network block")
+        self._release_pending = True
+        self.q.put(self._release_cmd())
 
     def block(self, sync: bool = False):
-        if self.dead:
+        if self.dead or not self.enabled:
             return
         cmd = self._cmd(False)
         if sync:
@@ -131,6 +165,8 @@ class NetGuard:
 
     # ── 用户操作 ──
     def request(self, minutes: int, reason: str):
+        if not self.enabled:
+            return False, "Developer mode: network control is disabled."
         if self.online:
             return False, "Already online."
         if self.pending:
@@ -163,7 +199,12 @@ class NetGuard:
         self.pending = None
         self.grant_left = 0.0
         self._save()
-        self.block(sync=True)
+        if self.enabled:
+            self.block(sync=True)
+        elif self._release_pending:
+            # 开发者模式兜底:启动时的解除封锁命令还没执行完就退出了,这里同步补一次
+            self._run(self._release_cmd())
+            self._release_pending = False
 
     def release(self):
         """卸载专用:丢弃待执行命令,同步恢复联网,并停止一切写盘/断网"""
@@ -175,11 +216,16 @@ class NetGuard:
                 self.q.get_nowait()
         except queue.Empty:
             pass
-        self._run(self._cmd(True))     # 同步执行,确保卸载前网络已恢复
+        # 同步执行,确保卸载前网络已恢复
+        # (开发者模式:用彻底解除封锁的命令,把两种模式可能留下的残留都清掉)
+        self._run(self._cmd(True) if self.enabled else self._release_cmd())
+        self._release_pending = False
 
     # ── 每秒调用一次 ──
     def tick(self, dt: float):
         """返回 "started" / "ended" / None"""
+        if not self.enabled:
+            return None
         today = datetime.now().strftime('%Y-%m-%d')
         if today != self.date:
             self.date, self.used = today, 0.0

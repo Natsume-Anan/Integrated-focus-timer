@@ -1,5 +1,6 @@
 WARNING:包含AI生成的代码
 包含关闭网卡等强制性断网措施(可以在config改为防火墙模式)
+开发者模式(config.DEV_MODE)默认关闭,开启后断网功能整体失效,详见文末说明
 
 # Obliphur's Integrated Terminal
 
@@ -44,4 +45,7 @@ WARNING:包含AI生成的代码
 
 ```bash
 python main.py
+```
+
+---
 

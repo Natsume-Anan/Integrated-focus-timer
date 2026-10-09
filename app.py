@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, time as dt_time
 
 from config import (
     COLORS, APP_NAME, IDLE, RUNNING, READY_BREAK, ON_BREAK,
-    DAILY_LIMIT, COOLDOWN, LOG_HOURS, CHIME_WAV,
+    DAILY_LIMIT, COOLDOWN, LOG_HOURS, CHIME_WAV, DEV_MODE,
     compute_F, show_topmost_info, fmt_hm, fmt_ms
 )
 from net_guard import NetGuard
@@ -137,13 +137,13 @@ class BreakTimerApp:
         self.nav_labels = {
             "cal": "📅  Calendar",
             "log": "📝  Hour Log",
-            "net": "🌐  Network",
+            "net": "🌐  Network" + ("  (DEV)" if DEV_MODE else ""),
             "timer": "⏱  Timer",
             "uninstall": "🗑  Uninstall"
         }
         for key, label in self.nav_labels.items():
             b = tk.Button(
-                side, text=label, anchor="w", width=15,
+                side, text=label, anchor="w", width=17,
                 font=("Segoe UI", 11), relief="flat", bd=0,
                 padx=14, pady=12, cursor="hand2",
                 command=lambda k=key: self.show_page(k)
@@ -581,13 +581,26 @@ class BreakTimerApp:
             self.net_ctrl.pack_forget()
             if mode == "offline":
                 self.net_form.pack(anchor="w")
-            else:
+            elif mode in ("pending", "online"):
                 self.net_ctrl.pack(anchor="w")
                 self.btn_net_ctrl.config(
                     text="✕  Cancel request" if mode == "pending" else "■  End session"
                 )
+            # 开发者模式:只保留说明,不显示申请入口和额度条
+            if mode == "dev":
+                self.net_bar.pack_forget()
+                self.net_lbl_quota.pack_forget()
+            else:
+                self.net_bar.pack(fill="x", pady=(16, 6))
+                self.net_lbl_quota.pack(anchor="w")
 
-        if mode == "offline":
+        if mode == "dev":
+            self._net_set_status("Developer mode — network control disabled", COLORS["warn"])
+            self.net_lbl_time.config(text="Unrestricted")
+            self.net_lbl_sub.config(
+                text="config.DEV_MODE = True: blocking is off, and any leftover block was released at startup."
+            )
+        elif mode == "offline":
             self._net_set_status("Offline", COLORS["text_dim"])
             self.net_lbl_time.config(text="Offline")
             if n.remaining < 60:
@@ -607,10 +620,11 @@ class BreakTimerApp:
             self.net_lbl_time.config(text=fmt_ms(n.grant_left))
             self.net_lbl_sub.config(text="Session time left. Network is cut automatically at zero.")
 
-        self.net_bar["value"] = min(n.used, DAILY_LIMIT)
-        self.net_lbl_quota.config(
-            text=f"Used today: {fmt_hm(n.used)} / {fmt_hm(DAILY_LIMIT)}     Left: {fmt_hm(n.remaining)}"
-        )
+        if mode != "dev":
+            self.net_bar["value"] = min(n.used, DAILY_LIMIT)
+            self.net_lbl_quota.config(
+                text=f"Used today: {fmt_hm(n.used)} / {fmt_hm(DAILY_LIMIT)}     Left: {fmt_hm(n.remaining)}"
+            )
 
     def _net_tick(self):
         now = time.monotonic()
