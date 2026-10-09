@@ -24,11 +24,10 @@ IDLE, RUNNING, READY_BREAK, ON_BREAK = range(4)
 
 # ══════════════ 联网限制配置 ══════════════
 DAILY_LIMIT = 2 * 3600       # 每天最多联网 2h (秒)
-COOLDOWN = 5 * 60             # 申请后的冷静期 5min (秒)
+COOLDOWN = 5 * 60            # 申请后的冷静期 5min (秒)
 BLOCK_MODE = "adapter"       # "adapter"=禁用物理网卡(彻底) / "firewall"=防火墙拦截出站(恢复快)
 ENFORCE_EVERY = 60           # 离线状态下每隔多少秒重新断网一次(防止手动启用网卡)
 TICK_CLAMP = 30              # 单次计时最多计入的秒数(防止休眠/卡顿造成异常)
-DEV_MODE = False
 
 # ══════════════ 应用信息 / 整点记录配置 ══════════════
 APP_NAME = "Obliphur's Integrated Terminal"   # 窗口标题 & LocalLow 下的文件夹名
