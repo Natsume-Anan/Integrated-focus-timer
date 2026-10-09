@@ -1,4 +1,5 @@
-WARNING:Including AI generated codes.
+WARNING:包含AI生成的代码
+包含关闭网卡等强制性断网措施(可以在config改为防火墙模式)
 
 # Obliphur's Integrated Terminal
 
