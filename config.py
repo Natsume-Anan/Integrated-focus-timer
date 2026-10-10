@@ -34,6 +34,7 @@ APP_NAME = "Obliphur's Integrated Terminal"   # 窗口标题 & LocalLow 下的�
 OLD_APP_DIR = "mrsTimer"                      # 旧文件夹名(首次启动时自动迁移数据)
 FILL_WINDOW = timedelta(hours=1)              # 提示音后多久内可填写,超时且为空 → 自动填 Sleeping
 AUTO_TEXT = "Sleeping"
+HOUR_LOG_ENABLED = True                       # 整点记录的默认开关状态(可在程序里随时切换,会记住上次选择)
 CHIME_WAV = ""                                # 想用自己的提示音:填 .wav 路径;留空则用内置三音提示
 LOG_HOURS = 23                                # 只记录 0:00–23:00 共 23 段(最后一段 23:00–24:00 不记录)
 

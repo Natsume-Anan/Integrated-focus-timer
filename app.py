@@ -160,7 +160,9 @@ class BreakTimerApp:
         self.pages = {}
         self.pages["cal"] = CalendarPage(self.content, self.dm)
         self.pages["log"] = HourLogPage(
-            self.content, self.dm, on_text_changed=self.update_log_badge
+            self.content, self.dm,
+            on_text_changed=self.update_log_badge,
+            on_toggle=self.on_hour_log_toggle
         )
         self.pages["net"] = tk.Frame(self.content, bg=bg)
         self.pages["timer"] = tk.Frame(self.content, bg=bg)
@@ -404,6 +406,9 @@ class BreakTimerApp:
         slot = self.next_hour - timedelta(hours=1)
         self._schedule_hourly()
         self.dm.finalize_hours()
+        if not self.dm.hour_enabled:      # 开关关闭:不提示、不催填
+            self.update_log_badge()
+            return
         if slot.hour >= LOG_HOURS:
             return
         self._wait_chime(self._play_chime(), slot)
@@ -431,6 +436,8 @@ class BreakTimerApp:
         if t is not None and t.is_alive():
             self.root.after(200, lambda: self._wait_chime(t, slot))
             return
+        if not self.dm.hour_enabled:      # 提示音播放期间被关掉
+            return
         self.dm.prompt_slot = slot
         self.update_log_badge()
         if self.current_page == "log":
@@ -453,8 +460,17 @@ class BreakTimerApp:
 
     def update_log_badge(self):
         b = self.nav_btns.get("log")
-        if b:
+        if not b:
+            return
+        if not self.dm.hour_enabled:
+            b.config(text=self.nav_labels["log"] + "  (off)")
+        else:
             b.config(text=self.nav_labels["log"] + (" ●" if self.dm.awaiting_slot() else ""))
+
+    def on_hour_log_toggle(self, enabled: bool):
+        """整点记录开关变化:刷新侧栏标记与提示状态"""
+        self.update_log_badge()
+        self.pages["log"].refresh()
 
     # ───────────── 联网申请页 ─────────────
     def _build_net_page(self, page):

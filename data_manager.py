@@ -9,7 +9,9 @@ import shutil
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
-from config import APP_NAME, OLD_APP_DIR, FILL_WINDOW, AUTO_TEXT, LOG_HOURS
+from config import (
+    APP_NAME, OLD_APP_DIR, FILL_WINDOW, AUTO_TEXT, LOG_HOURS, HOUR_LOG_ENABLED
+)
 
 
 class DataManager:
@@ -34,6 +36,7 @@ class DataManager:
         self.study_data: Dict[str, float] = {}
         self.hour_days: Dict[str, Dict[str, str]] = {}
         self.hour_cursor: Optional[datetime] = None
+        self.hour_enabled: bool = HOUR_LOG_ENABLED   # 整点记录总开关
         self.today_date = datetime.now().strftime('%Y-%m-%d')
         self.prompt_slot: Optional[datetime] = None  # 最近一次提示音对应的“上一个小时”
 
@@ -151,6 +154,7 @@ class DataManager:
             with open(self.hour_file, 'r', encoding='utf-8') as f:
                 d = json.load(f)
             self.hour_days = d.get("days", {})
+            self.hour_enabled = bool(d.get("enabled", self.hour_enabled))
             cur = d.get("cursor")
             self.hour_cursor = datetime.fromisoformat(cur) if cur else None
         except Exception:
@@ -169,11 +173,26 @@ class DataManager:
         try:
             with open(self.hour_file, 'w', encoding='utf-8') as f:
                 json.dump({
+                    "enabled": self.hour_enabled,
                     "cursor": self.hour_cursor.isoformat() if self.hour_cursor else None,
                     "days": self.hour_days
                 }, f, ensure_ascii=False, indent=1)
         except IOError:
             pass
+
+    def set_hour_enabled(self, enabled: bool):
+        """切换整点记录开关:关闭时不再提示/不再自动补记,重新开启从当前小时起记"""
+        enabled = bool(enabled)
+        if enabled == self.hour_enabled:
+            return
+        self.hour_enabled = enabled
+        now = datetime.now()
+        if enabled:
+            # 关闭期间的时段保持空白,不做任何补记
+            self.hour_cursor = now.replace(minute=0, second=0, microsecond=0)
+        else:
+            self.prompt_slot = None
+        self.save_hour_log()
 
     def get_hour_text(self, date_str: str, hour: int) -> str:
         return self.hour_days.get(date_str, {}).get(str(hour), "")
@@ -196,6 +215,12 @@ class DataManager:
             self.save_hour_log()
             return
         self.hour_cursor = max(self.hour_cursor, today0)   # 昨天及更早的不再处理
+        if not self.hour_enabled:
+            # 关闭状态下不写入任何自动记录,游标直接跟到当前小时
+            if self.hour_cursor < floor:
+                self.hour_cursor = floor
+                self.save_hour_log()
+            return
         changed = False
         while self.hour_cursor + timedelta(hours=1) + FILL_WINDOW <= now:
             ds, h = self.hour_cursor.strftime('%Y-%m-%d'), self.hour_cursor.hour
@@ -208,6 +233,8 @@ class DataManager:
 
     def awaiting_slot(self) -> Optional[datetime]:
         """当前仍在等待填写的小时(datetime),没有则返回 None"""
+        if not self.hour_enabled:
+            return None
         s = self.prompt_slot
         if s is None:
             return None
