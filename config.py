@@ -29,7 +29,6 @@ TICK_CLAMP = 30
 
 
 
-
 APP_NAME = "Obliphur's Integrated Terminal"   
 OLD_APP_DIR = "mrsTimer"
 FILL_WINDOW = timedelta(hours=1)              
@@ -38,7 +37,6 @@ HOUR_LOG_ENABLED = True
 CHIME_WAV = ""
 LOG_HOURS = 23                                
 LANGUAGE = "zh"
-
 
 
 
