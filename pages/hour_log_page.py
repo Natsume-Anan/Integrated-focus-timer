@@ -147,12 +147,12 @@ class HourLogPage(tk.Frame):
                 text=(tr("只记录今天.每次提示音后填写上一小时做了什么;")
                       + " " + tr("留空 {h} 小时 → 自动记为「{text}」.").format(
                           h=fill_hours, text=auto_text)
-                      + " " + tr("（开关在 Settings 页,改动 48 小时后生效）"))
+                      + " " + tr("(开关在 Settings 页,改动 48 小时后生效)"))
             )
         else:
             self.lbl_hint.config(
-                text=(tr("整点记录已关闭 —— 不响铃、不自动补记、也不记录任何内容.")
-                      + " " + tr("（开关在 Settings 页,改动 48 小时后生效）"))
+                text=(tr("整点记录已关闭 —— 不响铃,不自动补记,也不记录任何内容.")
+                      + " " + tr("(开关在 Settings 页,改动 48 小时后生效)"))
             )
         self.lbl_date.config(
             text=tr("{date}(今天)").format(date=self.view_date)

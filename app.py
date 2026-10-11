@@ -20,7 +20,7 @@ from i18n import tr
 from net_guard import NetGuard, LOAN_MULTIPLIER, LOAN_MULTIPLIER_TOMORROW
 from data_manager import DataManager
 from settings_manager import SettingsManager
-from pages import CalendarPage, HourLogPage, SettingsPage
+from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage
 from pages.widgets import wrap_label
 
 
@@ -203,6 +203,7 @@ class BreakTimerApp:
         self.nav_labels = {
             "timer": tr("⏱  Timer"),
             "net": tr("🌐  Network"),
+            "rules": tr("🛡  Rules"),
             "log": tr("📝  Hour Log"),
             "cal": tr("📅  Calendar"),
             "settings": tr("⚙  Settings"),
@@ -241,6 +242,11 @@ class BreakTimerApp:
             on_dev_mode=self.on_dev_mode_changed,
             on_language=self.on_language_changed,
             on_font_scale=self.on_font_scale_changed
+        )
+        self.pages["rules"] = RulesPage(
+            self.content, self.net.proxy, settings=self.settings,
+            on_changed=self.on_settings_changed,
+            on_open_settings=lambda: self.show_page("settings")
         )
         self.pages["net"] = tk.Frame(self.content, bg=bg)
         self.pages["timer"] = tk.Frame(self.content, bg=bg)
@@ -290,6 +296,8 @@ class BreakTimerApp:
             self._schedule_hourly()
             if self.state == RUNNING:
                 self.schedule_update()
+            self._schedule_apply_check()
+            self._net_tick()
         finally:
             self._rebuilding = False
 
@@ -335,6 +343,8 @@ class BreakTimerApp:
             self.pages["cal"].refresh()
         elif key == "net":
             self.refresh_net(force=True)
+        elif key == "rules":
+            self.pages["rules"].refresh(force=True)
         elif key == "log":
             self.pages["log"].show()
         elif key == "settings":
@@ -626,10 +636,14 @@ class BreakTimerApp:
             return due
 
         self._sync_hour_log_setting()
+        if "NET_MODE" in due:
+            self.net.sync_mode()
+        if "rules" in self.pages:
+            self.pages["rules"].refresh(force=True)
         self.pages["settings"].refresh()
         self.update_settings_badge()
         self.refresh_net(force=True)
-        labels = "、".join(tr(self.settings.display(k)) for k in due)
+        labels = ",".join(tr(self.settings.display(k)) for k in due)
         toast.success(tr("48 小时冷静期已结束,以下配置从现在开始生效:") + "\n" + labels)
         self._log_notice(f"SETTINGS applied: {', '.join(due)}")
         return due
@@ -676,6 +690,11 @@ class BreakTimerApp:
 
     def on_settings_changed(self, status: str = "", key: str = None):
         self.update_settings_badge()
+        if "rules" in self.pages and key in ("FILTER_MODE", "NET_MODE", None):
+            self.pages["rules"].refresh(force=True)
+        if key in ("NET_MODE", None) and self.net.sync_mode():
+            self.refresh_net(force=True)
+            self._log_notice(f"NET_MODE -> {self.net.net_mode}")
         if status != "instant":
             return
         if key in ("HOUR_LOG_ENABLED", "AUTO_TEXT", "LOG_HOURS", None):
@@ -853,7 +872,7 @@ class BreakTimerApp:
             return
         today_cost, loan_cost, total, grant = self.net.loan_plan(minutes)
         if not toast.ask(
-            tr("紧急贷款会跳过冷静期立刻联网,额度按「今天 ×{a:g}、预支明天 ×{b:g}」计费.\n\n申请: {m} 分钟\n实际放行: {grant}\n计费: {total} 额度(今天 {today} ×{a:g} + 预支明天 {borrowed} ×{b:g})\n\n确定吗?").format(
+            tr("紧急贷款会跳过冷静期立刻联网,额度按「今天 ×{a:g},预支明天 ×{b:g}」计费.\n\n申请: {m} 分钟\n实际放行: {grant}\n计费: {total} 额度(今天 {today} ×{a:g} + 预支明天 {borrowed} ×{b:g})\n\n确定吗?").format(
                 a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW, m=minutes,
                 grant=fmt_hm(grant), total=fmt_hm(total),
                 today=fmt_hm(today_cost), borrowed=fmt_hm(loan_cost)),
@@ -931,8 +950,8 @@ class BreakTimerApp:
             self._net_set_status("Developer mode — network unrestricted", COLORS["warn"])
             self.net_lbl_time.config(text="DEV")
             self.net_lbl_sub.config(
-                text="开发者模式已开启:本程序不会断网,也不会申请/计时。\n"
-                     "调试完成后请到 Settings 页关掉它。"
+                text="开发者模式已开启:本程序不会断网,也不会申请/计时.\n"
+                     "调试完成后请到 Settings 页关掉它."
             )
             self.net_form.pack_forget()
             self.net_ctrl.pack_forget()
@@ -999,7 +1018,7 @@ class BreakTimerApp:
             self.net_lbl_time.config(text=fmt_ms(n.grant_left))
             if n.grant_loan:
                 self.net_lbl_sub.config(
-                    text=tr("⚡ 贷款会话 —— 今天 ×{a:g}、预支 ×{b:g}.可继续使用 {left};已预支 {borrowed}").format(
+                    text=tr("⚡ 贷款会话 —— 今天 ×{a:g},预支 ×{b:g}.可继续使用 {left};已预支 {borrowed}").format(
                         a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW,
                         left=fmt_hm(n.grant_left), borrowed=fmt_hm(n.bucket_loan_t))
                 )
@@ -1064,6 +1083,8 @@ class BreakTimerApp:
         self._net_last = now
         event = self.net.tick(dt)
         self.refresh_net()
+        if self.current_page == "rules" and "rules" in self.pages:
+            self.pages["rules"].refresh()
         self.net_job = self.root.after(1000, self._net_tick)
 
         if event == "started":
@@ -1188,7 +1209,7 @@ class BreakTimerApp:
                 pass
 
         toast.info(
-            tr("全部数据已清除、网络已恢复.\n累计卸载次数: {n}").format(
+            tr("全部数据已清除,网络已恢复.\n累计卸载次数: {n}").format(
                 n=self.dm.uninstall_count)
             + ("" if not self.var_del_self.get() else
                (tr("\n程序文件已删除.") if removed_self else

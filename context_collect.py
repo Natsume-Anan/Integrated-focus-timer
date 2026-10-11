@@ -2,18 +2,18 @@
 """
 本地上下文采集:已安装应用 + 浏览器访问记录
 ──────────────────────────────────────────
-用途只有一个:在**用户明确同意**之后,收集一份「本机大概装了什么、常上哪些网站」
-的概要,交给 AI 作为规则建议的参考 —— 否则模型只能凭空猜程序名和域名。
+用途只有一个:在**用户明确同意**之后,收集一份「本机大概装了什么,常上哪些网站」
+的概要,交给 AI 作为规则建议的参考 —— 否则模型只能凭空猜程序名和域名.
 
 隐私约定(重要,改这个文件前请先读):
-  · 浏览器记录**只取「域名 + 访问次数」**,不读取具体网址、页面标题、搜索词;
+  · 浏览器记录**只取「域名 + 访问次数」**,不读取具体网址,页面标题,搜索词;
   · 数据只存在于内存里,交给 AI 的文本由界面显示给用户确认后才发送,
-    本模块**不写任何文件、不做任何持久化、不联网**;
-  · 所有采集都必须由调用方拿到用户同意后触发(见 pages/rules_page.py 的弹窗)。
+    本模块**不写任何文件,不做任何持久化,不联网**;
+  · 所有采集都必须由调用方拿到用户同意后触发(见 pages/rules_page.py 的弹窗).
 
-支持的大众浏览器:Chrome / Edge / Firefox / Brave。
+支持的大众浏览器:Chrome / Edge / Firefox / Brave.
 Chromium 系(Chrome / Edge / Brave)共用同一套 History SQLite 结构,
-Firefox 单独一套(places.sqlite),所以只有两条解析路径。
+Firefox 单独一套(places.sqlite),所以只有两条解析路径.
 """
 
 import glob
@@ -38,7 +38,7 @@ HISTORY_WINDOWS = (30, 90, 365)          # 可选的回看天数
 
 # ══════════════ 已安装应用 ══════════════
 # 开始菜单里的快捷方式最能代表「用户自己会觉得存在的程序」;
-# App Paths 注册表再补一轮(很多程序不建快捷方式但有 App Paths 项)。
+# App Paths 注册表再补一轮(很多程序不建快捷方式但有 App Paths 项).
 _SKIP_EXE = {
     "unins000.exe", "unins001.exe", "uninstall.exe", "setup.exe", "install.exe",
     "update.exe", "updater.exe", "crashpad_handler.exe", "crashreporter.exe",
@@ -54,8 +54,8 @@ _SKIP_NAME_HINT = ("update", "updater", "uninstall", "卸载", "helper", "redist
                    "release notes", "license", "readme", "read me", "help", "manual",
                    "documentation", "更多", "more", "what is new", "what's new",
                    "getting started", "welcome to", "start menu")
-# 一眼就知道不是"需要联网的程序"的可执行文件(系统组件、输入法、驱动管理器……)。
-# 与 _SKIP_EXE 的区别:这里是**子串**匹配,专门拦掉安装器/卸载器这一类变体名。
+# 一眼就知道不是"需要联网的程序"的可执行文件(系统组件,输入法,驱动管理器……).
+# 与 _SKIP_EXE 的区别:这里是**子串**匹配,专门拦掉安装器/卸载器这一类变体名.
 _SKIP_EXE_HINT = ("favicon.exe", "dfshim", "wab.exe", "wabmig",
                   "tabtip.exe", "table30.exe", "odbcad32.exe", "sapisvr.exe",
                   "store.exe", "licensemanager", "cmstp", "mshta",
@@ -65,8 +65,8 @@ _SKIP_EXE_HINT = ("favicon.exe", "dfshim", "wab.exe", "wabmig",
                   "unins", "setup.exe", "installer.exe", "install.exe",
                   "update.exe", "updater.exe")
 
-# Windows 自带的系统工具 / 管理单元。它们都在开始菜单里,但对"该放行哪个程序"
-# 毫无参考价值,还会把真正的应用挤出上限(清单多了 120 条根本读不下去)。
+# Windows 自带的系统工具 / 管理单元.它们都在开始菜单里,但对"该放行哪个程序"
+# 毫无参考价值,还会把真正的应用挤出上限(清单多了 120 条根本读不下去).
 _SKIP_NAME_EXACT = {
     "administrative tools", "component services", "computer management",
     "control panel", "event viewer", "disk cleanup", "character map",
@@ -138,13 +138,13 @@ def _add_app(found: dict, name: str, exe: str = None, prefer: bool = False,
 
 
 def _exe_from_lnk(path: str) -> str:
-    """不依赖 pywin32 从 .lnk 里找目标 exe 名。
+    """不依赖 pywin32 从 .lnk 里找目标 exe 名.
 
     .lnk 是二进制格式,完整解析要处理 LinkTargetIDList / LinkInfo 两套结构;
     这里只需要「目标是哪个 exe」,所以直接抽取结尾的 .exe 字符串即可 ——
-    比引入 pywin32 依赖划算得多,也足够给出规则建议用的名字。
+    比引入 pywin32 依赖划算得多,也足够给出规则建议用的名字.
 
-    找不到就退回快捷方式自身的名字(如「Steam.exe」),它通常就等于目标文件名。
+    找不到就退回快捷方式自身的名字(如「Steam.exe」),它通常就等于目标文件名.
     """
     import struct as _struct
     try:
@@ -169,10 +169,10 @@ def _exe_from_lnk(path: str) -> str:
 
 
 def apps_from_start_menu(found: dict) -> None:
-    """开始菜单快捷方式(当前用户 + 所有用户两份)。
+    """开始菜单快捷方式(当前用户 + 所有用户两份).
 
     优先用 pywin32 解析快捷方式;不可用时退回读 .lnk 二进制 ——
-    否则整批用户可见的应用都会因为「解不出目标」而被丢掉。
+    否则整批用户可见的应用都会因为「解不出目标」而被丢掉.
     """
     roots = [
         os.path.join(os.environ.get("APPDATA", ""),
@@ -254,7 +254,7 @@ def collect_apps() -> list:
 
 
 # ══════════════ 浏览器记录(只有域名 + 次数) ══════════════
-# 明确不采集的地址:搜索引擎结果页、扩展内部页、本机地址
+# 明确不采集的地址:搜索引擎结果页,扩展内部页,本机地址
 _SKIP_DOMAIN = (
     "localhost", "127.0.0.1", "0.0.0.0", "::1",
     "googleusercontent.com", "gstatic.com", "googleapis.com",
@@ -330,7 +330,7 @@ def browser_history_paths() -> list:
 
 
 def _copy_sidecar(path: str, tmpdir: str) -> str:
-    """把 sqlite 库(含 -wal/-shm)复制到临时目录,避免和正在运行的浏览器抢锁。"""
+    """把 sqlite 库(含 -wal/-shm)复制到临时目录,避免和正在运行的浏览器抢锁."""
     name = os.path.basename(path).replace(" ", "_")
     dst = os.path.join(tmpdir, name)
     shutil.copy2(path, dst)
@@ -345,7 +345,7 @@ def _copy_sidecar(path: str, tmpdir: str) -> str:
 
 
 def _query(db: str, sql: str, params=()) -> list:
-    """只读查询;失败(损坏/锁住/结构不同)返回空列表,不影响其它浏览器。"""
+    """只读查询;失败(损坏/锁住/结构不同)返回空列表,不影响其它浏览器."""
     try:
         con = sqlite3.connect("file:%s?mode=ro" % db.replace("?", "%3f"), uri=True)
     except sqlite3.Error:
@@ -397,15 +397,15 @@ def _tally(rows) -> dict:
 
 
 def collect_browser_domains(days: int = 90, progress=None) -> tuple:
-    """跨浏览器汇总最近 days 天的域名访问次数。
+    """跨浏览器汇总最近 days 天的域名访问次数.
 
     返回 (domains, sources):
       domains = [{"domain", "visits", "browsers": [...]}] 按访问次数降序
       sources = [{"name", "profiles", "error"}] 每个浏览器用了几个库 / 是否读不到
     """
     days = days if days in HISTORY_WINDOWS else 90
-    # 注意:时间阈值必须用整数运算。`(ts - days*86400) * 1e6` 会超过 float 的
-    # 2^53 精度上限,微秒被舍入 → 边界附近的记录会被莫名丢掉。
+    # 注意:时间阈值必须用整数运算.`(ts - days*86400) * 1e6` 会超过 float 的
+    # 2^53 精度上限,微秒被舍入 → 边界附近的记录会被莫名丢掉.
     cutoff = datetime.now() - timedelta(days=days)
     min_unix_us = int(cutoff.timestamp()) * 1000 * 1000
     chromium_min = min_unix_us + _CHROME_EPOCH_OFFSET_US
@@ -459,13 +459,13 @@ def collect_browser_domains(days: int = 90, progress=None) -> tuple:
 def build_context_text(apps: list = None, domains: list = None,
                        days: int = 90, app_limit: int = 80,
                        domain_limit: int = MAX_DOMAINS) -> str:
-    """把采集结果拼成一段参考信息(纯文本,供用户预览与随请求发送)。
+    """把采集结果拼成一段参考信息(纯文本,供用户预览与随请求发送).
 
-    **每项独占一行**。上百条应用若挤成一行再自动折行,预览区会变成一坨,
-    根本没法核对(这正是"页面错乱"的来源之一)。
+    **每项独占一行**.上百条应用若挤成一行再自动折行,预览区会变成一坨,
+    根本没法核对(这正是"页面错乱"的来源之一).
 
-    文案走 i18n.tr():这段字会显示给用户看、也会发给模型,界面语言是英文时
-    不该漏出中文。带数值的部分必须先查表再 .format(),不能先拼好。
+    文案走 i18n.tr():这段字会显示给用户看,也会发给模型,界面语言是英文时
+    不该漏出中文.带数值的部分必须先查表再 .format(),不能先拼好.
     """
     from i18n import tr
 
@@ -488,7 +488,7 @@ def build_context_text(apps: list = None, domains: list = None,
 
 def collect_context(want_apps: bool = True, want_history: bool = True,
                     days: int = 90, progress=None) -> dict:
-    """采集入口。返回:
+    """采集入口.返回:
 
         {"apps": [...], "domains": [...], "days": n,
          "sources": [...],             # 各浏览器读取情况(用于告诉用户"没读到")

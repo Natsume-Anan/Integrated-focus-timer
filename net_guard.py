@@ -11,6 +11,7 @@ from datetime import datetime
 
 import config
 from config import fmt_hm
+from netproxy import ProxyController
 
 
 LOAN_MULTIPLIER = 2.0
@@ -36,6 +37,11 @@ class NetGuard:
         self.bucket_loan_t = 0.0
         self.grant_loan = False
         self.pending = None
+        self.proxy = ProxyController(
+            data_dir, mode_getter=lambda: getattr(config, "FILTER_MODE", "blacklist"),
+            dev_getter=config.dev_mode_enabled)
+        self._nic_off_by_fallback = False
+        self._applied_mode = self.net_mode
         self._load()
         self._last_save = time.monotonic()
         self._last_enforce = time.monotonic()
@@ -85,6 +91,10 @@ class NetGuard:
     @property
     def dev_mode(self) -> bool:
         return config.dev_mode_enabled()
+
+    @property
+    def net_mode(self) -> str:
+        return "proxy" if getattr(config, "NET_MODE", "adapter") == "proxy" else "adapter"
 
     @property
     def online(self) -> bool:
@@ -148,7 +158,13 @@ class NetGuard:
         return f"Get-NetAdapter -Physical | {verb}-NetAdapter -Confirm:$false"
 
     @staticmethod
-    def _run(cmd: str):
+    def _run(cmd):
+        if callable(cmd):
+            try:
+                cmd()
+            except Exception:
+                pass
+            return
         if sys.platform != "win32":
             return
         try:
@@ -165,26 +181,70 @@ class NetGuard:
         while True:
             self._run(self.q.get())
 
+    def _proxy_apply(self, online: bool):
+        """proxy 模式的「联网 / 断网」:网卡保持开着,只切换过滤代理的放行策略.
+
+        任何一步失败都不能留下「没有任何限制」的状态 —— 离线时退回禁用网卡."""
+        try:
+            self.proxy.start()
+            self.proxy.set_online(online)
+            if self._nic_off_by_fallback:
+                self._nic_off_by_fallback = False
+                self._run(self._cmd(True))
+        except Exception as e:
+            self._log(f"PROXY    failed ({e}); falling back to adapter cut-off")
+            if not online:
+                self._nic_off_by_fallback = True
+                self._run(self._cmd(False))
+
+    def _enter_proxy(self):
+        """先让过滤代理就位,再放开网卡 —— 切换瞬间不留空窗."""
+        self._proxy_apply(self.online)
+        if not self._nic_off_by_fallback:
+            self._run(self._cmd(True))
+
+    def _backend_set(self, online: bool, sync: bool = False):
+        job = (lambda: self._proxy_apply(online)) if self.net_mode == "proxy" \
+            else self._cmd(online)
+        if sync:
+            self._run(job)
+        else:
+            self.q.put(job)
+
     def block(self, sync: bool = False):
 
         if self.dead or self.dev_mode:
             return
-        cmd = self._cmd(False)
-        if sync:
-            self._run(cmd)
-        else:
-            self.q.put(cmd)
+        self._backend_set(False, sync)
 
     def unblock(self):
-        self.q.put(self._cmd(True))
+        self._backend_set(True)
 
     def ensure_online(self):
+        """彻底解除限制:网卡全开 + 过滤代理关闭并还原系统代理."""
         while True:
             try:
                 self.q.get_nowait()
             except queue.Empty:
                 break
+        self._nic_off_by_fallback = False
         self._run(self._cmd(True))
+        self._run(lambda: self.proxy.stop(restore=True))
+
+    def sync_mode(self):
+        """设置里的 NET_MODE 变了(立即生效或冷静期到期)就切换后端;没变则什么都不做."""
+        if self.dead or self._applied_mode == self.net_mode:
+            return False
+        self._applied_mode = self.net_mode
+        if self.dev_mode:
+            return True
+        if self.net_mode == "proxy":
+            self.q.put(self._enter_proxy)
+        else:
+            self.q.put(self._cmd(self.online))
+            self.q.put(lambda: self.proxy.stop(restore=True))
+        self._log(f"MODE     switched to {self.net_mode}")
+        return True
 
 
     def loan_plan(self, minutes: float):
@@ -413,6 +473,10 @@ class NetGuard:
                 event = "ended"
             elif now - self._last_save >= 5:
                 self._save()
+            if self.net_mode == "proxy" and now - self._last_enforce >= self.enforce_every:
+                self._last_enforce = now
+                if self.q.empty():
+                    self.q.put(lambda: self._proxy_apply(self.online))
         elif now - self._last_enforce >= self.enforce_every:
             self._last_enforce = now
             if self.q.empty():
@@ -426,8 +490,10 @@ def _selftest():
     import datetime as _dt
     import config
 
+    had_dev = hasattr(config, "DEV_MODE")
     saved = (config.DAILY_LIMIT, config.COOLDOWN,
-             config.TICK_CLAMP, config.DEV_MODE)
+             config.TICK_CLAMP, getattr(config, "DEV_MODE", False))
+    saved_mode = getattr(config, "NET_MODE", "adapter")
     config.DAILY_LIMIT, config.COOLDOWN = 3600, 300
     config.TICK_CLAMP = 10 ** 6
     config.DEV_MODE = False
@@ -618,10 +684,73 @@ def _selftest():
         assert n.pending is None, "开发者模式下挂起的申请应被丢弃"
         config.DEV_MODE = False
         assert n.mode == "offline" and not n.online
+
+
+        class _FakeProxy:
+            def __init__(self):
+                self.calls = []
+                self.fail = False
+                self.online = None
+
+            def start(self):
+                self.calls.append("start")
+                if self.fail:
+                    raise OSError("boom")
+
+            def set_online(self, v):
+                self.calls.append(("online", v))
+                self.online = v
+
+            def stop(self, restore=True):
+                self.calls.append(("stop", restore))
+
+        fp = _FakeProxy()
+        n.proxy = fp
+        n.dead = False
+        ran = []
+        n._run = lambda cmd: ran.append(cmd if isinstance(cmd, str) else "<fn>") \
+            or (cmd() if callable(cmd) else None)
+        config.NET_MODE = "proxy"
+        assert n.net_mode == "proxy" and n.sync_mode() and not n.sync_mode()
+        while not n.q.empty():
+            n._run(n.q.get_nowait())
+        assert fp.online is False and "start" in fp.calls, fp.calls
+        assert any("Enable-NetAdapter" in str(c) for c in ran), "进入 proxy 模式后网卡必须是开的"
+
+        fp.calls.clear()
+        n.block(sync=True)
+        assert fp.online is False
+        n.unblock()
+        n._run(n.q.get_nowait())
+        assert fp.online is True and not any("Disable-NetAdapter" in str(c) for c in ran[-3:])
+
+        ran.clear()
+        fp.fail = True
+        n.block(sync=True)
+        assert any("Disable-NetAdapter" in str(c) for c in ran), "代理起不来时必须退回禁用网卡"
+        assert n._nic_off_by_fallback
+        fp.fail = False
+        n.block(sync=True)
+        assert not n._nic_off_by_fallback and any("Enable-NetAdapter" in str(c) for c in ran)
+
+        fp.calls.clear()
+        config.NET_MODE = "adapter"
+        assert n.sync_mode()
+        while not n.q.empty():
+            n._run(n.q.get_nowait())
+        assert ("stop", True) in fp.calls
+
+        fp.calls.clear()
+        n.ensure_online()
+        assert ("stop", True) in fp.calls
+        config.NET_MODE = "adapter"
         return "net_guard selftest OK"
     finally:
         (config.DAILY_LIMIT, config.COOLDOWN,
          config.TICK_CLAMP, config.DEV_MODE) = saved
+        config.NET_MODE = saved_mode
+        if not had_dev and hasattr(config, "DEV_MODE"):
+            del config.DEV_MODE
 
 
 if __name__ == "__main__":

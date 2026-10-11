@@ -37,7 +37,8 @@ HOUR_LOG_ENABLED = True
 CHIME_WAV = ""
 LOG_HOURS = 23                                
 LANGUAGE = "zh"
-
+NET_MODE = "proxy"                            # "adapter" 禁用网卡 / "proxy" 本地代理过滤
+FILTER_MODE = "blacklist"                     # proxy 模式下生效的名单:"blacklist" / "whitelist"
 
 
 
@@ -116,6 +117,14 @@ def dev_mode_enabled() -> bool:
 
 
 
+# 本地覆盖:config_local.py 已写进 .gitignore,不会上传.
+# 开发时可在里面写 `DEV_MODE = True`(跳过 48 小时等待,不真正断网),或覆盖上面任何一个常量.
+try:
+    from config_local import *  # noqa: F401,F403
+except ImportError:
+    pass
+
+
 DEFAULT_SETTINGS = {
     "DAILY_LIMIT": DAILY_LIMIT,
     "COOLDOWN": COOLDOWN,
@@ -125,7 +134,9 @@ DEFAULT_SETTINGS = {
     "ENFORCE_EVERY": ENFORCE_EVERY,
     "CHIME_WAV": CHIME_WAV,
     "LANGUAGE": LANGUAGE,
-    "FONT_SCALE": 1.0,
+    "NET_MODE": NET_MODE,
+    "FILTER_MODE": FILTER_MODE,
+    "FONT_SCALE": 0.9,
 }
 
 

@@ -33,3 +33,16 @@ logs/
 *.swo
 .DS_Store
 Thumbs.db
+
+# 本地数据与个人配置:不要提交.
+# 从 GitHub 下载的用户使用 defaults/ 里的默认模板(设置默认值在 config.py).
+config_local.py
+app_settings.json
+net_rules.json
+rules.json
+ai_config.json
+net_state.json
+sysproxy_backup.json
+study_log.json
+hour_log.json
+*.uninstall.json

@@ -41,7 +41,7 @@ SETTINGS_SCHEMA = [
             (str(h * 3600), f"{h:g} h") for h in (0.5, 1, 1.5, 2, 3, 4, 6, 8)
         ],
         "fmt": _fmt_min,
-        "desc": "今天最多能联网多久。改动要 48 小时后才生效,期间仍按旧额度计算。",
+        "desc": "今天最多能联网多久.改动要 48 小时后才生效,期间仍按旧额度计算.",
     },
     {
         "key": "COOLDOWN", "label": "联网冷静期",
@@ -50,21 +50,41 @@ SETTINGS_SCHEMA = [
             (str(m * 60), f"{m} min") for m in (1, 2, 5, 10, 15, 20, 30, 45, 60)
         ],
         "fmt": _fmt_min,
-        "desc": "提出申请后等多久才真的联网。想立刻联网请用 Network 页的紧急贷款(今天 2 倍 / 预支明天 3 倍)。",
+        "desc": "提出申请后等多久才真的联网.想立刻联网请用 Network 页的紧急贷款(今天 2 倍 / 预支明天 3 倍).",
+    },
+    {
+        "key": "NET_MODE", "label": "断网方式",
+        "kind": "choice", "apply": APPLY_DELAY,
+        "choices": [
+            ("adapter", "禁用网卡 (Adapter)"),
+            ("proxy", "本地代理过滤 (Proxy)"),
+        ],
+        "fmt": lambda v: "Proxy" if v == "proxy" else "Adapter",
+        "desc": "Adapter:离线时直接禁用物理网卡.Proxy:网卡保持开启,由本地代理按 Rules 页的黑白名单放行 / 拦截.",
+    },
+    {
+        "key": "FILTER_MODE", "label": "过滤名单模式",
+        "kind": "choice", "apply": APPLY_DELAY,
+        "choices": [
+            ("blacklist", "黑名单模式"),
+            ("whitelist", "白名单模式"),
+        ],
+        "fmt": lambda v: "Whitelist" if v == "whitelist" else "Blacklist",
+        "desc": "仅 Proxy 断网方式下有效.黑名单模式:默认放行,只拦名单内.白名单模式:默认拦截,离线只放行名单内,联网会话中全放行.",
     },
     {
         "key": "HOUR_LOG_ENABLED", "label": "整点记录开关",
         "kind": "choice", "apply": APPLY_DELAY,
         "choices": [("1", "开启 (ON)"), ("0", "关闭 (OFF)")],
         "fmt": lambda v: "ON" if v else "OFF",
-        "desc": "程序启动时整点记录的初始状态;启动后仍可在 Hour Log 页直接切换。",
+        "desc": "程序启动时整点记录的初始状态;启动后仍可在 Hour Log 页直接切换.",
     },
     {
         "key": "LOG_HOURS", "label": "整点记录截止小时",
         "kind": "choice", "apply": APPLY_DELAY,
         "choices": [("22", "22:00"), ("23", "23:00"), ("24", "24:00")],
         "fmt": lambda v: f"{int(v):02d}:00",
-        "desc": "该小时之后不再提示填写(默认 23:00–24:00 不记录)。",
+        "desc": "该小时之后不再提示填写(默认 23:00–24:00 不记录).",
     },
     {
         "key": "AUTO_TEXT", "label": "超时自动记录内容",
@@ -76,7 +96,7 @@ SETTINGS_SCHEMA = [
             ("Distracted", "Distracted(分心)"),
         ],
         "fmt": lambda v: str(v),
-        "desc": "整点后一小时内没填写,就自动记成这段文字。这一项可以立即修改。",
+        "desc": "整点后一小时内没填写,就自动记成这段文字.这一项可以立即修改.",
     },
     {
         "key": "LANGUAGE", "label": "界面语言",
@@ -105,7 +125,7 @@ SETTINGS_SCHEMA = [
             (str(s), f"{s} s") for s in (15, 30, 60, 120, 300)
         ],
         "fmt": _fmt_sec,
-        "desc": "离线状态下每隔多久强制复查并重新断网(越小越难被绕开,代价是更频繁调用系统命令)。",
+        "desc": "离线状态下每隔多久强制复查并重新断网(越小越难被绕开,代价是更频繁调用系统命令).",
     },
     {
         "key": "CHIME_WAV", "label": "整点提示音",
@@ -116,7 +136,7 @@ SETTINGS_SCHEMA = [
         ],
         "fmt": lambda v: "内置三音提示音" if str(v).strip() in ("", "__builtin__") else (
             "Windows 蜂鸣声" if str(v) == "__beep__" else str(v)),
-        "desc": "即时生效。可粘贴本地 .wav 的完整路径。",
+        "desc": "即时生效.可粘贴本地 .wav 的完整路径.",
     },
 ]
 
@@ -280,23 +300,23 @@ class SettingsManager:
         value = self._coerce(key, value)
         first_change = not self.changed.get(key)
 
-        if spec["apply"] == APPLY_INSTANT:
+        if spec["apply"] == APPLY_INSTANT or config.dev_mode_enabled():
             self.effective[key] = value
             self.since[key] = f"{self._now():%Y-%m-%d %H:%M}"
             self.changed[key] = True
             self.pending.pop(key, None)
             self.save()
             self.apply_to_config()
-            return "instant", tr("{label} 已立即生效。", label=tr(spec['label']))
+            return "instant", tr("{label} 已立即生效.", label=tr(spec['label']))
 
         if value == self.value(key):
 
             had = self.pending.pop(key, None) is not None
             if had:
                 self.save()
-                return "staged", tr("{label} 已恢复到当前生效值,排队中的改动已取消。",
+                return "staged", tr("{label} 已恢复到当前生效值,排队中的改动已取消.",
                                     label=tr(spec['label']))
-            return "nochange", tr("{label} 与当前生效值相同。", label=tr(spec['label']))
+            return "nochange", tr("{label} 与当前生效值相同.", label=tr(spec['label']))
 
         now = self._now()
         if first_change:
@@ -307,7 +327,7 @@ class SettingsManager:
             self.pending.pop(key, None)
             self.save()
             self.apply_to_config()
-            return "instant", tr("{label} 首次修改,已立即生效;以后的修改需要等待冷静期。",
+            return "instant", tr("{label} 首次修改,已立即生效;以后的修改需要等待冷静期.",
                                  label=tr(spec['label']))
 
         self.pending[key] = {
@@ -316,7 +336,7 @@ class SettingsManager:
             "apply_at": now + self.delay,
         }
         self.save()
-        return "staged", tr("{label} 已提交,将于 {at}。",
+        return "staged", tr("{label} 已提交,将于 {at}.",
                             label=tr(spec['label']), at=self.staged_apply_text(key))
 
     def staged_apply_text(self, key: str) -> str:
@@ -339,7 +359,8 @@ class SettingsManager:
 
     def promote_due(self) -> list:
         now = self._now()
-        due = [k for k, v in self.pending.items() if v["apply_at"] <= now]
+        dev = config.dev_mode_enabled()
+        due = [k for k, v in self.pending.items() if dev or v["apply_at"] <= now]
         for k in due:
             self.effective[k] = self.pending[k]["value"]
             self.since[k] = f"{now:%Y-%m-%d %H:%M}"

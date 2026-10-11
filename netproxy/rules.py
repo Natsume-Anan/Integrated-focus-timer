@@ -1,0 +1,417 @@
+"""
+规则库:域名 / 应用 × 白名单 / 黑名单
+────────────────────────────────────
+语义:过滤方式二选一,只有当前方式对应的名单会生效.
+
+    黑名单模式   默认放行,只拦黑名单里的域名 / 应用(与是否联网无关)
+    白名单模式   默认拦截,离线时只放行白名单;联网会话中全部放行(联网申请就是为了解除限制)
+
+「放宽」(加入白名单 / 移出黑名单)要等 LOOSEN_DELAY_HOURS 小时才生效,
+「收紧」(加入黑名单 / 移出白名单)立刻生效 —— 与 settings_manager 的冷静期同一个思路.
+第一次改动名单后的 SETUP_GRACE_HOURS 小时是初始化窗口,放宽也立即生效,
+否则第一次配置白名单会被 48 小时卡死.
+
+本模块不依赖 tkinter / config,可以单独测试.
+"""
+
+import json
+import os
+import re
+import threading
+from datetime import datetime, timedelta
+
+WHITE_DOMAINS = "white_domains"
+WHITE_APPS = "white_apps"
+BLACK_DOMAINS = "black_domains"
+BLACK_APPS = "black_apps"
+LIST_KEYS = (WHITE_DOMAINS, WHITE_APPS, BLACK_DOMAINS, BLACK_APPS)
+
+MODE_BLACKLIST = "blacklist"
+MODE_WHITELIST = "whitelist"
+
+LOOSEN_DELAY_HOURS = 48
+SETUP_GRACE_HOURS = 2
+
+_LOOPBACK = {"localhost", "::1", "0.0.0.0"}
+
+
+def keys_for_mode(mode: str) -> tuple:
+    return (WHITE_DOMAINS, WHITE_APPS) if mode == MODE_WHITELIST else (BLACK_DOMAINS, BLACK_APPS)
+
+
+def is_white(key: str) -> bool:
+    return key in (WHITE_DOMAINS, WHITE_APPS)
+
+
+def is_app(key: str) -> bool:
+    return key in (WHITE_APPS, BLACK_APPS)
+
+
+def norm_domain(text) -> str:
+    """网址 / 域名 → 规范主机名;不合法返回 ''.`*.a.com`,`https://a.com/x` 都归一成 `a.com`."""
+    t = str(text or "").strip().lower()
+    if not t:
+        return ""
+    t = re.sub(r'^[a-z][a-z0-9+.\-]*://', '', t)
+    t = re.split(r'[/?#]', t, maxsplit=1)[0]
+    t = t.split('@')[-1]
+    if t.startswith('['):
+        end = t.find(']')
+        host = t[1:end] if end > 0 else ""
+    else:
+        host = t.split(':')[0]
+    host = host.strip('.')
+    if host.startswith('*.'):
+        host = host[2:]
+    if not host or len(host) > 253:
+        return ""
+    if not re.fullmatch(r'[a-z0-9\-._]+|[0-9a-f:]+', host):
+        return ""
+    if '.' not in host and ':' not in host:
+        return ""
+    return host
+
+
+def norm_app(text) -> str:
+    """程序名 / 完整路径 → 小写 exe 文件名;`chrome` → `chrome.exe`."""
+    t = str(text or "").strip().strip('"').replace('/', '\\')
+    t = t.rsplit('\\', 1)[-1].strip().lower()
+    if not t:
+        return ""
+    if not t.endswith('.exe'):
+        t += '.exe'
+    if len(t) > 100 or len(t) <= 4 or re.search(r'[<>:"|?*\x00-\x1f]', t):
+        return ""
+    return t
+
+
+def normalize(key: str, text) -> str:
+    return norm_app(text) if is_app(key) else norm_domain(text)
+
+
+def domain_match(host: str, rule: str) -> bool:
+    return host == rule or host.endswith('.' + rule)
+
+
+DEFAULT_TEMPLATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                "defaults", "net_rules.default.json")
+
+
+class RuleStore:
+
+    def __init__(self, path: str, loosen_delay_hours: float = LOOSEN_DELAY_HOURS,
+                 grace_hours: float = SETUP_GRACE_HOURS, now=None, template: str = None):
+        self.path = path
+        self.template = template
+        self.delay = timedelta(hours=loosen_delay_hours)
+        self.grace = timedelta(hours=grace_hours)
+        self._now = now or datetime.now
+        self.dev_getter = lambda: False          # 开发者模式:放宽不用等
+        self._lock = threading.RLock()
+        self.lists = {k: [] for k in LIST_KEYS}
+        self.pending = []
+        self.created = None
+        self.version = 0
+        self._snap = {k: () for k in LIST_KEYS}
+        self.load()
+        self.promote_due()
+
+
+    def load(self):
+        raw = {}
+        try:
+            with open(self.path, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+        except FileNotFoundError:
+            raw = self._template_raw()           # 本机还没有名单文件 → 用默认模板
+        except Exception:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+        lists = raw.get("lists") if isinstance(raw.get("lists"), dict) else {}
+        for k in LIST_KEYS:
+            seen, out = set(), []
+            for item in lists.get(k) or []:
+                n = normalize(k, item)
+                if n and n not in seen:
+                    seen.add(n)
+                    out.append(n)
+            self.lists[k] = out
+        self.pending = []
+        for p in raw.get("pending") or []:
+            try:
+                op, key = p["op"], p["list"]
+                item = normalize(key, p["item"])
+                at = datetime.fromisoformat(p["apply_at"])
+            except Exception:
+                continue
+            if op in ("add", "remove") and key in LIST_KEYS and item:
+                self.pending.append({"op": op, "list": key, "item": item, "apply_at": at})
+        try:
+            self.created = datetime.fromisoformat(raw["created"])
+        except Exception:
+            self.created = None
+        self._rebuild()
+
+    def _template_raw(self) -> dict:
+        """默认模板只提供名单本身;created / pending 不取,初始化窗口从第一次改动算起."""
+        if not self.template:
+            return {}
+        try:
+            with open(self.template, 'r', encoding='utf-8') as f:
+                raw = json.load(f)
+        except Exception:
+            return {}
+        lists = raw.get("lists") if isinstance(raw, dict) else None
+        return {"lists": lists} if isinstance(lists, dict) else {}
+
+    def _save(self):
+        payload = {
+            "created": (self.created.isoformat(timespec="seconds")
+                        if self.created else None),
+            "lists": self.lists,
+            "pending": [
+                {"op": p["op"], "list": p["list"], "item": p["item"],
+                 "apply_at": p["apply_at"].isoformat(timespec="seconds")}
+                for p in self.pending
+            ],
+        }
+        tmp = self.path + ".tmp"
+        try:
+            d = os.path.dirname(self.path)
+            if d:
+                os.makedirs(d, exist_ok=True)
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump(payload, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.path)
+            return True
+        except OSError:
+            return False
+
+    def _rebuild(self):
+        self._snap = {k: tuple(v) for k, v in self.lists.items()}
+        self.version += 1
+
+
+    def items(self, key: str) -> list:
+        return list(self._snap[key])
+
+    def in_setup_window(self) -> bool:
+        """初始化窗口从「第一次动名单」开始算,不是从程序第一次启动开始算."""
+        return (self.dev_getter() or self.created is None
+                or self._now() - self.created < self.grace)
+
+    def _find_pending(self, op, key, item):
+        for i, p in enumerate(self.pending):
+            if p["op"] == op and p["list"] == key and p["item"] == item:
+                return i
+        return -1
+
+    def _drop_pending(self, op, key, item):
+        i = self._find_pending(op, key, item)
+        if i >= 0:
+            del self.pending[i]
+            return True
+        return False
+
+
+    def add(self, key: str, raw):
+        """返回 (status, item).status: applied / staged / exists / invalid"""
+        item = normalize(key, raw)
+        if not item:
+            return "invalid", ""
+        with self._lock:
+            if self.created is None:
+                self.created = self._now()
+            loosening = is_white(key)
+            if not loosening:
+                self._drop_pending("remove", key, item)
+            if item in self.lists[key]:
+                self._save()
+                return "exists", item
+            if loosening and not self.in_setup_window():
+                if self._find_pending("add", key, item) >= 0:
+                    return "exists", item
+                self.pending.append({"op": "add", "list": key, "item": item,
+                                     "apply_at": self._now() + self.delay})
+                self._save()
+                return "staged", item
+            self.lists[key].append(item)
+            self._drop_pending("add", key, item)
+            self._save()
+            self._rebuild()
+            return "applied", item
+
+    def remove(self, key: str, raw):
+        """返回 (status, item).status: applied / staged / missing / invalid"""
+        item = normalize(key, raw)
+        if not item:
+            return "invalid", ""
+        with self._lock:
+            if self.created is None:
+                self.created = self._now()
+            loosening = not is_white(key)
+            if not loosening:
+                self._drop_pending("add", key, item)
+            if item not in self.lists[key]:
+                self._save()
+                return "missing", item
+            if loosening and not self.in_setup_window():
+                if self._find_pending("remove", key, item) >= 0:
+                    return "staged", item
+                self.pending.append({"op": "remove", "list": key, "item": item,
+                                     "apply_at": self._now() + self.delay})
+                self._save()
+                return "staged", item
+            self.lists[key].remove(item)
+            self._drop_pending("remove", key, item)
+            self._save()
+            self._rebuild()
+            return "applied", item
+
+    def cancel_pending(self, index: int) -> bool:
+        with self._lock:
+            if 0 <= index < len(self.pending):
+                del self.pending[index]
+                self._save()
+                return True
+            return False
+
+    def promote_due(self) -> list:
+        with self._lock:
+            now = self._now()
+            dev = self.dev_getter()
+            due = [p for p in self.pending if dev or p["apply_at"] <= now]
+            if not due:
+                return []
+            for p in due:
+                self.pending.remove(p)
+                lst = self.lists[p["list"]]
+                if p["op"] == "add" and p["item"] not in lst:
+                    lst.append(p["item"])
+                elif p["op"] == "remove" and p["item"] in lst:
+                    lst.remove(p["item"])
+            self._save()
+            self._rebuild()
+            return due
+
+
+    def decide(self, host: str, exe: str, online: bool, mode: str = MODE_BLACKLIST):
+        """(放行?, 原因).原因: local / blacklist-app / blacklist-domain / default-allow /
+        online / whitelist-app / whitelist-domain / offline"""
+        host = (host or "").lower().strip('.')
+        exe = (exe or "").lower()
+        s = self._snap
+        if host in _LOOPBACK or host.startswith("127."):
+            return True, "local"
+        if mode == MODE_WHITELIST:
+            if online:
+                return True, "online"
+            if exe and exe in s[WHITE_APPS]:
+                return True, "whitelist-app"
+            for r in s[WHITE_DOMAINS]:
+                if domain_match(host, r):
+                    return True, "whitelist-domain"
+            return False, "offline"
+        if exe and exe in s[BLACK_APPS]:
+            return False, "blacklist-app"
+        for r in s[BLACK_DOMAINS]:
+            if domain_match(host, r):
+                return False, "blacklist-domain"
+        return True, "default-allow"
+
+
+def _selftest():
+    import tempfile
+    assert norm_domain("https://www.Bilibili.com:443/video?x=1") == "www.bilibili.com"
+    assert norm_domain("*.example.com") == "example.com"
+    assert norm_domain("user:pw@github.com/a") == "github.com"
+    assert norm_domain("[::1]:80") == "::1"
+    assert norm_domain("localnamenodot") == "" and norm_domain("a b.com") == ""
+    assert norm_app("chrome") == "chrome.exe"
+    assert norm_app(r'"C:\Program Files\Steam\Steam.EXE"') == "steam.exe"
+    assert norm_app("a/b\\x.exe") == "x.exe" and norm_app("") == "" and norm_app("<>") == ""
+    assert domain_match("a.b.com", "b.com") and not domain_match("ab.com", "b.com")
+
+    clock = [datetime(2026, 1, 1, 12, 0)]
+    path = os.path.join(tempfile.mkdtemp(), "r.json")
+    rs = RuleStore(path, now=lambda: clock[0])
+
+    assert rs.in_setup_window()
+    assert rs.add(WHITE_DOMAINS, "school.edu.cn")[0] == "applied"
+    assert rs.add(WHITE_DOMAINS, "school.edu.cn")[0] == "exists"
+    assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "applied"
+    assert rs.add(BLACK_APPS, "steam")[0] == "applied"
+    assert rs.add(WHITE_APPS, "code.exe")[0] == "applied"
+    assert rs.add(WHITE_DOMAINS, "???")[0] == "invalid"
+
+    def d(host, exe, online):                       # 黑名单模式
+        return rs.decide(host, exe, online, MODE_BLACKLIST)
+
+    def w(host, exe, online):                       # 白名单模式
+        return rs.decide(host, exe, online, MODE_WHITELIST)
+
+    assert w("www.school.edu.cn", "chrome.exe", False) == (True, "whitelist-domain")
+    assert w("zhihu.com", "chrome.exe", False) == (False, "offline")
+    assert w("zhihu.com", "code.exe", False) == (True, "whitelist-app")
+    assert w("www.bilibili.com", "chrome.exe", True) == (True, "online"), "白名单模式联网时不看黑名单"
+    assert d("www.school.edu.cn", "chrome.exe", False) == (True, "default-allow"), "黑名单模式默认放行"
+    assert d("zhihu.com", "code.exe", False) == (True, "default-allow")
+    assert d("www.bilibili.com", "chrome.exe", False) == (False, "blacklist-domain"), "离线也拦黑名单"
+    assert d("zhihu.com", "steam.exe", False) == (False, "blacklist-app")
+    assert d("zhihu.com", "chrome.exe", True) == (True, "default-allow")
+    assert d("www.bilibili.com", "chrome.exe", True) == (False, "blacklist-domain")
+    assert d("zhihu.com", "steam.exe", True) == (False, "blacklist-app")
+    for fn in (d, w):
+        assert fn("localhost", "", False) == (True, "local")
+        assert fn("127.0.0.1", "", False) == (True, "local")
+    assert d("notbilibili.com", "", True) == (True, "default-allow")
+    empty = RuleStore(os.path.join(tempfile.mkdtemp(), "e.json"))
+    assert empty.decide("anything.com", "x.exe", False, MODE_BLACKLIST) == (True, "default-allow"), \
+        "黑名单为空时必须什么都不拦"
+    assert empty.decide("anything.com", "x.exe", False, MODE_WHITELIST) == (False, "offline"), \
+        "白名单为空时离线全拦"
+    assert keys_for_mode(MODE_WHITELIST) == (WHITE_DOMAINS, WHITE_APPS)
+    assert keys_for_mode("whatever") == (BLACK_DOMAINS, BLACK_APPS)
+
+    clock[0] += timedelta(hours=3)
+    assert not rs.in_setup_window()
+    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
+    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "exists"
+    assert rs.remove(BLACK_DOMAINS, "bilibili.com")[0] == "staged"
+    assert w("wikipedia.org", "", False)[0] is False
+    assert d("bilibili.com", "", True)[0] is False, "放宽要等冷静期"
+    assert rs.remove(WHITE_APPS, "code.exe")[0] == "applied", "收紧立即生效"
+    assert w("x.com", "code.exe", False)[0] is False
+
+    assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "exists"
+    assert not any(p["op"] == "remove" and p["item"] == "bilibili.com" for p in rs.pending), \
+        "重新加回黑名单应当取消待生效的移除"
+    assert rs.remove(WHITE_DOMAINS, "wikipedia.org")[0] == "missing"
+    assert not rs.pending, "收紧应当顺手取消同一项待生效的放宽"
+
+    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
+    rs2 = RuleStore(path, now=lambda: clock[0])
+    assert len(rs2.pending) == 1 and rs2.items(BLACK_APPS) == ["steam.exe"]
+    clock[0] += timedelta(hours=47)
+    assert rs2.promote_due() == []
+    clock[0] += timedelta(hours=2)
+    assert len(rs2.promote_due()) == 1
+    assert rs2.decide("en.wikipedia.org", "", False, MODE_WHITELIST) == (True, "whitelist-domain")
+    assert rs2.cancel_pending(0) is False
+
+    dev = [True]
+    rs3 = RuleStore(os.path.join(tempfile.mkdtemp(), "d.json"), now=lambda: clock[0])
+    rs3.dev_getter = lambda: dev[0]
+    rs3.add(BLACK_DOMAINS, "x.com")
+    clock[0] += timedelta(hours=10)
+    dev[0] = False
+    assert rs3.remove(BLACK_DOMAINS, "x.com")[0] == "staged"
+    dev[0] = True
+    assert rs3.promote_due() and not rs3.pending, "开发者模式下排队的放宽应当立即生效"
+    assert rs3.add(WHITE_DOMAINS, "y.com")[0] == "applied", "开发者模式下放宽立即生效"
+    return "netproxy.rules selftest OK"
+
+
+if __name__ == "__main__":
+    print(_selftest())

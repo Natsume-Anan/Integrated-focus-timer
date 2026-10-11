@@ -1,0 +1,9 @@
+{
+ "_comment": "默认名单模板(空):仅在本机还没有 net_rules.json 时使用;之后以本机文件为准(见 netproxy/rules.py).",
+ "lists": {
+  "white_domains": [],
+  "white_apps": [],
+  "black_domains": [],
+  "black_apps": []
+ }
+}
