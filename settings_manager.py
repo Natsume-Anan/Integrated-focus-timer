@@ -50,7 +50,7 @@ SETTINGS_SCHEMA = [
             (str(m * 60), f"{m} min") for m in (1, 2, 5, 10, 15, 20, 30, 45, 60)
         ],
         "fmt": _fmt_min,
-        "desc": "提出申请后等多久才真的联网.想立刻联网请用 Network 页的紧急贷款(今天 2 倍 / 预支明天 3 倍).",
+        "desc": "提出申请后等多久才真的联网.想立刻联网请用 Network 页的快速访问(额度 2 倍消耗).",
     },
     {
         "key": "NET_MODE", "label": "断网方式",

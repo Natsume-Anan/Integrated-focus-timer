@@ -17,7 +17,7 @@ from config import (
     compute_F, fmt_hm, fmt_ms
 )
 from i18n import tr
-from net_guard import NetGuard, LOAN_MULTIPLIER, LOAN_MULTIPLIER_TOMORROW
+from net_guard import NetGuard, QUICK_MULTIPLIER, LOAN_RATE
 from data_manager import DataManager
 from settings_manager import SettingsManager
 from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage
@@ -821,8 +821,13 @@ class BreakTimerApp:
             command=self.on_net_request
         )
         self.btn_net_req.pack(side="left")
+        self.btn_net_quick = ttk.Button(
+            btns, text=tr("⚡  快速访问(×{a:g})").format(a=QUICK_MULTIPLIER),
+            style="Danger.TButton", command=self.on_net_quick
+        )
+        self.btn_net_quick.pack(side="left", padx=(8, 0))
         self.btn_net_loan = ttk.Button(
-            btns, text=tr("⚡  紧急贷款"), style="Danger.TButton",
+            btns, text=tr("💳  紧急借贷"), style="Danger.TButton",
             command=self.on_net_loan
         )
         self.btn_net_loan.pack(side="left", padx=(8, 0))
@@ -842,7 +847,8 @@ class BreakTimerApp:
         )
         self.btn_net_ctrl.pack(side="left", ipadx=10)
         self.btn_net_upgrade = ttk.Button(
-            self.net_ctrl, text=tr("⚡  立刻联网(付费)"), style="Danger.TButton",
+            self.net_ctrl, text=tr("⚡  改为快速访问(×{a:g})").format(a=QUICK_MULTIPLIER),
+            style="Danger.TButton",
             command=self.on_net_upgrade
         )
         self.net_ctrl_hint = tk.Label(
@@ -855,7 +861,29 @@ class BreakTimerApp:
         ok, minutes, reason = self._read_net_form()
         if not ok:
             return
-        ok, msg = self.net.request(minutes, reason, loan=False)
+        ok, msg = self.net.request(minutes, reason)
+        if not ok:
+            toast.warn(tr(msg))
+            return
+        self.var_reason.set("")
+        self.refresh_net(force=True)
+
+    def on_net_quick(self):
+        ok, minutes, reason = self._read_net_form()
+        if not ok:
+            return
+        ok2, msg2 = self.net.can_quick(minutes)
+        if not ok2:
+            toast.warn(tr(msg2))
+            return
+        if not toast.ask(
+            tr("快速访问跳过冷静期立刻联网,额度按 ×{a:g} 消耗.\n\n联网: {m} 分钟\n消耗: {cost} 今日额度\n\n确定吗?").format(
+                a=QUICK_MULTIPLIER, m=minutes,
+                cost=fmt_hm(minutes * 60 * QUICK_MULTIPLIER)),
+            title=tr("快速访问"), danger=True
+        ):
+            return
+        ok, msg = self.net.request(minutes, reason, quick=True)
         if not ok:
             toast.warn(tr(msg))
             return
@@ -866,24 +894,23 @@ class BreakTimerApp:
         ok, minutes, reason = self._read_net_form()
         if not ok:
             return
-        ok2, _msg = self.net.can_loan(minutes)
+        ok2, msg2 = self.net.can_borrow(minutes)
         if not ok2:
-            toast.warn(tr(_msg))
+            toast.warn(tr(msg2))
             return
-        today_cost, loan_cost, total, grant = self.net.loan_plan(minutes)
         if not toast.ask(
-            tr("紧急贷款会跳过冷静期立刻联网,额度按「今天 ×{a:g},预支明天 ×{b:g}」计费.\n\n申请: {m} 分钟\n实际放行: {grant}\n计费: {total} 额度(今天 {today} ×{a:g} + 预支明天 {borrowed} ×{b:g})\n\n确定吗?").format(
-                a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW, m=minutes,
-                grant=fmt_hm(grant), total=fmt_hm(total),
-                today=fmt_hm(today_cost), borrowed=fmt_hm(loan_cost)),
-            title=tr("紧急贷款"), danger=True
+            tr("紧急借贷不会联网,只会给今天加额度;代价是明天扣 {b:g} 倍.\n借到的额度今天用不完也不退.\n\n今天额度: +{add}\n明天额度: -{cost}\n\n确定吗?").format(
+                b=LOAN_RATE, add=fmt_hm(minutes * 60),
+                cost=fmt_hm(minutes * 60 * LOAN_RATE)),
+            title=tr("紧急借贷"), danger=True
         ):
             return
-        ok, msg = self.net.request(minutes, reason, loan=True)
+        ok, msg = self.net.borrow(minutes, reason)
         if not ok:
             toast.warn(tr(msg))
             return
         self.var_reason.set("")
+        toast.success(tr("今天额度 +{add}.").format(add=fmt_hm(minutes * 60)))
         self.refresh_net(force=True)
 
     def _read_net_form(self):
@@ -908,20 +935,17 @@ class BreakTimerApp:
     def on_net_upgrade(self):
         p = self.net.pending or {}
         minutes = p.get("minutes", 0)
-        ok2, msg2 = self.net.can_loan(minutes)
+        ok2, msg2 = self.net.can_quick(minutes)
         if not ok2:
             toast.warn(tr(msg2))
             return
-        today_cost, loan_cost, total, grant = self.net.loan_plan(minutes)
         if not toast.ask(
-            tr("立刻结束冷静期并联网?\n\n申请: {m} 分钟\n实际放行: {grant}  ·  计费 {total} 额度\n(今天 {today} ×{a:g} + 预支明天 {borrowed} ×{b:g})\n\n确定吗?").format(
-                m=minutes, grant=fmt_hm(grant), total=fmt_hm(total),
-                today=fmt_hm(today_cost), borrowed=fmt_hm(loan_cost),
-                a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW),
-            title=tr("紧急贷款"), danger=True
+            tr("立刻结束冷静期并联网?\n\n联网: {m} 分钟\n消耗: {cost} 今日额度(×{a:g})\n\n确定吗?").format(
+                m=minutes, cost=fmt_hm(minutes * 60 * QUICK_MULTIPLIER), a=QUICK_MULTIPLIER),
+            title=tr("快速访问"), danger=True
         ):
             return
-        ok, msg = self.net.convert_to_loan()
+        ok, msg = self.net.convert_to_quick()
         if not ok:
             toast.warn(tr(msg))
             return
@@ -934,14 +958,13 @@ class BreakTimerApp:
     def refresh_net(self, force: bool = False):
         n = self.net
         mode = n.mode
-        limit = float(self.settings.value("DAILY_LIMIT"))
         cooldown = int(self.settings.value("COOLDOWN"))
         cooldown_m = cooldown // 60
 
         self.net_lbl_header.config(
             text=tr("申请 → {min} 分钟冷静期 → 联网 → 到点自动断网").format(min=cooldown_m)
-                 + "    ·    " + tr("⚡ 紧急贷款免冷静期 (今天 ×{a:g} / 预支明天 ×{b:g})").format(
-                     a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW)
+                 + "    ·    " + tr("⚡ 快速访问免冷静期(×{a:g})  ·  💳 借 1 分钟扣明天 {b:g} 分钟").format(
+                     a=QUICK_MULTIPLIER, b=LOAN_RATE)
         )
 
         if mode == "dev":
@@ -955,10 +978,10 @@ class BreakTimerApp:
             )
             self.net_form.pack_forget()
             self.net_ctrl.pack_forget()
-            self.net_bar["maximum"] = max(1.0, limit)
-            self.net_bar["value"] = min(n.quota_used, limit)
+            self.net_bar["maximum"] = max(1.0, n.today_total)
+            self.net_bar["value"] = n.quota_used
             self.net_lbl_quota.config(
-                text=f"Used today: {fmt_hm(n.quota_used)} / {fmt_hm(limit)}"
+                text=f"Used today: {fmt_hm(n.quota_used)} / {fmt_hm(n.today_total)}"
                      f"     (developer mode — not counting)"
             )
             self.net_lbl_debt.config(text="")
@@ -985,7 +1008,7 @@ class BreakTimerApp:
         if mode == "offline":
             self._net_set_status(tr("离线"), COLORS["text_dim"])
             self.net_lbl_time.config(text=tr("离线"))
-            if n.remaining < 60 and n.quota_left < 60:
+            if n.remaining < 60:
                 self.net_lbl_sub.config(text=tr("今天的额度已用完."))
                 self.btn_net_req.config(state="disabled")
             else:
@@ -993,6 +1016,10 @@ class BreakTimerApp:
                     text=tr("在下面提交申请,冷静期结束后自动联网.")
                 )
                 self.btn_net_req.config(state="!disabled")
+            self.btn_net_quick.config(
+                state="!disabled" if n.quick_left >= 60 else "disabled")
+            self.btn_net_loan.config(
+                state="!disabled" if n.loan_left >= 60 else "disabled")
         elif mode == "pending":
             p = n.pending
             self._net_set_status(tr("冷静期中 —— 仍可取消"), COLORS["warn"])
@@ -1001,14 +1028,11 @@ class BreakTimerApp:
             self.net_lbl_sub.config(
                 text=tr("已申请 {m} 分钟 · {at} 联网").format(m=p['minutes'], at=start_at)
             )
-            ok, msg = n.can_loan(p["minutes"])
+            ok, msg = n.can_quick(p["minutes"])
             if ok:
-                today_cost, loan_cost, total, grant = n.loan_plan(p["minutes"])
                 self.net_ctrl_hint.config(
-                    text=tr("⚡ 紧急贷款可立刻联网:放行 {grant}(今天额度 {today} ×{a:g} + 预支明天 {borrowed} ×{b:g})").format(
-                        grant=fmt_hm(grant), today=fmt_hm(today_cost),
-                        borrowed=fmt_hm(loan_cost),
-                        a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW),
+                    text=tr("⚡ 可改为快速访问立刻联网:消耗 {cost} 今日额度(×{a:g}).").format(
+                        cost=fmt_hm(p["minutes"] * 60 * QUICK_MULTIPLIER), a=QUICK_MULTIPLIER),
                     fg=COLORS["text_dim"]
                 )
             else:
@@ -1016,11 +1040,10 @@ class BreakTimerApp:
         else:
             self._net_set_status(tr("联网中"), COLORS["success"])
             self.net_lbl_time.config(text=fmt_ms(n.grant_left))
-            if n.grant_loan:
+            if n.grant_quick:
                 self.net_lbl_sub.config(
-                    text=tr("⚡ 贷款会话 —— 今天 ×{a:g},预支 ×{b:g}.可继续使用 {left};已预支 {borrowed}").format(
-                        a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW,
-                        left=fmt_hm(n.grant_left), borrowed=fmt_hm(n.bucket_loan_t))
+                    text=tr("⚡ 快速访问 —— 额度按 ×{a:g} 消耗,归零自动断网.").format(
+                        a=n.grant_rate)
                 )
             else:
                 self.net_lbl_sub.config(
@@ -1030,43 +1053,38 @@ class BreakTimerApp:
 
         if mode == "offline":
             usermin = self._safe_minutes()
-            ok_any, msg_any = n.can_loan(usermin) if usermin else (False, "")
-            if ok_any:
-                today_cost, loan_cost, total, grant = n.loan_plan(usermin)
-                self.net_loan_hint.config(
-                    text=tr("⚡ {m} 分钟可走紧急贷款:放行 {grant},计费 {total}(今天额度 {today} ×{a:g} + 预支明天 {borrowed} ×{b:g}).贷款上限 {cap}.").format(
-                        m=usermin, grant=fmt_hm(grant), total=fmt_hm(total),
-                        today=fmt_hm(today_cost), borrowed=fmt_hm(loan_cost),
-                        a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW,
-                        cap=fmt_hm(n.quota_left)),
-                    fg=COLORS["text_dim"]
-                )
-            elif n.remaining < 60:
-                self.net_loan_hint.config(
-                    text=tr("⚡ 今天额度已用完.贷款上限 {cap},全部预支明天(×{b:g}).").format(
-                        cap=fmt_hm(n.quota_left), b=LOAN_MULTIPLIER_TOMORROW),
-                    fg=COLORS["text_dim"]
-                )
+            parts = []
+            if usermin and n.can_quick(usermin)[0]:
+                parts.append(tr("⚡ 快速访问 {m} 分钟:立刻联网,消耗 {cost} 今日额度.").format(
+                    m=usermin, cost=fmt_hm(usermin * 60 * QUICK_MULTIPLIER)))
             else:
-                self.net_loan_hint.config(
-                    text=tr("⚡ 紧急贷款:跳过冷静期立刻联网;今天剩余额度按 2 倍计费,不够的部分按 3 倍预支明天的额度."),
-                    fg=COLORS["text_dim"]
-                )
+                parts.append(tr("⚡ 快速访问:跳过冷静期,额度按 ×{a:g} 消耗;最多 {cap}.").format(
+                    a=QUICK_MULTIPLIER, cap=fmt_hm(n.quick_left)))
+            if n.loan_left < 60:
+                parts.append(tr("💳 明天的额度已经借完了."))
+            elif usermin and n.can_borrow(usermin)[0]:
+                parts.append(tr("💳 借 {m} 分钟:今天额度 +{add},明天额度 -{cost}.最多可借 {cap}.").format(
+                    m=usermin, add=fmt_hm(usermin * 60),
+                    cost=fmt_hm(usermin * 60 * LOAN_RATE), cap=fmt_hm(n.loan_left)))
+            else:
+                parts.append(tr("💳 紧急借贷:今天额度 +1 分钟,明天额度 -{b:g} 分钟;最多可借 {cap}.").format(
+                    b=LOAN_RATE, cap=fmt_hm(n.loan_left)))
+            self.net_loan_hint.config(text="\n".join(parts), fg=COLORS["text_dim"])
 
-        self.net_bar["maximum"] = max(1.0, limit)
-        self.net_bar["value"] = min(n.quota_used, limit)
+        self.net_bar["maximum"] = max(1.0, n.today_total)
+        self.net_bar["value"] = n.quota_used
         self.net_lbl_quota.config(
-            text=tr("今日已用: {used} / {total}     今日剩余: {left}     含贷款: {cap}  (今天 ×{a:g}, 预支 ×{b:g})").format(
-                used=fmt_hm(n.quota_used), total=fmt_hm(limit), left=fmt_hm(n.remaining),
-                cap=fmt_hm(n.quota_left),
-                a=LOAN_MULTIPLIER, b=LOAN_MULTIPLIER_TOMORROW)
+            text=tr("今日已用: {used} / {total}     今日剩余: {left}     可快速访问: {quick}").format(
+                used=fmt_hm(n.quota_used), total=fmt_hm(n.today_total),
+                left=fmt_hm(n.remaining), quick=fmt_hm(n.quick_left))
         )
         bits = []
-        if n.tomorrow_used > 0:
-            bits.append(tr("今天已预支明天的额度 {borrowed}(明天剩余 {left})").format(
-                borrowed=fmt_hm(n.tomorrow_used), left=fmt_hm(n.tomorrow_remaining)))
+        if n.bonus > 0:
+            bits.append(tr("今天已借 {bonus},明天将扣 {cost}(明天剩余 {left})").format(
+                bonus=fmt_hm(n.bonus), cost=fmt_hm(n.tomorrow_used),
+                left=fmt_hm(n.tomorrow_remaining)))
         if n.debt > 0:
-            bits.append(tr("今天要先还昨天预支的 {debt}").format(debt=fmt_hm(n.debt)))
+            bits.append(tr("今天要先还昨天借的 {debt}").format(debt=fmt_hm(n.debt)))
         self.net_lbl_debt.config(text="\n".join(bits))
 
     def _safe_minutes(self):

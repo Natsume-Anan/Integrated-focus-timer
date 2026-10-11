@@ -14,8 +14,8 @@ from config import fmt_hm
 from netproxy import ProxyController
 
 
-LOAN_MULTIPLIER = 2.0
-LOAN_MULTIPLIER_TOMORROW = 3.0
+QUICK_MULTIPLIER = 2.0   # 快速访问: 免冷静期, 每联网 1 秒消耗 2 秒今日额度
+LOAN_RATE = 2.0          # 紧急借贷: 今日额度 +1 秒, 明天额度 -2 秒
 
 
 class NetGuard:
@@ -29,13 +29,11 @@ class NetGuard:
 
         self.date = datetime.now().strftime('%Y-%m-%d')
         self.used = 0.0
+        self.bonus = 0.0
         self.tomorrow_used = 0.0
         self.debt = 0.0
         self.grant_left = 0.0
-        self.bucket_today = 0.0
-        self.bucket_loan_q = 0.0
-        self.bucket_loan_t = 0.0
-        self.grant_loan = False
+        self.grant_rate = 1.0
         self.pending = None
         self.proxy = ProxyController(
             data_dir, mode_getter=lambda: getattr(config, "FILTER_MODE", "blacklist"),
@@ -68,25 +66,31 @@ class NetGuard:
         return float(config.TICK_CLAMP)
 
     @property
+    def today_total(self) -> float:
+        """今天的总额度 = 每日额度 + 今天借到的."""
+        return self.limit + self.bonus
+
+    @property
     def remaining(self) -> float:
-        return max(0.0, self.limit - self.used - self.debt)
+        return max(0.0, self.today_total - self.used - self.debt)
 
     @property
     def tomorrow_remaining(self) -> float:
         return max(0.0, self.limit - self.tomorrow_used)
 
     @property
-    def quota_left(self) -> float:
-        return (self.remaining / LOAN_MULTIPLIER
-                + self.tomorrow_remaining / LOAN_MULTIPLIER_TOMORROW)
+    def quick_left(self) -> float:
+        """剩余额度按快速访问能换到多少联网时间."""
+        return self.remaining / QUICK_MULTIPLIER
 
     @property
-    def available(self) -> float:
-        return self.quota_left
+    def loan_left(self) -> float:
+        """还能借多少今日额度."""
+        return self.tomorrow_remaining / LOAN_RATE
 
     @property
-    def loan_quota_left(self) -> float:
-        return self.tomorrow_remaining
+    def grant_quick(self) -> bool:
+        return self.grant_rate > 1.0
 
     @property
     def dev_mode(self) -> bool:
@@ -114,7 +118,7 @@ class NetGuard:
 
     @property
     def quota_used(self) -> float:
-        return min(self.limit, self.used + self.debt)
+        return min(self.today_total, self.used + self.debt)
 
 
     def _load(self):
@@ -123,6 +127,7 @@ class NetGuard:
                 d = json.load(f)
             if d.get("date") == self.date:
                 self.used = max(0.0, float(d.get("used", 0.0)))
+                self.bonus = max(0.0, float(d.get("bonus", 0.0)))
                 self.tomorrow_used = max(0.0, float(d.get("tomorrow_used", 0.0)))
                 self.debt = max(0.0, float(d.get("debt", 0.0)))
         except Exception:
@@ -136,6 +141,7 @@ class NetGuard:
                 json.dump({
                     "date": self.date,
                     "used": int(self.used),
+                    "bonus": int(self.bonus),
                     "tomorrow_used": int(self.tomorrow_used),
                     "debt": int(self.debt),
                 }, f)
@@ -247,40 +253,47 @@ class NetGuard:
         return True
 
 
-    def loan_plan(self, minutes: float):
-        need = max(0.0, float(minutes)) * 60.0
+    def can_borrow(self, minutes: float):
+        add = max(0.0, float(minutes)) * 60.0
+        if add <= 0:
+            return False, "Minimum is 1 minute."
+        if add > self.loan_left + 1e-6:
+            if self.loan_left < 60:
+                return False, "Tomorrow's quota is already fully borrowed."
+            return False, (f"You can borrow at most {fmt_hm(self.loan_left)} today "
+                           f"(tomorrow has {fmt_hm(self.tomorrow_remaining)} left, "
+                           f"{LOAN_RATE:g}x per minute borrowed).")
+        return True, ""
 
-        today_time = min(need, self.remaining / LOAN_MULTIPLIER)
-        today_cost = today_time * LOAN_MULTIPLIER
+    def borrow(self, minutes: int, reason: str):
+        """紧急借贷: 立即给今天加额度, 代价是明天扣两倍. 不联网, 联网仍需申请."""
+        if self.dev_mode:
+            return False, "Developer mode is ON — the network is already unrestricted."
+        minutes = int(minutes)
+        ok, msg = self.can_borrow(minutes)
+        if not ok:
+            return False, msg
+        add = minutes * 60.0
+        self.bonus += add
+        self.tomorrow_used += add * LOAN_RATE
+        self._save()
+        self._log(f"LOAN     +{minutes} min today, -{int(minutes * LOAN_RATE)} min tomorrow"
+                  f"  reason: {reason}")
+        return True, ""
 
-        rest = max(0.0, need - today_time)
-        loan_cost = rest * LOAN_MULTIPLIER_TOMORROW
-        total_cost = today_cost + loan_cost
-        grant = today_time + rest
-        return today_cost, loan_cost, total_cost, grant
-
-    def max_grant(self) -> float:
-        return (self.remaining / LOAN_MULTIPLIER
-                + self.tomorrow_remaining / LOAN_MULTIPLIER_TOMORROW)
-
-    def can_loan(self, minutes: float):
+    def can_quick(self, minutes: float):
         need = max(0.0, float(minutes)) * 60.0
         if need <= 0:
             return False, "Minimum is 1 minute."
-        if need <= self.remaining:
-            return False, (f"{fmt_hm(need)} still fits in today's quota — no need to borrow. "
-                           f"Use a normal request (or cancel and re-request).")
-        if need > self.max_grant():
-            left = self.max_grant()
-            if left <= 0:
-                return False, "No quota left today, and there is nothing to borrow."
-            return False, (f"Loan can cover at most {fmt_hm(left)}: today "
-                           f"{fmt_hm(self.remaining / LOAN_MULTIPLIER)} (2x) + borrowed "
-                           f"{fmt_hm(self.tomorrow_remaining / LOAN_MULTIPLIER_TOMORROW)} (3x).")
+        if need * QUICK_MULTIPLIER > self.remaining + 1e-6:
+            if self.quick_left < 60:
+                return False, "Not enough quota left today for quick access."
+            return False, (f"Quick access can cover at most {fmt_hm(self.quick_left)} "
+                           f"({fmt_hm(self.remaining)} left today, {QUICK_MULTIPLIER:g}x cost).")
         return True, ""
 
 
-    def request(self, minutes: int, reason: str, loan: bool = False):
+    def request(self, minutes: int, reason: str, quick: bool = False):
         if self.dev_mode:
             return False, "Developer mode is ON — the network is already unrestricted."
         if self.online:
@@ -291,71 +304,55 @@ class NetGuard:
         if minutes < 1:
             return False, "Minimum is 1 minute."
 
-        if loan:
-            ok, msg = self.can_loan(minutes)
+        if quick:
+            ok, msg = self.can_quick(minutes)
             if not ok:
                 return False, msg
-            _today, loan_cost, total_cost, grant = self.loan_plan(minutes)
-            self.pending = {
-                "minutes": minutes,
-                "at": time.time(),
-                "reason": reason,
-                "loan": True,
-                "today_cost": _today,
-                "loan_cost": loan_cost,
-                "total_cost": total_cost,
-                "grant": grant,
-            }
-            self._log(
-                f"LOAN     {minutes} min (grant {int(grant // 60)} min, "
-                f"cost {int(total_cost // 60)} min quota, reason: {reason})"
-            )
+            self.pending = {"minutes": minutes, "at": time.time(),
+                            "reason": reason, "quick": True}
+            self._log(f"QUICK    {minutes} min (cost {int(minutes * QUICK_MULTIPLIER)} min quota)"
+                      f"  reason: {reason}")
             return True, ""
 
         if minutes * 60 > self.remaining:
             extra = ""
-            if self.available > self.remaining:
-                extra = f" Emergency loan could cover up to {fmt_hm(self.available)} (2x cost)."
+            if self.loan_left >= 60:
+                extra = f" An emergency loan can add up to {fmt_hm(self.loan_left)}."
             return False, f"Only {fmt_hm(self.remaining)} left today.{extra}"
         self.pending = {
             "minutes": minutes,
             "at": time.time() + self.cooldown,
             "reason": reason,
-            "loan": False,
+            "quick": False,
         }
         self._log(f"REQUEST  {minutes} min  reason: {reason}")
         return True, ""
 
-    def convert_to_loan(self):
+    def convert_to_quick(self):
         if not self.pending:
             return False, "No pending request."
-        if self.pending.get("loan"):
-            return False, "This request is already a loan."
+        if self.pending.get("quick"):
+            return False, "This request is already quick access."
         p = self.pending
-        minutes = p["minutes"]
-        ok, msg = self.can_loan(minutes)
+        ok, msg = self.can_quick(p["minutes"])
         if not ok:
             return False, msg
-        _today, loan_cost, total_cost, grant = self.loan_plan(minutes)
-        self.pending = {
-            "minutes": minutes, "at": time.time(), "reason": p.get("reason", ""),
-            "loan": True, "today_cost": _today, "loan_cost": loan_cost,
-            "total_cost": total_cost, "grant": grant,
-        }
-        self._log(f"LOAN     upgrade {minutes} min (cost {int(total_cost // 60)} min quota)")
+        self.pending = {"minutes": p["minutes"], "at": time.time(),
+                        "reason": p.get("reason", ""), "quick": True}
+        self._log(f"QUICK    upgrade {p['minutes']} min "
+                  f"(cost {int(p['minutes'] * QUICK_MULTIPLIER)} min quota)")
         return True, ""
 
     def cancel(self):
         if self.pending:
             p = self.pending
-            self._log(f"CANCEL   {p['minutes']} min {'loan ' if p.get('loan') else ''}request")
+            self._log(f"CANCEL   {p['minutes']} min {'quick ' if p.get('quick') else ''}request")
         self.pending = None
 
     def end_early(self):
         if self.dev_mode:
             return
         if self.online:
-            self._refund()
             self._log(f"END      early, {int(self.grant_left)}s unused")
         self._reset_grant()
         self.block()
@@ -363,16 +360,7 @@ class NetGuard:
 
     def _reset_grant(self):
         self.grant_left = 0.0
-        self.bucket_today = 0.0
-        self.bucket_loan_q = 0.0
-        self.bucket_loan_t = 0.0
-        self.grant_loan = False
-
-    def unused_loan_quota(self) -> float:
-        return max(0.0, self.bucket_loan_q)
-
-    def _refund(self):
-        self.tomorrow_used = max(0.0, self.tomorrow_used - self.unused_loan_quota())
+        self.grant_rate = 1.0
 
     def shutdown(self):
         self.pending = None
@@ -398,8 +386,9 @@ class NetGuard:
 
     def _rollover(self, today: str):
         self.date = today
-        self.debt = max(0.0, self.debt + self.tomorrow_used)
+        self.debt = max(0.0, self.tomorrow_used)
         self.tomorrow_used = 0.0
+        self.bonus = 0.0
         self.used = 0.0
         self._save()
 
@@ -420,32 +409,15 @@ class NetGuard:
         if self.pending and time.time() >= self.pending["at"]:
             p, self.pending = self.pending, None
             self._reset_grant()
-            if p.get("loan"):
-
-
-                want = min(p["minutes"] * 60.0,
-                           self.remaining / LOAN_MULTIPLIER
-                           + self.tomorrow_remaining / LOAN_MULTIPLIER_TOMORROW)
-                today_cost, loan_cost, _total, grant = self.loan_plan(want / 60.0)
-                self.tomorrow_used += loan_cost
-                self.bucket_today = today_cost
-                self.bucket_loan_q = loan_cost
-                self.bucket_loan_t = loan_cost / LOAN_MULTIPLIER_TOMORROW
-                self.grant_loan = True
-                secs = grant
-            else:
-                secs = min(p["minutes"] * 60, self.remaining)
-                self.bucket_today = secs
-                self.bucket_loan_q = 0.0
-                self.bucket_loan_t = 0.0
-                self.grant_loan = False
+            rate = QUICK_MULTIPLIER if p.get("quick") else 1.0
+            secs = min(p["minutes"] * 60.0, self.remaining / rate)
             if secs > 0:
                 self.grant_left = secs
+                self.grant_rate = rate
                 self.unblock()
                 self._save()
                 self._log(f"START    {int(secs // 60)} min granted"
-                          + (f" (loan, {int(self.bucket_loan_t // 60)} min borrowed)"
-                             if self.grant_loan else ""))
+                          + (f" (quick, {rate:g}x)" if rate > 1.0 else ""))
                 event = "started"
 
         now = time.monotonic()
@@ -453,17 +425,7 @@ class NetGuard:
             dt = min(max(dt, 0.0), self.tick_clamp, self.grant_left)
             self.grant_left -= dt
 
-            today_rate = LOAN_MULTIPLIER if self.grant_loan else 1.0
-            take_today_time = min(dt, self.bucket_today / today_rate)
-            self.bucket_today -= take_today_time * today_rate
-            self.used += take_today_time * today_rate
-            rest = dt - take_today_time
-            if rest > 0:
-
-                self.bucket_loan_t = max(0.0, self.bucket_loan_t - rest)
-                charge = rest * LOAN_MULTIPLIER_TOMORROW
-                self.bucket_loan_q = max(0.0, self.bucket_loan_q - charge)
-                self.used += charge
+            self.used += dt * self.grant_rate
 
             if self.grant_left <= 1e-6:
                 self._reset_grant()
@@ -497,175 +459,117 @@ def _selftest():
     config.DAILY_LIMIT, config.COOLDOWN = 3600, 300
     config.TICK_CLAMP = 10 ** 6
     config.DEV_MODE = False
+    config.NET_MODE = "adapter"
     try:
         n = NetGuard(tempfile.mkdtemp())
         n.dead = True
         n.date = _dt.datetime.now().strftime('%Y-%m-%d')
         assert n.remaining == 3600 and not n.online
+        assert abs(n.quick_left - 1800) < 1e-6 and abs(n.loan_left - 1800) < 1e-6
 
-        assert abs(n.max_grant() - (3600 / 2 + 3600 / 3)) < 1e-6, n.max_grant()
-        assert abs(n.quota_left - n.max_grant()) < 1e-6
-
-
-        ok, msg = n.can_loan(30)
-        assert not ok and "no need to borrow" in msg, msg
-
-
+        # 普通申请: 走冷静期, 1x 计费
         ok, msg = n.request(30, "查资料")
         assert ok and n.mode == "pending" and n.pending["at"] > time.time() + 200
-        assert not n.pending["loan"]
-        ok, msg = n.convert_to_loan()
-        assert not ok, "今天额度足够时不该允许升级成贷款"
-
-
-        n.cancel()
-        n.used = 3000.0
-        ok, msg = n.request(24, "查资料")
-        assert not ok and "Emergency loan" in msg, msg
-        ok, msg = n.request(24, "紧急", loan=True)
-        assert ok and n.pending["loan"] and n.pending["at"] <= time.time() + 1, msg
-
-        assert abs(n.pending["loan_cost"] - 3420) < 1e-6, n.pending["loan_cost"]
-
+        assert not n.pending["quick"]
+        n.pending["at"] = time.time() - 1
         n.tick(0.0)
-        assert n.online, "贷款应当立刻联网"
-        assert abs(n.bucket_today - 600) < 1e-6, n.bucket_today
-        assert abs(n.bucket_loan_q - 3420) < 1e-6, n.bucket_loan_q
-        assert abs(n.bucket_loan_t - 1140) < 1e-6, n.bucket_loan_t
-        assert abs(n.grant_left - 1440) < 1e-6, n.grant_left
-        assert abs(n.tomorrow_used - 3420) < 1e-6
-        assert abs(n.tomorrow_remaining - 180) < 1e-6
-
-
+        assert n.online and not n.grant_quick and abs(n.grant_left - 1800) < 1e-6
+        n.tick(600.0)
+        assert abs(n.used - 600) < 1e-6, n.used
         n.end_early()
-        n._reset_grant()
-        n.used, n.tomorrow_used, n.debt = 2400.0, 0.0, 0.0
-        ok, msg = n.convert_to_loan()
-        assert not ok and "No pending request" in msg, "没有申请时不能凭空贷款"
+        assert not n.online and abs(n.used - 600) < 1e-6
 
-        ok, msg = n.request(5, "查资料")
-        assert ok and not n.pending["loan"], msg
-        ok, msg = n.convert_to_loan()
-        assert not ok and "no need to borrow" in msg, msg
-        n.cancel()
-
-        ok, msg = n.request(25, "查资料")
-        assert not ok and "Emergency loan" in msg, msg
-        ok, msg = n.can_loan(25)
-        assert ok, msg
-        today_cost, loan_cost, _t, grant = n.loan_plan(25)
-        assert abs(today_cost - 1200) < 1e-6, today_cost
-        assert abs(loan_cost - 2700) < 1e-6, loan_cost
-        assert abs(grant - 1500) < 1e-6, grant
-
-        n.cancel()
-        n._reset_grant()
-        n.used = 2400.0
-        ok, msg = n.request(25, "查资料")
-        assert not ok and "Emergency loan" in msg, msg
-        ok, msg = n.request(25, "紧急", loan=True)
-        assert ok and n.pending["loan"], msg
-        today_cost, loan_cost, _t, grant = n.loan_plan(25)
-        assert abs(today_cost - 1200) < 1e-6, today_cost
-        assert abs(loan_cost - 2700) < 1e-6, loan_cost
-        assert abs(grant - 1500) < 1e-6, grant
-        n.cancel()
-
-        ok, msg = n.request(15, "查资料")
-        assert ok and not n.pending["loan"], msg
-        ok, msg = n.convert_to_loan()
-        assert not ok and "no need to borrow" in msg, msg
-        n.cancel()
-
-        ok, msg = n.request(25, "查资料")
-        assert not ok and "Emergency loan" in msg, msg
-        ok, msg = n.request(25, "紧急", loan=True)
-        assert ok and n.pending["loan"], msg
-        n.cancel()
-
-
-        n.cancel()
-        n._reset_grant()
-        n.used = 3000.0
-        ok, msg = n.request(25, "紧急", loan=True)
-        assert ok and n.pending["loan"], msg
+        # 快速访问: 立刻联网, 2x 计费, 没有冷静期
+        ok, msg = n.request(10, "快", quick=True)
+        assert ok and n.pending["quick"] and n.pending["at"] <= time.time() + 1, msg
         n.tick(0.0)
-        assert abs(n.bucket_today - 600) < 1e-6, n.bucket_today
-        assert abs(n.bucket_loan_q - 3600) < 1e-6, n.bucket_loan_q
-        assert abs(n.bucket_loan_t - 1200) < 1e-6, n.bucket_loan_t
-        assert abs(n.grant_left - 1500) < 1e-6, n.grant_left
-
-        n.tick(30.0)
-        assert abs(n.used - 3060) < 1e-6, n.used
-        n.tick(10 ** 6)
-
-        assert abs(n.used - 7200) < 1e-6, n.used
-        assert not n.online, "本次批准用完后应当断网"
-        assert abs(n.tomorrow_used - 3600) < 1e-6, n.tomorrow_used
-
-        n.used, n.tomorrow_used, n.debt = 0.0, 0.0, 0.0
-        n._reset_grant()
-
-
-        n.used, n.tomorrow_used, n.debt = 3600.0, 0.0, 0.0
-        n._reset_grant()
-        assert abs(n.max_grant() - 1200) < 1e-6, n.max_grant()
-        ok, msg = n.can_loan(20)
-        assert ok, msg
-        _t, loan_cost, total, grant = n.loan_plan(20)
-        assert _t == 0.0 and abs(loan_cost - 3600) < 1e-6, loan_cost
-        assert abs(total - 3600) < 1e-6 and abs(grant - 1200) < 1e-6
-        ok, msg = n.can_loan(30)
-        assert not ok and "Loan can cover at most" in msg, msg
-        ok, msg = n.request(30, "x")
-        assert not ok and "Only" in msg and "Emergency loan" in msg
-        ok, msg = n.request(20, "紧急", loan=True)
-        assert ok, msg
-        n.tick(0.0)
-        assert abs(n.grant_left - 1200) < 1e-6 and n.bucket_today == 0.0
-        assert abs(n.bucket_loan_q - 3600) < 1e-6 and abs(n.bucket_loan_t - 1200) < 1e-6
+        assert n.online and n.grant_quick and abs(n.grant_left - 600) < 1e-6
         n.tick(60.0)
-        assert abs(n.used - 3780) < 1e-6, n.used
+        assert abs(n.used - 720) < 1e-6, n.used
         n.end_early()
+        assert abs(n.used - 720) < 1e-6, "提前结束不再额外扣费"
 
-        assert abs(n.tomorrow_used - 180) < 1e-6, n.tomorrow_used
-
-        n.used, n.tomorrow_used, n.debt = 3600.0, 0.0, 0.0
-        n._reset_grant()
-
-
-        n.used, n.tomorrow_used, n.debt = 0.0, 0.0, 3000.0
-        assert abs(n.remaining - 600) < 1e-6, n.remaining
-        assert abs(n.quota_left - (600 / 2 + 3600 / 3)) < 1e-6, n.quota_left
-        ok, msg = n.can_loan(200)
-        assert not ok and "Loan can cover at most" in msg, msg
-        ok, msg = n.request(70, "x", loan=True)
-        assert not ok and "Loan can cover at most" in msg, msg
-
-
-        n.debt = 0.0
-        n.used = 3600.0
-        ok, msg = n.request(20, "x", loan=True)
-        assert ok and abs(n.pending["loan_cost"] - 3600) < 1e-6, n.pending["loan_cost"]
-        n.cancel()
-        assert n.pending is None and n.tomorrow_used == 0.0 and n.used == 3600.0
-
-
-        n.cancel()
-        n._reset_grant()
-        n.used, n.tomorrow_used, n.debt = 3000.0, 0.0, 0.0
-        ok, msg = n.request(24, "紧急", loan=True)
+        # 快速访问上限 = 剩余 / 2
+        n.used = 3000.0
+        ok, msg = n.can_quick(6)
+        assert not ok and "at most" in msg, msg
+        ok, msg = n.request(5, "快", quick=True)
         assert ok, msg
         n.tick(0.0)
-        assert abs(n.tomorrow_used - 3420) < 1e-6, n.tomorrow_used
+        n.tick(10 ** 6)
+        assert abs(n.used - 3600) < 1e-6 and not n.online, n.used
+
+        # 冷静期中可升级为快速访问
+        n.used = 0.0
+        ok, msg = n.request(20, "x")
+        assert ok
+        ok, msg = n.convert_to_quick()
+        assert ok and n.pending["quick"] and n.pending["at"] <= time.time() + 1, msg
+        ok, msg = n.convert_to_quick()
+        assert not ok and "already" in msg
+        n.cancel()
+        assert n.pending is None
+        n.used = 3000.0
+        ok, msg = n.request(5, "x")
+        assert ok
+        ok, msg = n.convert_to_quick()
+        assert ok, msg
+        n.cancel()
+        ok, msg = n.request(6, "x")
+        assert ok
+        ok, msg = n.convert_to_quick()
+        assert not ok and "at most" in msg, msg
+        n.cancel()
+        ok, msg = n.convert_to_quick()
+        assert not ok and "No pending request" in msg
+
+        # 紧急借贷: 今天 +X, 明天 -2X, 不联网
+        n.used = 3600.0
+        assert n.remaining == 0.0
+        ok, msg = n.request(10, "x")
+        assert not ok and "emergency loan" in msg, msg
+        ok, msg = n.borrow(20, "急")
+        assert ok, msg
+        assert not n.online and n.pending is None, "借贷本身不联网"
+        assert abs(n.bonus - 1200) < 1e-6 and abs(n.remaining - 1200) < 1e-6
+        assert abs(n.tomorrow_used - 2400) < 1e-6 and abs(n.tomorrow_remaining - 1200) < 1e-6
+        assert abs(n.today_total - 4800) < 1e-6 and abs(n.quota_used - 3600) < 1e-6
+        assert abs(n.loan_left - 600) < 1e-6
+        ok, msg = n.can_borrow(11)
+        assert not ok and "at most" in msg, msg
+        ok, msg = n.borrow(10, "急")
+        assert ok and abs(n.tomorrow_remaining) < 1e-6 and abs(n.remaining - 1800) < 1e-6
+        ok, msg = n.borrow(1, "急")
+        assert not ok and "fully borrowed" in msg, msg
+
+        # 借来的额度既可走冷静期, 也可走快速访问
+        ok, msg = n.request(10, "x", quick=True)
+        assert ok, msg
+        n.tick(0.0)
+        n.tick(300.0)
+        assert abs(n.used - 4200) < 1e-6, n.used
+        n.end_early()
+
+        # 跨日: 明天的 2x 变成欠款, 借到的额度清零
         n._rollover("2099-01-01")
-        assert n.used == 0.0 and n.date == "2099-01-01"
-        assert n.tomorrow_used == 0.0
-        assert abs(n.debt - 3420) < 1e-6, n.debt
-        assert abs(n.remaining - (3600 - 3420)) < 1e-6, n.remaining
+        assert n.used == 0.0 and n.bonus == 0.0 and n.tomorrow_used == 0.0
+        assert abs(n.debt - 3600) < 1e-6 and n.remaining == 0.0
+        n._rollover("2099-01-02")
+        assert n.debt == 0.0 and n.remaining == 3600, "欠款只扣一天, 不会滚雪球"
 
+        # 存档往返
+        n.dead = False
+        n.date = _dt.datetime.now().strftime('%Y-%m-%d')
+        n.used, n.bonus, n.tomorrow_used, n.debt = 100.0, 600.0, 1200.0, 300.0
+        n._save()
+        m = NetGuard.__new__(NetGuard)
+        m.state_file, m.date = n.state_file, n.date
+        m.used = m.bonus = m.tomorrow_used = m.debt = 0.0
+        m._load()
+        assert (m.used, m.bonus, m.tomorrow_used, m.debt) == (100.0, 600.0, 1200.0, 300.0)
+        n.dead = True
 
-        n.debt, n.tomorrow_used, n.used = 0.0, 0.0, 0.0
+        n.used, n.bonus, n.tomorrow_used, n.debt = 0.0, 0.0, 0.0, 0.0
         n._reset_grant()
         ok, msg = n.request(10, "x")
         assert ok and n.pending["at"] > time.time() + 200
