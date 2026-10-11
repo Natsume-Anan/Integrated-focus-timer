@@ -1,6 +1,6 @@
 # Obliphur's Integrated Terminal (OIT)
 
-> 名称中的 integrated terminal 并非指数值意义上的集成终端,此处取其「一体化工作台」之意。
+> (并非集成终端...)
 
 时间常被无意义的琐事消耗,持续的信息流也容易使人疲惫。本应用的核心功能即针对这一问题:
 
