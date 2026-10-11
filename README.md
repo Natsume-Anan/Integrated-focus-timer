@@ -84,11 +84,17 @@ python tests/check_imports.py   # 未使用导入静态检查
 Obliphur's Integrated Terminal/
 ├── main.py                  # 入口:申请管理员权限并启动界面
 ├── app.py                   # 页面编排、计时器、网络调度、界面重建、卸载
-├── config.py                # 配置种子值、开发者模式开关、主题配色、DPI 与字体、设置文件读写
+├── config.py                # 配置种子值、主题配色、DPI 与字体、设置文件读写
 ├── i18n.py                  # 双语对照表与 tr()
 ├── settings_manager.py      # 首次修改立即生效 + 之后 48 小时延后生效机制
 ├── net_guard.py             # 联网申请、额度账本、紧急贷款与断网
 ├── data_manager.py          # 学习时长、整点日志、卸载计数
-├── pages/                   # 各页面与共用控件
-└── tests/                   # 自检脚本
+├── toast.py                 # 右下角提示条与确认弹窗
+├── context_collect.py       # 经用户同意后采集已安装应用与浏览器域名(供规则建议)
+└── pages/                   # 各页面与共用控件
+    ├── __init__.py          # 页面与控件的统一导出
+    ├── widgets.py           # Switch / ScrollArea / Modal 等共用控件
+    ├── calendar_page.py     # 📅 Calendar 页
+    ├── hour_log_page.py     # 📝 Hour Log 页
+    └── settings_page.py     # ⚙ Settings 页
 ```
