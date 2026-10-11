@@ -1,14 +1,12 @@
-# -*- coding: utf-8 -*-
-"""
-数据持久化管理：学习时长、整点日志、卸载计数、旧数据迁移
-"""
+
 
 import os
 import json
 import shutil
 from datetime import datetime, timedelta
-from typing import Optional, Dict, Any
+from typing import Optional, Dict
 
+import config
 from config import (
     APP_NAME, OLD_APP_DIR, FILL_WINDOW, AUTO_TEXT, LOG_HOURS, HOUR_LOG_ENABLED
 )
@@ -25,7 +23,7 @@ class DataManager:
         os.makedirs(self.data_dir, exist_ok=True)
         self.old_dir = os.path.join(low_dir, OLD_APP_DIR)
 
-        # 卸载计数放在数据文件夹之外,卸载清数据时不会被删
+
         self.uninstall_file = os.path.join(low_dir, f"{APP_NAME}.uninstall.json")
         self.uninstalling = False
         self.uninstall_count, self.uninstall_last = self._load_uninstall_count()
@@ -36,16 +34,29 @@ class DataManager:
         self.study_data: Dict[str, float] = {}
         self.hour_days: Dict[str, Dict[str, str]] = {}
         self.hour_cursor: Optional[datetime] = None
-        self.hour_enabled: bool = HOUR_LOG_ENABLED   # 整点记录总开关
+
+        self.hour_enabled = bool(getattr(config, "HOUR_LOG_ENABLED", HOUR_LOG_ENABLED))
         self.today_date = datetime.now().strftime('%Y-%m-%d')
-        self.prompt_slot: Optional[datetime] = None  # 最近一次提示音对应的“上一个小时”
+        self.prompt_slot: Optional[datetime] = None
 
         self._migrate_old_data()
         self.load_study_data()
         self.load_hour_log()
         self.finalize_hours()
 
-    # ───────────── 卸载计数 ─────────────
+
+    @property
+    def log_hours(self) -> int:
+        try:
+            return max(1, min(24, int(getattr(config, "LOG_HOURS", LOG_HOURS))))
+        except (TypeError, ValueError):
+            return LOG_HOURS
+
+    @property
+    def auto_text(self) -> str:
+        return str(getattr(config, "AUTO_TEXT", AUTO_TEXT))
+
+
     def _load_uninstall_count(self):
         try:
             with open(self.uninstall_file, 'r', encoding='utf-8') as f:
@@ -64,9 +75,8 @@ class DataManager:
         except IOError:
             pass
 
-    # ───────────── 旧数据迁移 ─────────────
+
     def _migrate_old_data(self):
-        """首次启动:把旧文件夹里的数据复制到新文件夹(不覆盖已有文件)"""
         if not os.path.isdir(self.old_dir):
             return
         for name in ("study_log.json", "net_state.json", "net_requests.log"):
@@ -78,7 +88,7 @@ class DataManager:
                 except OSError:
                     pass
 
-    # ───────────── 学习时长数据 ─────────────
+
     def load_study_data(self):
         if os.path.exists(self.study_file):
             try:
@@ -148,13 +158,12 @@ class DataManager:
             del self.study_data[key]
         self.save_study_data()
 
-    # ───────────── 整点记录数据 ─────────────
+
     def load_hour_log(self):
         try:
             with open(self.hour_file, 'r', encoding='utf-8') as f:
                 d = json.load(f)
             self.hour_days = d.get("days", {})
-            self.hour_enabled = bool(d.get("enabled", self.hour_enabled))
             cur = d.get("cursor")
             self.hour_cursor = datetime.fromisoformat(cur) if cur else None
         except Exception:
@@ -162,7 +171,6 @@ class DataManager:
         self._prune_hours()
 
     def _prune_hours(self):
-        """只保留今天的记录"""
         today = datetime.now().strftime('%Y-%m-%d')
         self.hour_days = {k: v for k, v in self.hour_days.items() if k == today}
 
@@ -173,26 +181,28 @@ class DataManager:
         try:
             with open(self.hour_file, 'w', encoding='utf-8') as f:
                 json.dump({
-                    "enabled": self.hour_enabled,
+
+                    "enabled": bool(self.hour_enabled),
                     "cursor": self.hour_cursor.isoformat() if self.hour_cursor else None,
                     "days": self.hour_days
                 }, f, ensure_ascii=False, indent=1)
         except IOError:
             pass
 
-    def set_hour_enabled(self, enabled: bool):
-        """切换整点记录开关:关闭时不再提示/不再自动补记,重新开启从当前小时起记"""
+    def apply_hour_enabled(self, enabled: bool):
         enabled = bool(enabled)
         if enabled == self.hour_enabled:
             return
         self.hour_enabled = enabled
-        now = datetime.now()
         if enabled:
-            # 关闭期间的时段保持空白,不做任何补记
-            self.hour_cursor = now.replace(minute=0, second=0, microsecond=0)
+
+            self.hour_cursor = datetime.now().replace(minute=0, second=0, microsecond=0)
         else:
             self.prompt_slot = None
         self.save_hour_log()
+
+    def set_hour_enabled(self, enabled: bool):
+        self.apply_hour_enabled(enabled)
 
     def get_hour_text(self, date_str: str, hour: int) -> str:
         return self.hour_days.get(date_str, {}).get(str(hour), "")
@@ -206,17 +216,16 @@ class DataManager:
         self.save_hour_log()
 
     def finalize_hours(self):
-        """把已超过填写期限、仍为空白的小时填成 Sleeping(只处理今天,且跳过 23:00–24:00)"""
         now = datetime.now()
         floor = now.replace(minute=0, second=0, microsecond=0)
         today0 = now.replace(hour=0, minute=0, second=0, microsecond=0)
         if self.hour_cursor is None:
-            self.hour_cursor = floor            # 首次运行:从当前小时开始记
+            self.hour_cursor = floor
             self.save_hour_log()
             return
-        self.hour_cursor = max(self.hour_cursor, today0)   # 昨天及更早的不再处理
+        self.hour_cursor = max(self.hour_cursor, today0)
         if not self.hour_enabled:
-            # 关闭状态下不写入任何自动记录,游标直接跟到当前小时
+
             if self.hour_cursor < floor:
                 self.hour_cursor = floor
                 self.save_hour_log()
@@ -224,15 +233,15 @@ class DataManager:
         changed = False
         while self.hour_cursor + timedelta(hours=1) + FILL_WINDOW <= now:
             ds, h = self.hour_cursor.strftime('%Y-%m-%d'), self.hour_cursor.hour
-            if h < LOG_HOURS and not self.get_hour_text(ds, h):
-                self.hour_days.setdefault(ds, {})[str(h)] = AUTO_TEXT
+
+            if h < self.log_hours and not self.get_hour_text(ds, h):
+                self.hour_days.setdefault(ds, {})[str(h)] = self.auto_text
             self.hour_cursor += timedelta(hours=1)
             changed = True
         if changed:
             self.save_hour_log()
 
     def awaiting_slot(self) -> Optional[datetime]:
-        """当前仍在等待填写的小时(datetime),没有则返回 None"""
         if not self.hour_enabled:
             return None
         s = self.prompt_slot
@@ -244,8 +253,7 @@ class DataManager:
             return None
         return s
 
-    # ───────────── 卸载清理 ─────────────
+
     def erase_all_data(self):
-        """清除所有业务数据目录（卸载时调用）"""
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.old_dir, ignore_errors=True)

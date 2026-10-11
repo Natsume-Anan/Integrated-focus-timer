@@ -1,8 +1,4 @@
-# -*- coding: utf-8 -*-
-"""
-入口文件
-以管理员权限运行(Windows 下断网需要管理员）
-"""
+
 
 import sys
 import tkinter as tk

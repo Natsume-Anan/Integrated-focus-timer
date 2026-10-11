@@ -1,100 +1,63 @@
-# -*- coding: utf-8 -*-
-"""整点记录页：只记录今天"""
+
 
 import tkinter as tk
 from tkinter import ttk
 from datetime import datetime, timedelta
 
-from config import COLORS, FILL_WINDOW, AUTO_TEXT, LOG_HOURS
-
-
-class Switch(tk.Canvas):
-    """纯 Canvas 滑动开关(配合白色主题,不依赖 ttk 主题外观)"""
-
-    W, H = 46, 24
-
-    def __init__(self, master, value: bool = True, command=None, bg: str = None):
-        super().__init__(
-            master, width=self.W, height=self.H, bg=bg or COLORS["bg"],
-            highlightthickness=0, bd=0, cursor="hand2"
-        )
-        self._cmd = command
-        self._on = bool(value)
-        r = self.H / 2.0
-        self._track = [
-            self.create_oval(1, 1, self.H - 1, self.H - 1, outline=""),
-            self.create_oval(self.W - self.H + 1, 1, self.W - 1, self.H - 1, outline=""),
-            self.create_rectangle(r, 1, self.W - r, self.H - 1, outline=""),
-        ]
-        self._knob = self.create_oval(0, 0, 0, 0, fill="#ffffff", outline="")
-        self.bind("<Button-1>", self._on_click)
-        self._draw()
-
-    def _on_click(self, _event=None):
-        self.set(not self._on, notify=True)
-
-    def get(self) -> bool:
-        return self._on
-
-    def set(self, value: bool, notify: bool = False):
-        value = bool(value)
-        changed = value != self._on
-        self._on = value
-        self._draw()
-        if notify and changed and self._cmd:
-            self._cmd(self._on)
-
-    def _draw(self):
-        for item in self._track:
-            self.itemconfig(item, fill=COLORS["accent"] if self._on else "#cbd5e1")
-        pad = 3
-        d = self.H - 2 * pad
-        x = (self.W - self.H + pad) if self._on else pad
-        self.coords(self._knob, x, pad, x + d, pad + d)
+import config
+from config import COLORS, FILL_WINDOW
+from i18n import tr
+from .widgets import wrap_label
 
 
 class HourLogPage(tk.Frame):
-    """只记录今天:每行以该小时的结束时间命名(1:00 表示 0:00–1:00),不含 23:00–24:00"""
 
-    def __init__(self, master, data_manager, on_text_changed=None, on_toggle=None):
+    def __init__(self, master, data_manager, on_text_changed=None, on_toggle=None,
+                 on_open_settings=None):
         super().__init__(master, bg=COLORS["bg"])
         self.dm = data_manager
-        self.on_text_changed = on_text_changed  # 回调，用于更新 badge
-        self.on_toggle = on_toggle              # 回调，开关变化时通知主程序
+        self.on_text_changed = on_text_changed
+        self.on_toggle = on_toggle
+        self.on_open_settings = on_open_settings
         self.view_date = data_manager.today_date
-        self.rows = {}          # hour -> (label, entry, var)
+        self.rows = {}
         self._build()
+
 
     def _build(self):
         bg, card = COLORS["bg"], COLORS["bg_card"]
 
         hdr = tk.Frame(self, bg=bg)
-        hdr.pack(fill="x", padx=28, pady=(22, 4))
+        hdr.pack(fill="x", padx=28, pady=(18, 4))
 
         left = tk.Frame(hdr, bg=bg)
-        left.pack(side="left", anchor="nw")
+        left.pack(side="left", fill="x", expand=True, anchor="nw")
         tk.Label(
-            left, text="📝  Hour Log", bg=bg, fg=COLORS["text"],
-            font=("Segoe UI", 18, "bold")
+            left, text=tr("📝  整点记录"), bg=bg, fg=COLORS["text"],
+            font=config.font("h1", bold=True)
         ).pack(anchor="w")
+
         self.lbl_hint = tk.Label(
-            left, text="", bg=bg, fg=COLORS["text_dim"], font=("Segoe UI", 10),
-            justify="left"
+            left, text="", bg=bg, fg=COLORS["text_dim"],
+            font=config.font("body"), justify="left", anchor="w"
         )
-        self.lbl_hint.pack(anchor="w", pady=(4, 0))
+        self.lbl_hint.pack(anchor="w", fill="x", pady=(4, 0))
+        wrap_label(self.lbl_hint, 12)
 
         right = tk.Frame(hdr, bg=bg)
-        right.pack(side="right", anchor="ne", pady=(4, 0))
-        self.lbl_switch = tk.Label(
-            right, text="", bg=bg, font=("Segoe UI", 10, "bold"), width=0
+        right.pack(side="right", anchor="ne", pady=(2, 0))
+        self.lbl_state = tk.Label(
+            right, text="", bg=bg, font=config.font("body", bold=True)
         )
-        self.lbl_switch.pack(side="right", padx=(8, 0))
-        self.switch = Switch(right, value=self.dm.hour_enabled, command=self._on_switch)
-        self.switch.pack(side="right")
+        self.lbl_state.pack(side="right", padx=(8, 0))
+        self.btn_settings = ttk.Button(
+            right, text=tr("⚙  设置"), command=self._open_settings
+        )
+        self.btn_settings.pack(side="right")
 
         self.lbl_date = tk.Label(
             self, text="", bg=bg, fg=COLORS["accent"],
-            font=("Segoe UI", 10, "bold"), anchor="w"
+            font=config.font("body", bold=True), anchor="w"
         )
         self.lbl_date.pack(fill="x", padx=28, pady=(8, 6))
 
@@ -115,20 +78,19 @@ class HourLogPage(tk.Frame):
             "<Configure>",
             lambda e: self.canvas.itemconfig(self.win, width=e.width)
         )
-        # 只在本页面可见时响应滚轮（由主程序控制绑定）
         self.canvas.bind("<MouseWheel>", self._on_wheel)
 
-        for h in range(LOG_HOURS):
+        for h in range(int(self.dm.log_hours)):
             row = tk.Frame(self.inner, bg=bg)
             row.pack(fill="x", padx=10, pady=2)
             lbl = tk.Label(
-                row, text="", width=16, anchor="w", bg=bg, fg=COLORS["text_dim"],
-                font=("Segoe UI", 10, "bold")
+                row, text="", width=18, anchor="w", bg=bg, fg=COLORS["text_dim"],
+                font=config.font("body", bold=True)
             )
             lbl.pack(side="left")
             var = tk.StringVar()
             ent = tk.Entry(
-                row, textvariable=var, font=("Segoe UI", 10), relief="flat",
+                row, textvariable=var, font=config.font("body"), relief="flat",
                 bg=card, fg=COLORS["text"], insertbackground=COLORS["text"],
                 disabledbackground=bg, disabledforeground=COLORS["text_dim"],
                 highlightthickness=1, highlightbackground=COLORS["border"],
@@ -139,13 +101,18 @@ class HourLogPage(tk.Frame):
             ent.bind("<FocusOut>", lambda e, h=h: self._commit(h))
             self.rows[h] = (lbl, ent, var)
 
+    def _open_settings(self):
+        if self.on_open_settings:
+            self.on_open_settings()
+
     def _on_wheel(self, e):
         self.canvas.yview_scroll(int(-e.delta / 120), "units")
 
     def _scroll_to(self, hour: int):
         self.update_idletasks()
-        hour = min(max(hour, 0), LOG_HOURS - 1)
-        self.canvas.yview_moveto(max(0, hour - 2) / float(LOG_HOURS))
+        total = max(1, len(self.rows))
+        hour = min(max(hour, 0), total - 1)
+        self.canvas.yview_moveto(max(0, hour - 2) / float(total))
 
     def _on_return(self, h: int):
         self._commit(h)
@@ -162,43 +129,35 @@ class HourLogPage(tk.Frame):
                 self.on_text_changed()
             self.refresh()
 
-    def _on_switch(self, enabled: bool):
-        """开关被点击:写入配置并通知主程序"""
-        self.dm.set_hour_enabled(enabled)
-        if self.on_toggle:
-            self.on_toggle(self.dm.hour_enabled)
-        self.refresh()
-
-    def _refresh_switch(self):
-        on = self.dm.hour_enabled
-        if self.switch.get() != on:
-            self.switch.set(on)
-        self.lbl_switch.config(
-            text="ON" if on else "OFF",
-            fg=COLORS["success"] if on else COLORS["text_dim"]
-        )
-        if on:
-            self.lbl_hint.config(
-                text=(f"Today only. After each chime, note what you did in the last hour.  "
-                      f"Left blank for {int(FILL_WINDOW.total_seconds() // 3600)} h → \"{AUTO_TEXT}\".")
-            )
-        else:
-            self.lbl_hint.config(
-                text=("Hour log is OFF — no chime, no auto fill, nothing is recorded. "
-                      "Turn it back on to start logging again from the current hour.")
-            )
 
     def refresh(self):
         now = datetime.now()
         self.view_date = self.dm.today_date
         d0 = datetime.strptime(self.view_date, '%Y-%m-%d')
-        self._refresh_switch()
-        self.lbl_date.config(
-            text=f"{self.view_date}  (today)"
-                 + ("" if self.dm.hour_enabled else "   ·  logging disabled")
-        )
+        enabled = bool(self.dm.hour_enabled)
+        auto_text = self.dm.auto_text
+        fill_hours = int(FILL_WINDOW.total_seconds() // 3600)
 
-        enabled = self.dm.hour_enabled
+        self.lbl_state.config(
+            text=tr("当前: {state}").format(state=tr("开启") if enabled else tr("关闭_状态")),
+            fg=COLORS["success"] if enabled else COLORS["text_dim"]
+        )
+        if enabled:
+            self.lbl_hint.config(
+                text=(tr("只记录今天.每次提示音后填写上一小时做了什么;")
+                      + " " + tr("留空 {h} 小时 → 自动记为「{text}」.").format(
+                          h=fill_hours, text=auto_text)
+                      + " " + tr("（开关在 Settings 页,改动 48 小时后生效）"))
+            )
+        else:
+            self.lbl_hint.config(
+                text=(tr("整点记录已关闭 —— 不响铃、不自动补记、也不记录任何内容.")
+                      + " " + tr("（开关在 Settings 页,改动 48 小时后生效）"))
+            )
+        self.lbl_date.config(
+            text=tr("{date}(今天)").format(date=self.view_date)
+                 + ("" if enabled else tr("   ·  记录已关闭"))
+        )
 
         awaiting = self.dm.awaiting_slot()
         focused = self.focus_get()
@@ -213,11 +172,11 @@ class HourLogPage(tk.Frame):
 
             is_wait = awaiting is not None and awaiting == start
             is_now = enabled and start <= now < end
-            label = f"{h + 1}:00"                 # 只显示结束时间
+            label = f"{h + 1}:00"
             if is_now:
-                label += "   ◂ now"
+                label += tr("   ◂ 现在")
             elif is_wait:
-                label += "   ◂ fill me"
+                label += tr("   ◂ 待填写")
             lbl.config(
                 text=label,
                 fg=COLORS["accent"] if (is_wait or is_now) else
@@ -228,9 +187,8 @@ class HourLogPage(tk.Frame):
             )
 
     def show(self):
-        """切到本页:如果有待填写的小时,直接滚动到那一行并聚焦"""
         aw = self.dm.awaiting_slot()
         self.refresh()
         self._scroll_to(aw.hour if aw else datetime.now().hour)
-        if aw and aw.hour < LOG_HOURS:
+        if aw and aw.hour in self.rows:
             self.rows[aw.hour][1].focus_set()
