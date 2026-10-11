@@ -23,6 +23,8 @@ class SettingsPage(tk.Frame):
         self.on_font_scale = on_font_scale
         self._rows = {}
         self._syncing = False
+        self.sw_dev = None
+        self.lbl_dev_state = None
 
         self._i18n_widgets = []
         self._choices_widgets = []
@@ -87,6 +89,8 @@ class SettingsPage(tk.Frame):
         self.btn_cancel_all.pack(side="left", padx=(8, 0))
 
     def _build_dev_mode(self, body):
+        if not config.dev_mode_defined():
+            return
         card = COLORS["bg_card"]
         fr = tk.Frame(body, bg=card, highlightbackground=COLORS["border"],
                       highlightthickness=1)
@@ -312,13 +316,14 @@ class SettingsPage(tk.Frame):
     def refresh(self):
         self._retranslate()
 
-        dev = bool(getattr(config, "DEV_MODE", False))
-        if self.sw_dev.get() != dev:
-            self.sw_dev.set(dev)
-        self.lbl_dev_state.config(
-            text=tr("已开启 —— 网络不受限制") if dev else tr("已关闭(正常模式)"),
-            fg=COLORS["danger"] if dev else COLORS["text_dim"]
-        )
+        if self.sw_dev is not None:
+            dev = bool(getattr(config, "DEV_MODE", False))
+            if self.sw_dev.get() != dev:
+                self.sw_dev.set(dev)
+            self.lbl_dev_state.config(
+                text=tr("已开启 —— 网络不受限制") if dev else tr("已关闭(正常模式)"),
+                fg=COLORS["danger"] if dev else COLORS["text_dim"]
+            )
 
         self._syncing = True
         try:

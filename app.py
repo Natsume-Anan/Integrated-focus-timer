@@ -694,12 +694,14 @@ class BreakTimerApp:
         staged = self.settings.staged_count()
         if staged:
             mark += f"  ⏳{staged}"
-        if bool(getattr(config, "DEV_MODE", False)):
+        if config.dev_mode_enabled():
             mark += "  🛠"
         b.config(text=self.nav_labels["settings"] + mark)
 
 
     def on_dev_mode_changed(self, enabled: bool):
+        if not config.dev_mode_defined():
+            return
         if enabled:
             self.net.release_restrictions()
             self._log_notice("DEV_MODE on — network cut-off disabled")

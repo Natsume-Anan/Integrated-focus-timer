@@ -133,6 +133,7 @@ class SettingsManager:
         self.effective = {}
         self.pending = {}
         self.since = {}
+        self.changed = {}
         self.load()
         self.promote_due()
         self.apply_to_config()
@@ -145,6 +146,7 @@ class SettingsManager:
         eff = raw.get("effective") if isinstance(raw.get("effective"), dict) else {}
         pen = raw.get("pending") if isinstance(raw.get("pending"), dict) else {}
         since = raw.get("since") if isinstance(raw.get("since"), dict) else {}
+        changed = raw.get("changed") if isinstance(raw.get("changed"), dict) else {}
 
         for s in SETTINGS_SCHEMA:
             k = s["key"]
@@ -153,6 +155,7 @@ class SettingsManager:
             else:
                 self.effective[k] = self._coerce(k, DEFAULT_SETTINGS.get(k))
             self.since[k] = str(since.get(k) or DEFAULT_SINCE)
+            self.changed[k] = bool(changed.get(k))
 
         for k, item in pen.items():
             if k not in SCHEMA_BY_KEY or not isinstance(item, dict):
@@ -170,6 +173,7 @@ class SettingsManager:
         payload = {
             "effective": self.effective,
             "since": self.since,
+            "changed": dict(self.changed),
             "pending": {
                 k: {
                     "value": v["value"],
@@ -227,6 +231,15 @@ class SettingsManager:
     def is_staged(self, key: str) -> bool:
         return key in self.pending
 
+    def ever_changed(self, key: str) -> bool:
+        return bool(self.changed.get(key))
+
+    def first_change_pending(self, key: str) -> bool:
+        spec = SCHEMA_BY_KEY.get(key) or {}
+        if spec.get("apply") != APPLY_DELAY:
+            return False
+        return not self.ever_changed(key)
+
     def staged_count(self) -> int:
         return len(self.pending)
 
@@ -265,10 +278,12 @@ class SettingsManager:
         if spec is None:
             return "unknown", tr("未知配置项 {key}", key=key)
         value = self._coerce(key, value)
+        first_change = not self.changed.get(key)
 
         if spec["apply"] == APPLY_INSTANT:
             self.effective[key] = value
             self.since[key] = f"{self._now():%Y-%m-%d %H:%M}"
+            self.changed[key] = True
             self.pending.pop(key, None)
             self.save()
             self.apply_to_config()
@@ -284,6 +299,17 @@ class SettingsManager:
             return "nochange", tr("{label} 与当前生效值相同。", label=tr(spec['label']))
 
         now = self._now()
+        if first_change:
+
+            self.effective[key] = value
+            self.since[key] = f"{now:%Y-%m-%d %H:%M}"
+            self.changed[key] = True
+            self.pending.pop(key, None)
+            self.save()
+            self.apply_to_config()
+            return "instant", tr("{label} 首次修改,已立即生效;以后的修改需要等待冷静期。",
+                                 label=tr(spec['label']))
+
         self.pending[key] = {
             "value": value,
             "requested_at": f"{now:%Y-%m-%d %H:%M}",
@@ -409,10 +435,16 @@ def _selftest():
     m = SettingsManager(tmp, delay_hours=48)
     assert m.value("DAILY_LIMIT") == DEFAULT_SETTINGS["DAILY_LIMIT"]
     assert not m.is_staged("DAILY_LIMIT")
+    assert m.first_change_pending("DAILY_LIMIT"), "从没改过的项第一次改应当免冷静期"
 
     st, _ = m.stage("DAILY_LIMIT", 3600)
+    assert st == "instant" and not m.is_staged("DAILY_LIMIT")
+    assert m.value("DAILY_LIMIT") == 3600 == config.DAILY_LIMIT, "首次修改要立即生效"
+    assert not m.first_change_pending("DAILY_LIMIT")
+
+    st, _ = m.stage("DAILY_LIMIT", 7200)
     assert st == "staged" and m.is_staged("DAILY_LIMIT")
-    assert m.value("DAILY_LIMIT") == DEFAULT_SETTINGS["DAILY_LIMIT"], "延迟项不得立即生效"
+    assert m.value("DAILY_LIMIT") == 3600, "第二次修改必须等冷静期"
     assert 47 * 3600 < m.pending_left_seconds("DAILY_LIMIT") <= 48 * 3600
 
     st, _ = m.stage("CHIME_WAV", "__builtin__")
@@ -429,8 +461,11 @@ def _selftest():
 
 
     m.stage("LOG_HOURS", 24)
+    assert m.value("LOG_HOURS") == 24 and not m.is_staged("LOG_HOURS")
+    m.stage("LOG_HOURS", 22)
     m2 = SettingsManager(tmp, delay_hours=48)
-    assert m2.is_staged("LOG_HOURS") and m2.value("LOG_HOURS") == DEFAULT_SETTINGS["LOG_HOURS"]
+    assert m2.is_staged("LOG_HOURS") and m2.value("LOG_HOURS") == 24
+    assert m2.ever_changed("LOG_HOURS") and not m2.ever_changed("ENFORCE_EVERY")
     assert m2.cancel_all() == 1
     return "settings_manager selftest OK"
 

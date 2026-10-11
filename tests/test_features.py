@@ -27,6 +27,21 @@ def check(name, fn):
 
 
 
+def _dev_mode_backup():
+    import config
+    return ("DEV_MODE" in vars(config), getattr(config, "DEV_MODE", None))
+
+
+def _dev_mode_restore(saved):
+    import config
+    defined, value = saved
+    if defined:
+        config.DEV_MODE = value
+    elif "DEV_MODE" in vars(config):
+        del config.DEV_MODE
+
+
+
 def test_settings():
     import config
     from settings_manager import SettingsManager, APPLY_DELAY_HOURS
@@ -43,10 +58,17 @@ def test_settings():
         assert base == config.DAILY_LIMIT, (base, config.DAILY_LIMIT)
 
 
+        assert m.first_change_pending("DAILY_LIMIT"), "首次修改应当免冷静期"
         status, _ = m.stage("DAILY_LIMIT", 3600)
-        assert status == "staged"
-        assert m.value("DAILY_LIMIT") == base, "延后项不能立即生效"
-        assert config.DAILY_LIMIT == base, "config 也不能被提前改写"
+        assert status == "instant", status
+        assert m.value("DAILY_LIMIT") == 3600 and config.DAILY_LIMIT == 3600, "首次修改立即生效"
+        assert m.ever_changed("DAILY_LIMIT")
+
+
+        status, _ = m.stage("DAILY_LIMIT", 7200)
+        assert status == "staged", status
+        assert m.value("DAILY_LIMIT") == 3600, "第二次修改不能立即生效"
+        assert config.DAILY_LIMIT == 3600, "config 也不能被提前改写"
         left = m.pending_left_seconds("DAILY_LIMIT")
         assert (APPLY_DELAY_HOURS - 1) * 3600 < left <= APPLY_DELAY_HOURS * 3600, left
 
@@ -61,24 +83,35 @@ def test_settings():
 
 
         m.stage("COOLDOWN", 900)
-        m.pending["COOLDOWN"]["apply_at"] = dt.datetime.now() - dt.timedelta(seconds=1)
-        assert m.promote_due() == ["COOLDOWN"]
-        assert m.value("COOLDOWN") == 900 and config.COOLDOWN == 900
+        assert m.value("COOLDOWN") == 900 and not m.is_staged("COOLDOWN"), "首次修改立即生效"
+        assert config.COOLDOWN == 900
 
 
         m.stage("LOG_HOURS", 22)
+        assert m.value("LOG_HOURS") == 22 and not m.is_staged("LOG_HOURS")
+        m.stage("LOG_HOURS", 24)
         m2 = SettingsManager(tmp_file)
         assert m2.is_staged("LOG_HOURS")
-        assert m2.value("LOG_HOURS") == config.LOG_HOURS, m2.value("LOG_HOURS")
+        assert m2.value("LOG_HOURS") == 22, m2.value("LOG_HOURS")
         assert m2.pending_left_seconds("LOG_HOURS") > 47 * 3600
 
 
-        status, _ = m2.stage("LOG_HOURS", m2.value("LOG_HOURS"))
-        assert not m2.is_staged("LOG_HOURS")
+        m.pending["LOG_HOURS"]["apply_at"] = dt.datetime.now() - dt.timedelta(seconds=1)
+        assert m.promote_due() == ["LOG_HOURS"]
+        assert m.value("LOG_HOURS") == 24
+        m.stage("LOG_HOURS", 24)
+        assert not m.is_staged("LOG_HOURS")
+
+
+        status, _ = m2.stage("LOG_HOURS", 24)
+        assert status == "staged" and not m2.is_staged("LOG_HOURS")
+        assert m2.value("LOG_HOURS") == 22
 
 
         m2.stage("ENFORCE_EVERY", 120)
-        m2.stage("LOG_HOURS", 22)
+        assert m2.value("ENFORCE_EVERY") == 120 and not m2.is_staged("ENFORCE_EVERY")
+        m2.stage("ENFORCE_EVERY", 300)
+        m2.stage("LOG_HOURS", 23)
         assert m2.staged_count() == 2
         assert m2.cancel_all() == 2 and m2.staged_count() == 0
 
@@ -95,8 +128,13 @@ def test_settings():
         assert status == "instant" and abs(float(config.FONT_SCALE) - 1.15) < 1e-6
 
         status, _ = m2.stage("HOUR_LOG_ENABLED", 0)
+        assert status == "instant" and not m2.is_staged("HOUR_LOG_ENABLED")
+        assert config.HOUR_LOG_ENABLED == 0, "首次修改应当立即生效"
+        status, _ = m2.stage("HOUR_LOG_ENABLED", 1)
         assert status == "staged" and m2.is_staged("HOUR_LOG_ENABLED")
+        assert config.HOUR_LOG_ENABLED == 0, "第二次修改必须等冷静期"
         assert m2.cancel("HOUR_LOG_ENABLED")
+        config.HOUR_LOG_ENABLED = 1
     finally:
         config.settings_file = old_file
 
@@ -106,8 +144,8 @@ def test_loan():
     import config
     import net_guard as ng
 
-    saved = (config.DAILY_LIMIT, config.COOLDOWN,
-             config.TICK_CLAMP, config.DEV_MODE)
+    saved = (config.DAILY_LIMIT, config.COOLDOWN, config.TICK_CLAMP)
+    dev_saved = _dev_mode_backup()
     config.DAILY_LIMIT, config.COOLDOWN = 3600, 300
     config.TICK_CLAMP = 10 ** 6
     config.DEV_MODE = False
@@ -180,8 +218,8 @@ def test_loan():
         assert abs(n.remaining - 180) < 1e-6, n.remaining
         return True
     finally:
-        (config.DAILY_LIMIT, config.COOLDOWN,
-         config.TICK_CLAMP, config.DEV_MODE) = saved
+        (config.DAILY_LIMIT, config.COOLDOWN, config.TICK_CLAMP) = saved
+        _dev_mode_restore(dev_saved)
 
 
 
@@ -189,8 +227,8 @@ def test_dev_mode():
     import config
     import net_guard as ng
 
-    saved = (config.DAILY_LIMIT, config.COOLDOWN,
-             config.DEV_MODE, config.TICK_CLAMP)
+    saved = (config.DAILY_LIMIT, config.COOLDOWN, config.TICK_CLAMP)
+    dev_saved = _dev_mode_backup()
     config.DAILY_LIMIT, config.COOLDOWN = 3600, 300
     config.TICK_CLAMP = 10 ** 6
     try:
@@ -211,10 +249,80 @@ def test_dev_mode():
 
         config.DEV_MODE = False
         assert n.mode == "offline" and not n.online
+
+
+        del config.DEV_MODE
+        assert not config.dev_mode_defined(), "config 里没有这一行时开发者模式必须视为不存在"
+        assert not config.dev_mode_enabled()
+        assert n.mode == "offline" and not n.online, "未定义 DEV_MODE 时不得视为开发者模式"
         return True
     finally:
-        (config.DAILY_LIMIT, config.COOLDOWN,
-         config.DEV_MODE, config.TICK_CLAMP) = saved
+        (config.DAILY_LIMIT, config.COOLDOWN, config.TICK_CLAMP) = saved
+        _dev_mode_restore(dev_saved)
+
+
+
+def test_dev_mode_ui():
+    import tkinter as tk
+
+    import config
+    import net_guard
+    import toast
+
+    net_guard.NetGuard._run = staticmethod(lambda cmd: None)
+    toast.ask = lambda message, title=None, **k: True
+    toast.bind_root = lambda root: None
+
+    tmp = tempfile.mkdtemp()
+    os.environ["USERPROFILE"] = tmp
+    config.app_data_dir = lambda: os.path.join(tmp, "AppData", "LocalLow", config.APP_NAME)
+    config.settings_file = lambda: os.path.join(
+        tmp, "AppData", "LocalLow", config.APP_NAME, "app_settings.json")
+
+    dev_saved = _dev_mode_backup()
+    config.DEV_MODE = False
+    assert config.dev_mode_defined()
+
+    from app import BreakTimerApp
+
+    root = tk.Tk()
+    root.withdraw()
+    app = BreakTimerApp(root)
+    try:
+        page = app.pages["settings"]
+        assert page.sw_dev is not None, "config 里有 DEV_MODE 行时应当显示开发者模式卡片"
+
+        app.show_page("settings")
+        root.update()
+        page.sw_dev.set(True)
+        page._on_dev_switch(True)
+        root.update()
+        assert config.DEV_MODE is True
+        assert app.net.mode == "dev"
+        assert "🛠" in app.nav_btns["settings"].cget("text")
+        app.show_page("net")
+        root.update()
+        assert "Developer mode" in app.net_lbl_status.cget("text")
+
+        app.show_page("settings")
+        page = app.pages["settings"]
+        page.sw_dev.set(False)
+        page._on_dev_switch(False)
+        root.update()
+        assert config.DEV_MODE is False
+        assert app.net.mode != "dev"
+        assert "🛠" not in app.nav_btns["settings"].cget("text")
+    finally:
+        app._cancel_jobs()
+        try:
+            app.net.release()
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
+        _dev_mode_restore(dev_saved)
 
 
 
@@ -259,10 +367,20 @@ def test_gui():
 
         app.show_page("settings")
         page = app.pages["settings"]
+        assert page.sw_dev is None, "config 里没有 DEV_MODE 行时,设置页不该有开发者模式卡片"
+        assert not hasattr(app.pages["log"], "switch"), "整点开关应只在 Settings 页"
         page._rows["DAILY_LIMIT"]["var"].set("1 h")
         page._stage("DAILY_LIMIT")
         root.update()
-        assert app.settings.is_staged("DAILY_LIMIT")
+        assert config.DAILY_LIMIT == 3600, "首次修改应当立即生效"
+        assert not app.settings.is_staged("DAILY_LIMIT")
+        assert "⏳" not in app.nav_btns["settings"].cget("text")
+
+        page._rows["DAILY_LIMIT"]["var"].set("2 h")
+        page._stage("DAILY_LIMIT")
+        root.update()
+        assert app.settings.is_staged("DAILY_LIMIT"), "第二次修改必须排队"
+        assert config.DAILY_LIMIT == 3600, "第二次修改不能立即生效"
         assert "⏳" in app.nav_btns["settings"].cget("text")
 
 
@@ -272,8 +390,15 @@ def test_gui():
         app.check_pending_settings()
         root.update()
         assert not app.settings.is_staged("DAILY_LIMIT")
-        assert config.DAILY_LIMIT == 3600
+        assert config.DAILY_LIMIT == 7200, config.DAILY_LIMIT
         assert "⏳" not in app.nav_btns["settings"].cget("text")
+
+
+        page._rows["DAILY_LIMIT"]["var"].set("1 h")
+        page._stage("DAILY_LIMIT")
+        root.update()
+        assert config.DAILY_LIMIT == 3600, "改回旧值同样立即生效"
+        assert not app.settings.is_staged("DAILY_LIMIT")
 
 
         app.show_page("settings")
@@ -290,9 +415,17 @@ def test_gui():
         page._rows["HOUR_LOG_ENABLED"]["var"].set(off_label)
         page._stage("HOUR_LOG_ENABLED")
         root.update()
-        assert app.settings.is_staged("HOUR_LOG_ENABLED"), "整点开关必须走 48 小时"
+        assert not app.settings.is_staged("HOUR_LOG_ENABLED"), "首次修改免冷静期"
+        assert config.HOUR_LOG_ENABLED == 0
+        on_label = [lab for val, lab in app.settings.labeled_values("HOUR_LOG_ENABLED")
+                    if str(app.settings._coerce("HOUR_LOG_ENABLED", val)) == "1"][0]
+        page._rows["HOUR_LOG_ENABLED"]["var"].set(on_label)
+        page._stage("HOUR_LOG_ENABLED")
+        root.update()
+        assert app.settings.is_staged("HOUR_LOG_ENABLED"), "整点开关第二次修改必须走 48 小时"
         app.settings.cancel("HOUR_LOG_ENABLED")
         app.pages["settings"].refresh()
+        config.HOUR_LOG_ENABLED = 1
 
 
         app.show_page("net")
@@ -316,16 +449,8 @@ def test_gui():
         root.update()
 
 
-        app.pages["settings"].sw_dev.set(True)
-        app.pages["settings"]._on_dev_switch(True)
-        app.show_page("net")
-        root.update()
-        assert app.net.mode == "dev"
-        assert "Developer mode" in app.net_lbl_status.cget("text")
-        app.pages["settings"].sw_dev.set(False)
-        app.pages["settings"]._on_dev_switch(False)
-        root.update()
-        assert app.net.mode != "dev"
+        assert app.pages["settings"].sw_dev is None, "开发者模式卡片不该出现"
+        assert "🛠" not in app.nav_btns["settings"].cget("text")
 
 
         assert not hasattr(app.pages["log"], "switch")
@@ -582,22 +707,25 @@ def test_e2e():
 
 
 
-        before = getattr(config, "DAILY_LIMIT")
         app.settings.stage("DAILY_LIMIT", 3600)
-        assert app.settings.is_staged("DAILY_LIMIT")
-        assert getattr(config, "DAILY_LIMIT") == before, "不能提前生效"
+        assert not app.settings.is_staged("DAILY_LIMIT"), "首次修改免冷静期"
+        assert getattr(config, "DAILY_LIMIT") == 3600, "首次修改立即生效"
         app.settings.stage("CHIME_WAV", "__builtin__")
         assert config.CHIME_WAV == "", "即时项要立刻生效"
 
 
+        app.settings.stage("DAILY_LIMIT", 7200)
+        assert app.settings.is_staged("DAILY_LIMIT"), "第二次修改必须排队"
+        assert getattr(config, "DAILY_LIMIT") == 3600, "第二次修改不能提前生效"
         app.settings.pending["DAILY_LIMIT"]["apply_at"] = (
             dt.datetime.now() - dt.timedelta(seconds=1))
         app.check_pending_settings()
-        assert config.DAILY_LIMIT == 3600
-        assert app.net.limit == 3600.0, app.net.limit
+        assert config.DAILY_LIMIT == 7200
+        assert app.net.limit == 7200.0, app.net.limit
         assert not app.settings.is_staged("DAILY_LIMIT")
         assert app.settings_path_ok if hasattr(app, "settings_path_ok") else True
-        assert json.load(open(settings_path, encoding="utf-8"))["effective"]["DAILY_LIMIT"] == 3600
+        assert json.load(open(settings_path, encoding="utf-8"))["effective"]["DAILY_LIMIT"] == 7200
+        assert json.load(open(settings_path, encoding="utf-8"))["changed"]["DAILY_LIMIT"] is True
 
 
         app.net.used = 3000.0
@@ -637,15 +765,16 @@ def test_e2e():
 
 def main():
     print("settings_manager:")
-    check("48h 延后生效 / 即时生效 / 取消 / 到期", test_settings)
+    check("首次修改免冷静期 / 之后 48h 延后 / 即时生效 / 取消 / 到期", test_settings)
     print("i18n:")
     check("英文界面下 Settings / Calendar 无残留中文", test_i18n_en)
     print("net_guard:")
     check("紧急贷款 今天 2 倍 / 明天 3 倍 / 跳过冷静期 / 退款 / 跨天", test_loan)
-    check("开发者模式:不断网 / 不计时", test_dev_mode)
+    check("开发者模式:不断网 / 不计时 / config 里没有该行时不生效", test_dev_mode)
     print("interface:")
     check("界面冒烟(全页面 + 设置 + 贷款)", test_gui)
-    check("端到端:到期生效 → 贷款 → 卸载", test_e2e)
+    check("开发者模式:config 里有该行时设置页出现卡片", test_dev_mode_ui)
+    check("端到端:首次修改立即生效 → 第二次到期生效 → 贷款 → 卸载", test_e2e)
 
     print()
     if FAILURES:

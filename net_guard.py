@@ -84,7 +84,7 @@ class NetGuard:
 
     @property
     def dev_mode(self) -> bool:
-        return bool(getattr(config, "DEV_MODE", False))
+        return config.dev_mode_enabled()
 
     @property
     def online(self) -> bool:

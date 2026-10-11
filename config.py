@@ -30,9 +30,6 @@ TICK_CLAMP = 30
 
 
 
-DEV_MODE = False
-
-
 APP_NAME = "Obliphur's Integrated Terminal"   
 OLD_APP_DIR = "mrsTimer"
 FILL_WINDOW = timedelta(hours=1)              
@@ -104,6 +101,18 @@ def font(size_key: str = "body", bold: bool = False, family: str = None):
         family = FONT_FAMILY
     return (family, max(8, scaled(size)), "bold") if bold else (family, max(8, scaled(size)))
 
+
+
+def dev_mode_defined() -> bool:
+    if "config" not in sys.modules:
+        return False
+    return "DEV_MODE" in vars(sys.modules["config"])
+
+
+def dev_mode_enabled() -> bool:
+    if not dev_mode_defined():
+        return False
+    return bool(getattr(sys.modules["config"], "DEV_MODE", False))
 
 
 

@@ -143,6 +143,7 @@ EN = {
     "Distracted(分心)": "Distracted",
     "未知配置项 {key}": "Unknown setting: {key}",
     "{label} 已立即生效。": "{label} applied immediately.",
+    "{label} 首次修改,已立即生效;以后的修改需要等待冷静期。": "{label}: first change applied immediately; later changes must wait out the cooling-off period.",
     "{label} 已恢复到当前生效值,排队中的改动已取消。": "{label} reverted to the active value; the queued change was cancelled.",
     "{label} 与当前生效值相同。": "{label} already matches the active value.",
     "{label} 已提交,将于 {at}。": "{label} submitted; applies at {at}.",
