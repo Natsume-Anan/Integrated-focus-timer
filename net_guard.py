@@ -17,6 +17,7 @@ from data_manager import month_prefixes
 
 QUICK_MULTIPLIER = 2.0   # 快速访问: 免冷静期, 每联网 1 秒消耗 2 秒今日额度
 LOAN_RATE = 2.0          # 紧急借贷: 今日额度 +1 秒, 明天额度 -2 秒
+BREAK_COOLDOWN_RATE = 0.4  # 计时器休息中提交的普通申请: 冷静期 ×0.4
 
 
 class NetGuard:
@@ -358,7 +359,8 @@ class NetGuard:
         return True, ""
 
 
-    def request(self, minutes: int, reason: str, quick: bool = False):
+    def request(self, minutes: int, reason: str, quick: bool = False,
+                cooldown_rate: float = 1.0):
         if self.dev_mode:
             return False, "Developer mode is ON — the network is already unrestricted."
         if self.online:
@@ -384,13 +386,16 @@ class NetGuard:
             if self.loan_left >= 60:
                 extra = f" An emergency loan can add up to {fmt_hm(self.loan_left)}."
             return False, f"Only {fmt_hm(self.remaining)} left today.{extra}"
+        rate = min(1.0, max(0.0, float(cooldown_rate)))
         self.pending = {
             "minutes": minutes,
-            "at": time.time() + self.cooldown,
+            "at": time.time() + self.cooldown * rate,
             "reason": reason,
             "quick": False,
         }
-        self._log(f"REQUEST  {minutes} min  reason: {reason}")
+        self._log(f"REQUEST  {minutes} min"
+                  + (f" (on break, cooldown {rate:g}x)" if rate < 1.0 else "")
+                  + f"  reason: {reason}")
         return True, ""
 
     def convert_to_quick(self):
@@ -647,6 +652,11 @@ def _selftest():
         n._reset_grant()
         ok, msg = n.request(10, "x")
         assert ok and n.pending["at"] > time.time() + 200
+        n.cancel()
+
+        # 休息中申请: 冷静期 ×0.4 (300s → 120s)
+        ok, msg = n.request(10, "x", cooldown_rate=BREAK_COOLDOWN_RATE)
+        assert ok and 110 < n.pending["at"] - time.time() <= 120, n.pending
         n.cancel()
         assert n.mode == "offline"
 

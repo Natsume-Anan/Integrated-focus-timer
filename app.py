@@ -13,11 +13,11 @@ import i18n
 import toast
 from config import (
     COLORS, APP_NAME, IDLE, RUNNING, READY_BREAK, ON_BREAK,
-    ensure_builtin_chime,
-    compute_F, fmt_hm, fmt_ms
+    ensure_builtin_chime, load_json_file, save_json_file,
+    compute_F, fmt_hm, fmt_ms, BREAK_CARRY_RATE
 )
 from i18n import tr
-from net_guard import NetGuard, QUICK_MULTIPLIER, LOAN_RATE
+from net_guard import NetGuard, QUICK_MULTIPLIER, LOAN_RATE, BREAK_COOLDOWN_RATE
 from data_manager import DataManager
 from settings_manager import SettingsManager
 from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage, StatsPage
@@ -84,6 +84,8 @@ class BreakTimerApp:
 
 
         self.dm = DataManager()
+        self.timer_file = os.path.join(self.dm.data_dir, "timer_state.json")
+        self.break_carry = self._load_break_carry()
         self.settings = SettingsManager()
         i18n.init_from_config()
         config.UI_SCALE = self.ui_scale * float(self.settings.value("FONT_SCALE") or 1.0)
@@ -296,8 +298,7 @@ class BreakTimerApp:
             self.update_settings_badge()
             self._start_midnight_timer()
             self._schedule_hourly()
-            if self.state == RUNNING:
-                self.schedule_update()
+            self._restore_timer_view()
             self._schedule_apply_check()
             self._net_tick()
         finally:
@@ -401,7 +402,7 @@ class BreakTimerApp:
         self.lbl_time.pack(anchor="w", pady=(2, 6))
 
         self.lbl_sub = tk.Label(
-            inner, text=tr("开始专注时按 [开始]."),
+            inner, text=self._idle_sub_text(),
             bg=card, fg=COLORS["text_dim"], font=config.font("body"), anchor="w"
         )
         self.lbl_sub.pack(anchor="w")
@@ -454,26 +455,88 @@ class BreakTimerApp:
             self.refresh_display()
 
             self.state = READY_BREAK
-            self.btn_action.config(text=tr("☕  去休息"))
             self.cancel_update()
-            fval = compute_F(self.last_t_minutes)
-            m = int(fval)
-            s = int((fval - m) * 60)
-            self.lbl_time.config(text=f"{m:02d}:{s:02d}")
-            self.lbl_sub.config(text=tr("已工作 {m:.2f} 分钟 → 上方是建议休息时长").format(m=self.last_t_minutes))
-            self._status(tr("本次专注结束"), COLORS["success"])
+            self._show_ready_break()
 
         elif self.state == READY_BREAK:
-            fval = compute_F(self.last_t_minutes)
-            if fval <= 0:
+            total = self._break_seconds()
+            if total <= 0:
                 toast.info(tr("剩余时间为 0,已重置."))
                 self.reset_to_idle()
                 return
-            self.countdown_seconds = max(1, int(round(fval * 60.0)))
+            if self.break_carry > 0:
+                self._set_break_carry(0)
+            self.countdown_seconds = total
             self.state = ON_BREAK
-            self.btn_action.config(state="disabled")
-            self._status(tr("休息中 ☕"), COLORS["warn"])
-            self.lbl_sub.config(text=tr("休息吧,倒计时中…"))
+            self._show_on_break()
+            self.schedule_update()
+
+        elif self.state == ON_BREAK:
+            self.end_break_early()
+
+    # ---- 休息: 建议时长 + 上次提前结束留下的结余 ----
+
+    def _break_seconds(self) -> int:
+        """本次休息总秒数 = 建议休息时长 + 结余."""
+        fval = max(0.0, compute_F(self.last_t_minutes))
+        base = int(round(fval * 60.0))
+        total = base + int(self.break_carry)
+        return max(1, total) if total > 0 else 0
+
+    def _show_ready_break(self):
+        self.btn_action.config(text=tr("☕  去休息"), state="!disabled")
+        total = self._break_seconds()
+        self.lbl_time.config(text=fmt_ms(total))
+        sub = tr("已工作 {m:.2f} 分钟 → 上方是建议休息时长").format(m=self.last_t_minutes)
+        if self.break_carry > 0:
+            sub += "\n" + tr("(含上次提前结束留下的 {c})").format(c=fmt_ms(self.break_carry))
+        self.lbl_sub.config(text=sub)
+        self._status(tr("本次专注结束"), COLORS["success"])
+
+    def _show_on_break(self):
+        self.btn_action.config(text=tr("⏭  提前结束休息"), state="!disabled")
+        self._status(tr("休息中 ☕"), COLORS["warn"])
+        self.lbl_sub.config(text=tr("休息吧,倒计时中…"))
+
+    def end_break_early(self):
+        if self.state != ON_BREAK:
+            return
+        left = max(0, int(self.countdown_seconds))
+        add = int(round(left * BREAK_CARRY_RATE))
+        if add > 0:
+            self._set_break_carry(self.break_carry + add)
+            toast.info(tr("已提前结束休息.\n剩余 {left} 按 ×{r:g} 存入下次休息: +{add}").format(
+                left=fmt_ms(left), r=BREAK_CARRY_RATE, add=fmt_ms(add)))
+        self.reset_to_idle()
+
+    def _idle_sub_text(self) -> str:
+        text = tr("开始专注时按 [开始].")
+        if self.break_carry > 0:
+            text += "\n" + tr("下次休息额外 +{c}").format(c=fmt_ms(self.break_carry))
+        return text
+
+    def _load_break_carry(self) -> int:
+        d = load_json_file(self.timer_file, {})
+        try:
+            return max(0, int(d.get("break_carry", 0))) if isinstance(d, dict) else 0
+        except (TypeError, ValueError):
+            return 0
+
+    def _set_break_carry(self, seconds: int):
+        self.break_carry = max(0, int(seconds))
+        if not self.dm.uninstalling:
+            save_json_file(self.timer_file, {"break_carry": self.break_carry})
+
+    def _restore_timer_view(self):
+        """界面重建 (换语言 / 字号) 后按当前状态恢复计时器页."""
+        if self.state == RUNNING:
+            self.btn_action.config(text=tr("■  结束"))
+            self._status(tr("专注中…"), COLORS["accent"])
+            self.schedule_update()
+        elif self.state == READY_BREAK:
+            self._show_ready_break()
+        elif self.state == ON_BREAK:
+            self._show_on_break()
             self.schedule_update()
 
     def schedule_update(self):
@@ -520,7 +583,7 @@ class BreakTimerApp:
         self.countdown_seconds = 0
         self.btn_action.config(text=tr("▶  开始"), state="!disabled")
         self.lbl_time.config(text="0.00 min")
-        self.lbl_sub.config(text=tr("开始专注时按 [开始]."))
+        self.lbl_sub.config(text=self._idle_sub_text())
         self._status(tr("准备就绪"), COLORS["text_dim"])
 
     def refresh_display(self):
@@ -874,7 +937,8 @@ class BreakTimerApp:
         ok, minutes, reason = self._read_net_form()
         if not ok:
             return
-        ok, msg = self.net.request(minutes, reason)
+        rate = BREAK_COOLDOWN_RATE if self.state == ON_BREAK else 1.0
+        ok, msg = self.net.request(minutes, reason, cooldown_rate=rate)
         if not ok:
             toast.warn(tr(msg))
             return
@@ -974,11 +1038,13 @@ class BreakTimerApp:
         cooldown = int(self.settings.value("COOLDOWN"))
         cooldown_m = cooldown // 60
 
-        self.net_lbl_header.config(
-            text=tr("申请 → {min} 分钟冷静期 → 联网 → 到点自动断网").format(min=cooldown_m)
-                 + "    ·    " + tr("⚡ 快速访问免冷静期(×{a:g})  ·  💳 借 1 分钟扣明天 {b:g} 分钟").format(
-                     a=QUICK_MULTIPLIER, b=LOAN_RATE)
-        )
+        header = (tr("申请 → {min} 分钟冷静期 → 联网 → 到点自动断网").format(min=cooldown_m)
+                  + "    ·    " + tr("⚡ 快速访问免冷静期(×{a:g})  ·  💳 借 1 分钟扣明天 {b:g} 分钟").format(
+                      a=QUICK_MULTIPLIER, b=LOAN_RATE))
+        if self.state == ON_BREAK:
+            header += "\n" + tr("☕ 休息中提交申请,冷静期 ×{r:g}: 只需 {t}").format(
+                r=BREAK_COOLDOWN_RATE, t=fmt_ms(cooldown * BREAK_COOLDOWN_RATE))
+        self.net_lbl_header.config(text=header, justify="left")
 
         if mode == "dev":
 
