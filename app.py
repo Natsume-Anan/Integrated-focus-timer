@@ -474,7 +474,7 @@ class BreakTimerApp:
         elif self.state == ON_BREAK:
             self.end_break_early()
 
-    # ---- 休息: 建议时长 + 上次提前结束留下的结余 ----
+    # ---- 休息: 建议时长 + 之前暂停休息结转的时间 ----
 
     def _break_seconds(self) -> int:
         """本次休息总秒数 = 建议休息时长 + 结余."""
@@ -489,25 +489,31 @@ class BreakTimerApp:
         self.lbl_time.config(text=fmt_ms(total))
         sub = tr("已工作 {m:.2f} 分钟 → 上方是建议休息时长").format(m=self.last_t_minutes)
         if self.break_carry > 0:
-            sub += "\n" + tr("(含上次提前结束留下的 {c})").format(c=fmt_ms(self.break_carry))
+            sub += "\n" + tr("(含之前暂停休息结转的 {c})").format(c=fmt_ms(self.break_carry))
         self.lbl_sub.config(text=sub)
         self._status(tr("本次专注结束"), COLORS["success"])
 
     def _show_on_break(self):
-        self.btn_action.config(text=tr("⏭  提前结束休息"), state="!disabled")
+        self.btn_action.config(text=tr("⏸  暂停休息"), state="!disabled")
         self._status(tr("休息中 ☕"), COLORS["warn"])
         self.lbl_sub.config(text=tr("休息吧,倒计时中…"))
 
-    def end_break_early(self):
+    def end_break_early(self, silent: bool = False):
+        """暂停休息(关闭程序也算):剩余时间 ×0.6 计入下一次休息."""
         if self.state != ON_BREAK:
             return
         left = max(0, int(self.countdown_seconds))
         add = int(round(left * BREAK_CARRY_RATE))
         if add > 0:
             self._set_break_carry(self.break_carry + add)
-            toast.info(tr("已提前结束休息.\n剩余 {left} 按 ×{r:g} 存入下次休息: +{add}").format(
-                left=fmt_ms(left), r=BREAK_CARRY_RATE, add=fmt_ms(add)))
-        self.reset_to_idle()
+            if not silent:
+                toast.info(tr("休息已暂停.\n剩余 {left} 按 ×{r:g} 计入下次休息: +{add}").format(
+                    left=fmt_ms(left), r=BREAK_CARRY_RATE, add=fmt_ms(add)))
+        if silent:
+            self.state = IDLE
+            self.countdown_seconds = 0
+        else:
+            self.reset_to_idle()
 
     def _idle_sub_text(self) -> str:
         text = tr("开始专注时按 [开始].")
@@ -742,6 +748,7 @@ class BreakTimerApp:
 
 
     def on_close(self):
+        self.end_break_early(silent=True)
         self._cancel_jobs()
         self.net.shutdown()
         self.root.destroy()
@@ -937,7 +944,10 @@ class BreakTimerApp:
         ok, minutes, reason = self._read_net_form()
         if not ok:
             return
-        rate = BREAK_COOLDOWN_RATE if self.state == ON_BREAK else 1.0
+        rate = 1.0
+        if self.state == ON_BREAK and minutes * 60 > self.countdown_seconds:
+            # 休息中, 且申请时长长于剩余休息时间 → 冷静期 ×0.4
+            rate = BREAK_COOLDOWN_RATE
         ok, msg = self.net.request(minutes, reason, cooldown_rate=rate)
         if not ok:
             toast.warn(tr(msg))
@@ -1043,7 +1053,9 @@ class BreakTimerApp:
                       a=QUICK_MULTIPLIER, b=LOAN_RATE))
         if self.state == ON_BREAK:
             header += "\n" + tr("☕ 休息中提交申请,冷静期 ×{r:g}: 只需 {t}").format(
-                r=BREAK_COOLDOWN_RATE, t=fmt_ms(cooldown * BREAK_COOLDOWN_RATE))
+                r=BREAK_COOLDOWN_RATE, t=fmt_ms(cooldown * BREAK_COOLDOWN_RATE)) \
+                + tr("(申请时长长于剩余休息 {left} 时生效)").format(
+                    left=fmt_ms(self.countdown_seconds))
         self.net_lbl_header.config(text=header, justify="left")
 
         if mode == "dev":

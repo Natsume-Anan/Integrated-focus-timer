@@ -151,7 +151,7 @@ COLORS = {
 }
 
 
-BREAK_CARRY_RATE = 0.6   # 提前结束休息: 剩余休息时间 ×0.6 存入下一次休息
+BREAK_CARRY_RATE = 0.6   # 暂停休息(含关闭程序): 剩余休息时间 ×0.6 计入下一次休息
 
 
 def compute_F(t: float) -> float:
