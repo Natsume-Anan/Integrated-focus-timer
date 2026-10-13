@@ -3,6 +3,7 @@
 import tkinter as tk
 import calendar
 from datetime import datetime
+from tkinter import ttk
 
 import config
 from config import COLORS
@@ -21,6 +22,7 @@ class CalendarPage(tk.Frame):
         self.dm = data_manager
         self.display_year = datetime.now().year
         self.display_month = datetime.now().month
+        self.offset = 0            # 0 = 本月, -1 = 上月(只保留这两个月)
         self.day_labels = []
         self._build_ui()
 
@@ -33,6 +35,11 @@ class CalendarPage(tk.Frame):
             bg=COLORS["bg"], fg=COLORS["text"], anchor="w"
         )
         self.lbl_month_title.pack(side="left", expand=True, fill="x")
+
+        self.btn_next = ttk.Button(nav_frame, text=tr("本月 ›"), command=lambda: self._go(0))
+        self.btn_next.pack(side="right", padx=(4, 0))
+        self.btn_prev = ttk.Button(nav_frame, text=tr("‹ 上月"), command=lambda: self._go(-1))
+        self.btn_prev.pack(side="right", padx=(10, 0))
 
         self.lbl_month_total = tk.Label(
             nav_frame, text=tr("合计: {h:.1f} h").format(h=0.0),
@@ -60,9 +67,24 @@ class CalendarPage(tk.Frame):
         for lbl, day in zip(self.day_labels, DAYS):
             lbl.config(text=tr(day))
 
+    def _go(self, offset: int):
+        self.offset = offset
+        self.refresh()
+
+    def show(self):
+        self.offset = 0
+        self.refresh()
+
     def refresh(self):
-        self.display_year = datetime.now().year
-        self.display_month = datetime.now().month
+        now = datetime.now()
+        self.display_year, self.display_month = now.year, now.month
+        if self.offset < 0:
+            if self.display_month == 1:
+                self.display_year, self.display_month = self.display_year - 1, 12
+            else:
+                self.display_month -= 1
+        self.btn_prev.state(["disabled" if self.offset < 0 else "!disabled"])
+        self.btn_next.state(["disabled" if self.offset == 0 else "!disabled"])
 
         for widget in self.grid_frame.winfo_children():
             widget.destroy()

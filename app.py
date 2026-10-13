@@ -20,7 +20,7 @@ from i18n import tr
 from net_guard import NetGuard, QUICK_MULTIPLIER, LOAN_RATE
 from data_manager import DataManager
 from settings_manager import SettingsManager
-from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage
+from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage, StatsPage
 from pages.widgets import wrap_label
 
 
@@ -206,6 +206,7 @@ class BreakTimerApp:
             "rules": tr("🛡  Rules"),
             "log": tr("📝  Hour Log"),
             "cal": tr("📅  Calendar"),
+            "stats": tr("📊  Statistics"),
             "settings": tr("⚙  Settings"),
             "uninstall": tr("🗑  Uninstall")
         }
@@ -230,6 +231,7 @@ class BreakTimerApp:
 
         self.pages = {}
         self.pages["cal"] = CalendarPage(self.content, self.dm)
+        self.pages["stats"] = StatsPage(self.content, self.dm, self.net)
         self.pages["log"] = HourLogPage(
             self.content, self.dm,
             on_text_changed=self.update_log_badge,
@@ -340,7 +342,9 @@ class BreakTimerApp:
                     activebackground=COLORS["border"], activeforeground=COLORS["text"]
                 )
         if key == "cal":
-            self.pages["cal"].refresh()
+            self.pages["cal"].show()
+        elif key == "stats":
+            self.pages["stats"].show()
         elif key == "net":
             self.refresh_net(force=True)
         elif key == "rules":
@@ -540,14 +544,20 @@ class BreakTimerApp:
         old_date = self.dm.today_date
         self.dm.today_date = datetime.now().strftime('%Y-%m-%d')
         if old_date[:7] != self.dm.today_date[:7]:
-            self.dm.clear_last_month_except_yesterday()
-        self.dm.prompt_slot = None
+            self.dm.prune_study_data()
+        # 不清 prompt_slot:昨天 23:00 那格现在显示在今天最上方,仍可填写.
         self.dm.finalize_hours()
         self.dm.save_hour_log()
         self.update_log_badge()
         self.pages["log"].refresh()
         self.refresh_display()
+        self._refresh_if_visible("cal", "stats")
         self._schedule_midnight()
+
+    def _refresh_if_visible(self, *keys):
+        for key in keys:
+            if self.current_page == key and key in self.pages:
+                self.pages[key].refresh()
 
     def _schedule_hourly(self):
         now = datetime.now()
@@ -564,8 +574,6 @@ class BreakTimerApp:
         self.dm.finalize_hours()
         if not self.dm.hour_enabled:
             self.update_log_badge()
-            return
-        if slot.hour >= int(self.settings.value("LOG_HOURS")):
             return
         self._wait_chime(self._play_chime(), slot)
 
@@ -654,6 +662,7 @@ class BreakTimerApp:
             self.dm.apply_hour_enabled(want)
         if "log" in self.pages:
             self.pages["log"].refresh()
+        self._refresh_if_visible("stats")
         self.update_log_badge()
 
     def _log_notice(self, text: str):
@@ -697,9 +706,9 @@ class BreakTimerApp:
             self._log_notice(f"NET_MODE -> {self.net.net_mode}")
         if status != "instant":
             return
-        if key in ("HOUR_LOG_ENABLED", "AUTO_TEXT", "LOG_HOURS", None):
+        if key in ("HOUR_LOG_ENABLED", "AUTO_TEXT", None):
 
-            if key in ("LOG_HOURS", "AUTO_TEXT", None):
+            if key in ("AUTO_TEXT", None):
                 if "log" in self.pages:
                     self.pages["log"].refresh()
             if key == "HOUR_LOG_ENABLED":
@@ -813,6 +822,10 @@ class BreakTimerApp:
         row2.pack(anchor="w", pady=(0, 12))
         ttk.Label(row2, text=tr("理由"), style="UI.TLabel", width=8).pack(side="left")
         ttk.Entry(row2, textvariable=self.var_reason, width=30).pack(side="left")
+        tk.Label(
+            row2, text=tr("多个理由用 / 连接,如「查资料/下载课件」"),
+            bg=bg, fg=COLORS["text_dim"], font=config.font("small")
+        ).pack(side="left", padx=(10, 0))
 
         btns = tk.Frame(self.net_form, bg=bg)
         btns.pack(anchor="w")
@@ -1105,6 +1118,8 @@ class BreakTimerApp:
             self.pages["rules"].refresh()
         self.net_job = self.root.after(1000, self._net_tick)
 
+        if event:
+            self._refresh_if_visible("stats")
         if event == "started":
             toast.success(tr("网络已开启."))
         elif event == "ended":

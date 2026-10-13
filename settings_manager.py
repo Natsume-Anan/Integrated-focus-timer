@@ -80,13 +80,6 @@ SETTINGS_SCHEMA = [
         "desc": "程序启动时整点记录的初始状态;启动后仍可在 Hour Log 页直接切换.",
     },
     {
-        "key": "LOG_HOURS", "label": "整点记录截止小时",
-        "kind": "choice", "apply": APPLY_DELAY,
-        "choices": [("22", "22:00"), ("23", "23:00"), ("24", "24:00")],
-        "fmt": lambda v: f"{int(v):02d}:00",
-        "desc": "该小时之后不再提示填写(默认 23:00–24:00 不记录).",
-    },
-    {
         "key": "AUTO_TEXT", "label": "超时自动记录内容",
         "kind": "instant", "apply": APPLY_INSTANT,
         "choices": [
@@ -475,18 +468,19 @@ def _selftest():
     assert m.cancel("DAILY_LIMIT") and not m.is_staged("DAILY_LIMIT")
 
 
-    m.stage("COOLDOWN", 600)
+    m.stage("COOLDOWN", 120)      # 第一次修改立即生效
+    m.stage("COOLDOWN", 600)      # 第二次才进入冷静期
     m.pending["COOLDOWN"]["apply_at"] = m._now() - timedelta(seconds=1)
     assert m.promote_due() == ["COOLDOWN"]
     assert m.value("COOLDOWN") == 600 and config.COOLDOWN == 600
 
 
-    m.stage("LOG_HOURS", 24)
-    assert m.value("LOG_HOURS") == 24 and not m.is_staged("LOG_HOURS")
-    m.stage("LOG_HOURS", 22)
+    m.stage("FILTER_MODE", "whitelist")
+    assert m.value("FILTER_MODE") == "whitelist" and not m.is_staged("FILTER_MODE")
+    m.stage("FILTER_MODE", "blacklist")
     m2 = SettingsManager(tmp, delay_hours=48)
-    assert m2.is_staged("LOG_HOURS") and m2.value("LOG_HOURS") == 24
-    assert m2.ever_changed("LOG_HOURS") and not m2.ever_changed("ENFORCE_EVERY")
+    assert m2.is_staged("FILTER_MODE") and m2.value("FILTER_MODE") == "whitelist"
+    assert m2.ever_changed("FILTER_MODE") and not m2.ever_changed("ENFORCE_EVERY")
     assert m2.cancel_all() == 1
     return "settings_manager selftest OK"
 

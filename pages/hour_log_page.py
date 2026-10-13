@@ -43,6 +43,12 @@ class HourLogPage(tk.Frame):
         )
         self.lbl_hint.pack(anchor="w", fill="x", pady=(4, 0))
         wrap_label(self.lbl_hint, 12)
+        self.lbl_syntax = tk.Label(
+            left, text=tr("✎ 填写格式:一小时内做了多项活动时用 / 连接,如「学习/吃饭」(统计时均分这一小时)."),
+            bg=bg, fg=COLORS["accent"], font=config.font("small"), justify="left", anchor="w"
+        )
+        self.lbl_syntax.pack(anchor="w", fill="x", pady=(4, 0))
+        wrap_label(self.lbl_syntax, 12)
 
         right = tk.Frame(hdr, bg=bg)
         right.pack(side="right", anchor="ne", pady=(2, 0))
@@ -80,7 +86,8 @@ class HourLogPage(tk.Frame):
         )
         self.canvas.bind("<MouseWheel>", self._on_wheel)
 
-        for h in range(int(self.dm.log_hours)):
+        # 第 i 行 = 以 i:00 结束的那一小时;00:00 行是昨天 23:00–24:00.
+        for h in range(24):
             row = tk.Frame(self.inner, bg=bg)
             row.pack(fill="x", padx=10, pady=2)
             lbl = tk.Label(
@@ -108,11 +115,24 @@ class HourLogPage(tk.Frame):
     def _on_wheel(self, e):
         self.canvas.yview_scroll(int(-e.delta / 120), "units")
 
-    def _scroll_to(self, hour: int):
+    def _slot_start(self, row: int) -> datetime:
+        """第 row 行对应那一小时的开始时刻(数据按开始时刻存)."""
+        d0 = datetime.strptime(self.view_date, '%Y-%m-%d')
+        return d0 + timedelta(hours=row - 1)
+
+    def _row_of(self, slot: datetime) -> int:
+        d0 = datetime.strptime(self.view_date, '%Y-%m-%d')
+        return int((slot - d0).total_seconds() // 3600) + 1
+
+    def _get(self, row: int) -> str:
+        s = self._slot_start(row)
+        return self.dm.get_hour_text(s.strftime('%Y-%m-%d'), s.hour)
+
+    def _scroll_to(self, row: int):
         self.update_idletasks()
         total = max(1, len(self.rows))
-        hour = min(max(hour, 0), total - 1)
-        self.canvas.yview_moveto(max(0, hour - 2) / float(total))
+        row = min(max(row, 0), total - 1)
+        self.canvas.yview_moveto(max(0, row - 2) / float(total))
 
     def _on_return(self, h: int):
         self._commit(h)
@@ -123,8 +143,9 @@ class HourLogPage(tk.Frame):
         if str(ent.cget("state")) == "disabled":
             return
         text = var.get().strip()
-        if text != self.dm.get_hour_text(self.view_date, h):
-            self.dm.set_hour_text(self.view_date, h, text)
+        if text != self._get(h):
+            s = self._slot_start(h)
+            self.dm.set_hour_text(s.strftime('%Y-%m-%d'), s.hour, text)
             if self.on_text_changed:
                 self.on_text_changed()
             self.refresh()
@@ -133,7 +154,6 @@ class HourLogPage(tk.Frame):
     def refresh(self):
         now = datetime.now()
         self.view_date = self.dm.today_date
-        d0 = datetime.strptime(self.view_date, '%Y-%m-%d')
         enabled = bool(self.dm.hour_enabled)
         auto_text = self.dm.auto_text
         fill_hours = int(FILL_WINDOW.total_seconds() // 3600)
@@ -144,7 +164,7 @@ class HourLogPage(tk.Frame):
         )
         if enabled:
             self.lbl_hint.config(
-                text=(tr("只记录今天.每次提示音后填写上一小时做了什么;")
+                text=(tr("每次提示音后填写上一小时做了什么;每行时间是该小时的结束时刻(00:00 = 昨天 23:00–24:00);")
                       + " " + tr("留空 {h} 小时 → 自动记为「{text}」.").format(
                           h=fill_hours, text=auto_text)
                       + " " + tr("(开关在 Settings 页,改动 48 小时后生效)"))
@@ -162,17 +182,17 @@ class HourLogPage(tk.Frame):
         awaiting = self.dm.awaiting_slot()
         focused = self.focus_get()
         for h, (lbl, ent, var) in self.rows.items():
-            start = d0 + timedelta(hours=h)
+            start = self._slot_start(h)
             end = start + timedelta(hours=1)
             ended = end <= now
-            text = self.dm.get_hour_text(self.view_date, h)
+            text = self._get(h)
             if focused is not ent and var.get() != text:
                 var.set(text)
             ent.config(state="normal" if (enabled and ended) else "disabled")
 
             is_wait = awaiting is not None and awaiting == start
             is_now = enabled and start <= now < end
-            label = f"{h + 1}:00"
+            label = f"{h:02d}:00"
             if is_now:
                 label += tr("   ◂ 现在")
             elif is_wait:
@@ -189,6 +209,8 @@ class HourLogPage(tk.Frame):
     def show(self):
         aw = self.dm.awaiting_slot()
         self.refresh()
-        self._scroll_to(aw.hour if aw else datetime.now().hour)
-        if aw and aw.hour in self.rows:
-            self.rows[aw.hour][1].focus_set()
+        now = datetime.now().replace(minute=0, second=0, microsecond=0)
+        row = self._row_of(aw if aw else now)
+        self._scroll_to(row)
+        if aw and row in self.rows:
+            self.rows[row][1].focus_set()

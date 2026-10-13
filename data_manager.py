@@ -8,8 +8,25 @@ from typing import Optional, Dict
 
 import config
 from config import (
-    APP_NAME, OLD_APP_DIR, FILL_WINDOW, AUTO_TEXT, LOG_HOURS, HOUR_LOG_ENABLED
+    APP_NAME, OLD_APP_DIR, FILL_WINDOW, AUTO_TEXT, HOUR_LOG_ENABLED
 )
+
+
+def month_prefixes(now: datetime = None):
+    """(本月, 上月) 的 'YYYY-MM' 前缀;数据只保留这两个月."""
+    now = now or datetime.now()
+    this = f"{now.year}-{now.month:02d}"
+    if now.month == 1:
+        last = f"{now.year - 1}-12"
+    else:
+        last = f"{now.year}-{now.month - 1:02d}"
+    return this, last
+
+
+def split_items(text: str):
+    """标准语法: 一个小时 / 一次申请的多项活动用 / 连接, 如 '学习/吃饭'."""
+    parts = str(text or "").replace("／", "/").split("/")
+    return [p.strip() for p in parts if p.strip()]
 
 
 class DataManager:
@@ -41,16 +58,10 @@ class DataManager:
 
         self._migrate_old_data()
         self.load_study_data()
+        self.prune_study_data()
         self.load_hour_log()
         self.finalize_hours()
 
-
-    @property
-    def log_hours(self) -> int:
-        try:
-            return max(1, min(24, int(getattr(config, "LOG_HOURS", LOG_HOURS))))
-        except (TypeError, ValueError):
-            return LOG_HOURS
 
     @property
     def auto_text(self) -> str:
@@ -142,21 +153,17 @@ class DataManager:
 
         self.save_study_data()
 
-    def clear_last_month_except_yesterday(self):
-        today = datetime.now()
-        if today.month == 1:
-            last_year, last_month = today.year - 1, 12
-        else:
-            last_year, last_month = today.year, today.month - 1
-        last_month_prefix = f"{last_year}-{last_month:02d}"
-        yesterday_str = (today - timedelta(days=1)).strftime('%Y-%m-%d')
-        keys_to_delete = [
-            k for k in self.study_data
-            if k.startswith(last_month_prefix) and k != yesterday_str
-        ]
-        for key in keys_to_delete:
-            del self.study_data[key]
-        self.save_study_data()
+    def prune_study_data(self):
+        """只保留本月与上月的学习时长(日历可查看这两个月)."""
+        keep = month_prefixes()
+        stale = [k for k in self.study_data if k[:7] not in keep]
+        if stale:
+            for key in stale:
+                del self.study_data[key]
+            self.save_study_data()
+
+    def month_study(self, prefix: str) -> Dict[str, float]:
+        return {k: v for k, v in self.study_data.items() if k.startswith(prefix)}
 
 
     def load_hour_log(self):
@@ -171,8 +178,16 @@ class DataManager:
         self._prune_hours()
 
     def _prune_hours(self):
-        today = datetime.now().strftime('%Y-%m-%d')
-        self.hour_days = {k: v for k, v in self.hour_days.items() if k == today}
+        keep = month_prefixes()
+        self.hour_days = {k: v for k, v in self.hour_days.items() if k[:7] in keep}
+
+    def hour_activity_seconds(self, prefix: str) -> Dict[str, float]:
+        """某个月每项活动的总时长(秒).一小时有多项活动时均分."""
+        return tally_items(
+            (text, 3600.0)
+            for ds, day in self.hour_days.items() if ds.startswith(prefix)
+            for text in day.values()
+        )
 
     def save_hour_log(self):
         if self.uninstalling:
@@ -223,7 +238,8 @@ class DataManager:
             self.hour_cursor = floor
             self.save_hour_log()
             return
-        self.hour_cursor = max(self.hour_cursor, today0)
+        # 00:00 那一格(昨天 23:00–24:00)显示在今天最上方,所以从昨天 23:00 起补记.
+        self.hour_cursor = max(self.hour_cursor, today0 - timedelta(hours=1))
         if not self.hour_enabled:
 
             if self.hour_cursor < floor:
@@ -234,7 +250,7 @@ class DataManager:
         while self.hour_cursor + timedelta(hours=1) + FILL_WINDOW <= now:
             ds, h = self.hour_cursor.strftime('%Y-%m-%d'), self.hour_cursor.hour
 
-            if h < self.log_hours and not self.get_hour_text(ds, h):
+            if not self.get_hour_text(ds, h):
                 self.hour_days.setdefault(ds, {})[str(h)] = self.auto_text
             self.hour_cursor += timedelta(hours=1)
             changed = True
@@ -257,3 +273,19 @@ class DataManager:
     def erase_all_data(self):
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.old_dir, ignore_errors=True)
+
+
+def tally_items(pairs) -> Dict[str, float]:
+    """[(文本, 秒)] → {活动: 秒};按 / 拆分均分,同名(忽略大小写)合并."""
+    totals: Dict[str, float] = {}
+    names: Dict[str, str] = {}
+    for text, secs in pairs:
+        items = split_items(text)
+        if not items or secs <= 0:
+            continue
+        share = float(secs) / len(items)
+        for item in items:
+            key = item.casefold()
+            names.setdefault(key, item)
+            totals[key] = totals.get(key, 0.0) + share
+    return {names[k]: v for k, v in totals.items()}

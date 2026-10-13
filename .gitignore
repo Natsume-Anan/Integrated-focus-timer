@@ -45,4 +45,5 @@ net_state.json
 sysproxy_backup.json
 study_log.json
 hour_log.json
+net_usage.json
 *.uninstall.json

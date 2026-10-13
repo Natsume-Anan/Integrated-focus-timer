@@ -13,7 +13,6 @@
 长期使用可能改变你的生活习惯:'资源管理'的思路会逐步渗透到日常之中,稳定的本地图书馆会带来一种独特的安心感.
 
 对了,赞美claudia.
-已严肃关闭devilmode.
 
 ***
 
@@ -44,10 +43,16 @@
 | **⏱ Timer** | 专注计时,实时显示建议休息时长,记录今日与昨日学习时长 |
 | **🌐 Network** | 申请制联网:冷静期 → 自动放行 → 到点断网;快速访问免冷静期(额度 2 倍消耗);额度不足时可紧急借贷(今天 +1 分钟,明天 -2 分钟) |
 | **🛡 Rules** | Proxy 模式下的黑白名单(网站 / 应用);Adapter 模式下规则只保存、不生效 |
-| **📝 Hour Log** | 每整点提示并记录上一小时的工作内容;超时未填按设定文本补记 |
-| **📅 Calendar** | 以日历形式查看每日学习时长 |
+| **📝 Hour Log** | 每整点提示并记录上一小时的工作内容(全天 24 小时,每行标该小时的结束时刻,00:00 一行显示在第二天最上方);超时未填按设定文本补记 |
+| **📅 Calendar** | 以日历形式查看本月与上月的每日学习时长 |
+| **📊 Statistics** | 上月 / 本月的饼状图统计:整点记录每项活动的总时间(仅在整点记录开启时显示)、每个联网理由的实际联网时间(不计快速访问倍数);可切换「占比 / 总时间」 |
 | **⚙ Settings** | 全部可调参数 |
 | **🗑 Uninstall** | 恢复网络并清理数据 |
+
+**填写格式**:整点记录和联网理由里,同一小时 / 同一次申请的多项活动用半角 `/` 连接,如 `学习/吃饭`。
+统计时这一小时(或这次联网时间)均分给每一项;同名项不区分大小写。
+
+学习时长、整点记录、联网会话记录只保留**本月与上月**。
 
 ---
 
@@ -133,7 +138,7 @@ Obliphur's Integrated Terminal/
 │   ├── sysproxy.py          # 系统代理的安装 / 备份 / 还原
 │   ├── controller.py        # 把以上拼在一起,NetGuard 只和它打交道
 │   └── selftest.py          # 端到端自检:python -m netproxy.selftest
-├── data_manager.py          # 学习时长、整点日志、卸载计数
+├── data_manager.py          # 学习时长、整点日志(本月 + 上月)、/ 拆分统计、卸载计数
 ├── toast.py                 # 右下角提示条与确认弹窗
 ├── context_collect.py       # 经用户同意后采集已安装应用与浏览器域名(供规则建议)
 ├── ai_assist.py             # 接入模型:供应商预设、请求、黑/白名单提示词、结果解析(python ai_assist.py 自检)
@@ -142,6 +147,7 @@ Obliphur's Integrated Terminal/
     ├── widgets.py           # Switch / ScrollArea / Modal 等共用控件
     ├── calendar_page.py     # 📅 Calendar 页
     ├── hour_log_page.py     # 📝 Hour Log 页
+    ├── stats_page.py        # 📊 Statistics 页(饼状图)
     ├── rules_page.py        # 🛡 Rules 页
     ├── ai_dialogs.py        # 模型设置与 AI 建议对话框
     └── settings_page.py     # ⚙ Settings 页

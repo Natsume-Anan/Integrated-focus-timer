@@ -12,6 +12,7 @@ from datetime import datetime
 import config
 from config import fmt_hm
 from netproxy import ProxyController
+from data_manager import month_prefixes
 
 
 QUICK_MULTIPLIER = 2.0   # 快速访问: 免冷静期, 每联网 1 秒消耗 2 秒今日额度
@@ -24,6 +25,11 @@ class NetGuard:
         self.dead = False
         self.state_file = os.path.join(data_dir, "net_state.json")
         self.log_file = os.path.join(data_dir, "net_requests.log")
+        # 每次联网会话的实际联网时长(按理由统计用;只保留本月与上月)
+        self.usage_file = os.path.join(data_dir, "net_usage.json")
+        self.usage = []
+        self._session = None
+        self._usage_dirty = False
         self.q = queue.Queue()
         threading.Thread(target=self._worker, daemon=True).start()
 
@@ -41,6 +47,7 @@ class NetGuard:
         self._nic_off_by_fallback = False
         self._applied_mode = self.net_mode
         self._load()
+        self._load_usage()
         self._last_save = time.monotonic()
         self._last_enforce = time.monotonic()
         if self.dev_mode:
@@ -147,7 +154,65 @@ class NetGuard:
                 }, f)
         except IOError:
             pass
+        self._save_usage()
         self._last_save = time.monotonic()
+
+    def _load_usage(self):
+        try:
+            with open(self.usage_file, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+            recs = d.get("sessions", []) if isinstance(d, dict) else []
+            self.usage = [r for r in recs if isinstance(r, dict) and "date" in r]
+        except Exception:
+            self.usage = []
+        keep = month_prefixes()
+        self.usage = [r for r in self.usage if str(r.get("date", ""))[:7] in keep]
+
+    def _save_usage(self):
+        if self.dead or not self._usage_dirty:
+            return
+        keep = month_prefixes()
+        self.usage = [r for r in self.usage if str(r.get("date", ""))[:7] in keep]
+        if self._session is not None and self._session not in self.usage:
+            self._session = None
+        try:
+            tmp = self.usage_file + ".tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({"sessions": self.usage}, f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.usage_file)
+            self._usage_dirty = False
+        except (IOError, OSError):
+            pass
+
+    def _open_session(self, reason: str, quick: bool, minutes: int, start: datetime = None):
+        start = start or datetime.now()
+        self._session = {
+            "date": start.strftime('%Y-%m-%d'),
+            "start": start.strftime('%H:%M'),
+            "reason": reason,
+            "quick": bool(quick),
+            "minutes": int(minutes),
+            "seconds": 0,
+        }
+        self.usage.append(self._session)
+        self._usage_dirty = True
+
+    def _count_online(self, dt: float):
+        """实际联网的秒数(不乘快速访问倍数),跨零点自动拆到新的一天."""
+        if dt <= 0 or self._session is None:
+            return
+        now = datetime.now()
+        if self._session["date"] != now.strftime('%Y-%m-%d'):
+            s = self._session
+            self._open_session(s["reason"], s["quick"], s["minutes"],
+                               start=now.replace(hour=0, minute=0, second=0, microsecond=0))
+        self._session["seconds"] = round(self._session["seconds"] + dt, 1)
+        self._usage_dirty = True
+
+    def usage_by_reason(self, prefix: str):
+        """某个月 [(理由, 实际联网秒数)]."""
+        return [(r.get("reason", ""), float(r.get("seconds", 0)))
+                for r in self.usage if str(r.get("date", "")).startswith(prefix)]
 
     def _log(self, text: str):
         if self.dead:
@@ -361,6 +426,9 @@ class NetGuard:
     def _reset_grant(self):
         self.grant_left = 0.0
         self.grant_rate = 1.0
+        if self._session is not None:
+            self._session = None
+            self._save_usage()
 
     def shutdown(self):
         self.pending = None
@@ -414,6 +482,7 @@ class NetGuard:
             if secs > 0:
                 self.grant_left = secs
                 self.grant_rate = rate
+                self._open_session(p.get("reason", ""), rate > 1.0, p["minutes"])
                 self.unblock()
                 self._save()
                 self._log(f"START    {int(secs // 60)} min granted"
@@ -424,6 +493,7 @@ class NetGuard:
         if self.online:
             dt = min(max(dt, 0.0), self.tick_clamp, self.grant_left)
             self.grant_left -= dt
+            self._count_online(dt)
 
             self.used += dt * self.grant_rate
 
@@ -488,6 +558,10 @@ def _selftest():
         assert abs(n.used - 720) < 1e-6, n.used
         n.end_early()
         assert abs(n.used - 720) < 1e-6, "提前结束不再额外扣费"
+        # 按理由统计的是实际联网时长, 不乘快速访问倍数
+        month = n.date[:7]
+        assert n.usage_by_reason(month) == [("查资料", 600.0), ("快", 60.0)], n.usage
+        assert n._session is None
 
         # 快速访问上限 = 剩余 / 2
         n.used = 3000.0

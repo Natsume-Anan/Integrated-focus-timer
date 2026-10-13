@@ -35,7 +35,6 @@ FILL_WINDOW = timedelta(hours=1)
 AUTO_TEXT = "Sleeping"
 HOUR_LOG_ENABLED = True                       
 CHIME_WAV = ""
-LOG_HOURS = 23                                
 LANGUAGE = "zh"
 NET_MODE = "proxy"                            # "adapter" 禁用网卡 / "proxy" 本地代理过滤
 FILTER_MODE = "blacklist"                     # proxy 模式下生效的名单:"blacklist" / "whitelist"
@@ -127,7 +126,6 @@ DEFAULT_SETTINGS = {
     "DAILY_LIMIT": DAILY_LIMIT,
     "COOLDOWN": COOLDOWN,
     "HOUR_LOG_ENABLED": HOUR_LOG_ENABLED,
-    "LOG_HOURS": LOG_HOURS,
     "AUTO_TEXT": AUTO_TEXT,
     "ENFORCE_EVERY": ENFORCE_EVERY,
     "CHIME_WAV": CHIME_WAV,
