@@ -8,7 +8,7 @@ from typing import Optional, Dict
 
 import config
 from config import (
-    APP_NAME, OLD_APP_DIR, FILL_WINDOW, AUTO_TEXT, HOUR_LOG_ENABLED
+    APP_NAME, OLD_APP_DIR, AUTO_TEXT, HOUR_LOG_ENABLED
 )
 
 
@@ -247,7 +247,7 @@ class DataManager:
                 self.save_hour_log()
             return
         changed = False
-        while self.hour_cursor + timedelta(hours=1) + FILL_WINDOW <= now:
+        while self.hour_cursor + timedelta(hours=1) + config.FILL_WINDOW <= now:
             ds, h = self.hour_cursor.strftime('%Y-%m-%d'), self.hour_cursor.hour
 
             if not self.get_hour_text(ds, h):
@@ -263,7 +263,7 @@ class DataManager:
         s = self.prompt_slot
         if s is None:
             return None
-        if (datetime.now() >= s + timedelta(hours=1) + FILL_WINDOW
+        if (datetime.now() >= s + timedelta(hours=1) + config.FILL_WINDOW
                 or self.get_hour_text(s.strftime('%Y-%m-%d'), s.hour)):
             self.prompt_slot = None
             return None

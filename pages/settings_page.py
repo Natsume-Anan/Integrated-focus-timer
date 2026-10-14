@@ -7,8 +7,8 @@ import config
 import toast
 from config import COLORS
 from i18n import tr
-from settings_manager import APPLY_INSTANT, SCHEMA_BY_KEY, SETTINGS_SCHEMA
-from .widgets import ScrollArea, Switch
+from settings_manager import APPLY_INSTANT, SCHEMA_BY_KEY, BASIC_SPECS, DETAIL_SPECS
+from .widgets import ScrollArea, Switch, wrap_label
 
 
 class SettingsPage(tk.Frame):
@@ -21,7 +21,9 @@ class SettingsPage(tk.Frame):
         self.on_dev_mode = on_dev_mode
         self.on_language = on_language
         self.on_font_scale = on_font_scale
-        self._rows = {}
+        self._rows = {}          # 基本设置页的行
+        self._num_rows = {}      # 具体设置页的行
+        self._tab = "basic"
         self._syncing = False
         self.sw_dev = None
         self.lbl_dev_state = None
@@ -60,33 +62,175 @@ class SettingsPage(tk.Frame):
         self._track(tk.Label(
             hdr, text=tr("⚙  设置"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
-        ), "⚙  设置").pack(anchor="w")
+        ), "⚙  设置").pack(side="left")
 
-        self.area = ScrollArea(self, height=420, bg=bg)
-        self.area.pack(fill="both", expand=True, padx=26, pady=(6, 4))
+        tabs = tk.Frame(hdr, bg=bg)
+        tabs.pack(side="left", padx=(24, 0))
+        self._tab_btns = {}
+        for key, text in (("basic", "基本设置"), ("detail", "具体设置")):
+            b = self._track(tk.Label(
+                tabs, text=tr(text), font=config.font("body", bold=True),
+                padx=14, pady=4, cursor="hand2"), text)
+            b.pack(side="left", padx=(0, 6))
+            b.bind("<Button-1>", lambda e, k=key: self.show_tab(k))
+            self._tab_btns[key] = b
+
+        self.stack = tk.Frame(self, bg=bg)
+        self.stack.pack(fill="both", expand=True, padx=26, pady=(6, 0))
+
+        # ---- 基本设置 ----
+        self.area = ScrollArea(self.stack, height=420, bg=bg)
         body = self.area.inner
-
         self._build_dev_mode(body)
-
-        for spec in SETTINGS_SCHEMA:
+        for spec in BASIC_SPECS:
             self._build_row(body, spec)
 
+        # ---- 具体设置 ----
+        self.area_num = ScrollArea(self.stack, height=420, bg=bg)
+        self._build_num_page(self.area_num.inner)
+
+        # ---- 两页共用的底栏 ----
+        foot = tk.Frame(self, bg=bg)
+        foot.pack(fill="x", padx=28, pady=(4, 10))
         self.lbl_global = tk.Label(
-            body, text="", bg=bg, fg=COLORS["text_dim"],
+            foot, text="", bg=bg, fg=COLORS["text_dim"],
             font=config.font("small"), anchor="w", justify="left"
         )
-        self.lbl_global.pack(fill="x", pady=(6, 6))
-
-
-        btns = tk.Frame(body, bg=bg)
-        btns.pack(fill="x", pady=(10, 8))
-        self._track(ttk.Button(btns, text=tr("💾 保存全部修改"), style="Accent.TButton",
+        self.lbl_global.pack(fill="x", pady=(0, 6))
+        btns = tk.Frame(foot, bg=bg)
+        btns.pack(fill="x")
+        self._track(ttk.Button(btns, text=tr("💾 保存本页修改"), style="Accent.TButton",
                                command=self._save_all),
-                    "💾 保存全部修改").pack(side="left")
+                    "💾 保存本页修改").pack(side="left")
         self.btn_cancel_all = self._track(
             ttk.Button(btns, text=tr("↩ 取消全部待生效修改"), command=self._cancel_all),
             "↩ 取消全部待生效修改")
         self.btn_cancel_all.pack(side="left", padx=(8, 0))
+        self._track(tk.Label(
+            foot, text=tr("带 ⚡ 标记的项修改后立即生效;其余需等待 48 小时."),
+            bg=bg, fg=COLORS["text_dim"], font=config.font("small"), anchor="w"),
+            "带 ⚡ 标记的项修改后立即生效;其余需等待 48 小时.").pack(fill="x", pady=(6, 0))
+
+        self.show_tab(self._tab)
+
+    def show_tab(self, key: str):
+        self._tab = key
+        self.area.pack_forget()
+        self.area_num.pack_forget()
+        (self.area if key == "basic" else self.area_num).pack(fill="both", expand=True)
+        for k, b in self._tab_btns.items():
+            if k == key:
+                b.config(bg=COLORS["accent"], fg="#ffffff")
+            else:
+                b.config(bg=COLORS["bg_card"], fg=COLORS["text"])
+
+    # ---- 标记: 不需要等待的设置项 ----
+
+    def _badge(self, key: str):
+        tag = self.sm.wait_tag(key)
+        if tag == "instant":
+            return tr("⚡ 即时生效"), COLORS["success"]
+        if tag == "first":
+            return tr("⚡ 首次修改免等待"), COLORS["success"]
+        if tag == "dev":
+            return tr("⚡ 开发者模式: 即时"), COLORS["warn"]
+        return "", COLORS["text_dim"]
+
+    # ---- 具体设置页: 数值直接填写, 一项一行 ----
+
+    def _build_num_page(self, body):
+        card = COLORS["bg_card"]
+        grid = tk.Frame(body, bg=card, highlightbackground=COLORS["border"],
+                        highlightthickness=1)
+        grid.pack(fill="x", pady=(2, 8))
+        grid.grid_columnconfigure(6, weight=1)
+        small = config.font("small")
+        r = 0
+        for i, spec in enumerate(DETAIL_SPECS):
+            key = spec["key"]
+            if i:
+                tk.Frame(grid, bg=COLORS["border"], height=1).grid(
+                    row=r, column=0, columnspan=7, sticky="ew", padx=8)
+                r += 1
+            py_top = (8, 0)
+            self._track(tk.Label(
+                grid, text=tr(spec["label"]), bg=card, fg=COLORS["text"],
+                font=config.font("body", bold=True), anchor="w"), spec["label"]
+            ).grid(row=r, column=0, sticky="w", padx=(12, 6), pady=py_top)
+            badge = tk.Label(grid, text="", bg=card, font=small, anchor="w")
+            badge.grid(row=r, column=1, sticky="w", padx=(0, 8), pady=py_top)
+
+            var = tk.StringVar()
+            ent = ttk.Entry(grid, textvariable=var, width=9, justify="right")
+            ent.grid(row=r, column=2, sticky="w", pady=py_top)
+            ent.bind("<Return>", lambda e, k=key: self._stage_num(k))
+            tk.Label(grid, text=spec["unit"], bg=card, fg=COLORS["text_dim"],
+                     font=small, width=4, anchor="w").grid(
+                row=r, column=3, sticky="w", padx=(4, 4), pady=py_top)
+            self._track(ttk.Button(grid, text=tr("提交"), width=6,
+                                   command=lambda k=key: self._stage_num(k)), "提交"
+                        ).grid(row=r, column=4, sticky="w", pady=py_top)
+            lbl_cur = tk.Label(grid, text="", bg=card, fg=COLORS["text_dim"],
+                               font=small, anchor="w")
+            lbl_cur.grid(row=r, column=5, columnspan=2, sticky="w", padx=(10, 6),
+                         pady=py_top)
+            r += 1
+
+            # 待生效的改动单独占一行, 只在有改动排队时显示
+            pend = tk.Frame(grid, bg=card)
+            pend.grid(row=r, column=0, columnspan=7, sticky="w", padx=12, pady=(2, 0))
+            lbl_pending = tk.Label(pend, text="", bg=card, fg=COLORS["warn"],
+                                   font=small, anchor="w")
+            lbl_pending.pack(side="left")
+            btn_cancel = self._track(tk.Label(
+                pend, text="✕ " + tr("取消"), bg=card, fg=COLORS["danger"],
+                font=small, cursor="hand2"), lambda: "✕ " + tr("取消"))
+            btn_cancel.pack(side="left", padx=(8, 0))
+            btn_cancel.bind("<Button-1>", lambda e, k=key: self._cancel(k))
+            pend.grid_remove()
+            r += 1
+
+            desc = self._track(tk.Label(
+                grid, text=tr(spec["desc"]), bg=card, fg=COLORS["text_dim"],
+                font=small, anchor="w", justify="left"), spec["desc"])
+            desc.grid(row=r, column=0, columnspan=7, sticky="ew", padx=12, pady=(1, 7))
+            wrap_label(desc, 24)
+            r += 1
+
+            self._num_rows[key] = {
+                "spec": spec, "var": var, "entry": ent, "badge": badge,
+                "lbl_current": lbl_cur, "lbl_pending": lbl_pending,
+                "btn_cancel": btn_cancel, "pend": pend, "synced": None,
+            }
+        self.area_num.bind_children()
+
+    def _sync_num(self, key: str, force: bool = False):
+        """把填写框同步成当前生效值; 用户改过但还没提交的框不动 (除非 force)."""
+        row = self._num_rows[key]
+        text = self.sm.ui_number(key)
+        if force or row["synced"] is None or row["var"].get().strip() == row["synced"]:
+            row["var"].set(text)
+        row["synced"] = text
+
+    def _num_edited(self, key: str) -> bool:
+        row = self._num_rows[key]
+        return row["var"].get().strip() != (row["synced"] or "")
+
+    def _stage_num(self, key: str, quiet: bool = False):
+        row = self._num_rows[key]
+        value = self.sm.from_ui_number(key, row["var"].get())
+        status, msg = self.sm.stage(key, value)
+        if status == "invalid":
+            if not quiet:
+                toast.warn(msg)
+            return status, msg
+        self._sync_num(key, force=True)
+        self.refresh()
+        if status in ("instant", "staged") and self.on_changed:
+            self.on_changed(status, key)
+        if not quiet and status in ("instant", "staged", "nochange"):
+            toast.info(tr(msg))
+        return status, msg
 
     def _build_dev_mode(self, body):
         if not config.dev_mode_defined():
@@ -136,6 +280,8 @@ class SettingsPage(tk.Frame):
         self._track(tk.Label(
             head, text=tr(spec["label"]), bg=card, fg=COLORS["text"],
             font=config.font("body", bold=True)), spec["label"]).pack(side="left")
+        badge = tk.Label(head, text="", bg=card, font=config.font("small"))
+        badge.pack(side="left", padx=(10, 0))
         lbl_cur = tk.Label(head, text="", bg=card, fg=COLORS["text_dim"],
                            font=config.font("small"))
         lbl_cur.pack(side="right")
@@ -188,7 +334,7 @@ class SettingsPage(tk.Frame):
         self._rows[key] = {
             "spec": spec, "var": var, "widget": widget, "lbl_current": lbl_cur,
             "lbl_pending": lbl_pending, "btn_cancel": btn_cancel,
-            "frame": inner, "custom": custom_var,
+            "frame": inner, "custom": custom_var, "badge": badge,
         }
 
         self._choices_widgets.append((key, widget))
@@ -233,6 +379,9 @@ class SettingsPage(tk.Frame):
     def _stage(self, key: str):
         value = self._widget_value(key)
         status, msg = self.sm.stage(key, value)
+        if status == "invalid":
+            toast.warn(msg)
+            return
         self.refresh()
         if status in ("instant", "staged"):
             if self.on_changed:
@@ -268,8 +417,11 @@ class SettingsPage(tk.Frame):
             self.on_changed("cancel", None)
 
     def _save_all(self):
+        if self._tab == "detail":
+            self._save_all_num()
+            return
         staged, instant, same = 0, 0, 0
-        for spec in SETTINGS_SCHEMA:
+        for spec in BASIC_SPECS:
             key = spec["key"]
             try:
                 value = self._widget_value(key)
@@ -286,6 +438,28 @@ class SettingsPage(tk.Frame):
             status, _ = self.sm.stage(key, value)
             if status == "staged":
                 staged += 1
+            elif status == "instant":
+                instant += 1
+        self._report_saved(staged, instant)
+
+    def _save_all_num(self):
+        staged, instant, errors = 0, 0, []
+        for spec in DETAIL_SPECS:
+            key = spec["key"]
+            if not self._num_edited(key):
+                continue
+            status, msg = self._stage_num(key, quiet=True)
+            if status == "invalid":
+                errors.append(msg)
+            elif status == "staged":
+                staged += 1
+            elif status == "instant":
+                instant += 1
+        if errors:
+            toast.warn("\n".join(errors))
+        self._report_saved(staged, instant, silent_if_none=bool(errors))
+
+    def _report_saved(self, staged: int, instant: int, silent_if_none: bool = False):
         self.refresh()
         if self.on_changed and (staged or instant):
             self.on_changed("staged" if staged else "instant", None)
@@ -296,7 +470,7 @@ class SettingsPage(tk.Frame):
             toast.success(tr("{n} 项即时生效项已保存").format(n=instant))
         elif staged:
             toast.info(tr("{n} 项已提交,48 小时后生效").format(n=staged))
-        else:
+        elif not silent_if_none:
             toast.info(tr("没有需要保存的修改"))
 
     def _pick_wav(self, widget, custom_var=None):
@@ -327,12 +501,14 @@ class SettingsPage(tk.Frame):
 
         self._syncing = True
         try:
-            for spec in SETTINGS_SCHEMA:
+            for spec in BASIC_SPECS:
                 key = spec["key"]
                 row = self._rows[key]
                 self._sync_widget(key)
                 row["lbl_current"].config(
                     text=f"{tr('当前')}: {tr(self.sm.display(key))}")
+                text, color = self._badge(key)
+                row["badge"].config(text=text, fg=color)
 
                 if self.sm.is_staged(key):
                     row["lbl_pending"].config(
@@ -344,6 +520,24 @@ class SettingsPage(tk.Frame):
                 else:
                     row["lbl_pending"].config(text="")
                     row["btn_cancel"].pack_forget()
+
+            for spec in DETAIL_SPECS:
+                key = spec["key"]
+                row = self._num_rows[key]
+                self._sync_num(key)
+                row["lbl_current"].config(
+                    text=f"{tr('当前')}: {self.sm.display(key)}")
+                text, color = self._badge(key)
+                row["badge"].config(text=text, fg=color)
+                if self.sm.is_staged(key):
+                    row["lbl_pending"].config(
+                        text=tr("待生效: {value}   ·   {when}").format(
+                            value=self.sm.display_value(key, self.sm.staged(key)['value']),
+                            when=self.sm.apply_at_text(key)))
+                    row["pend"].grid()
+                else:
+                    row["lbl_pending"].config(text="")
+                    row["pend"].grid_remove()
         finally:
             self._syncing = False
 

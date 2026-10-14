@@ -31,27 +31,50 @@ def _fmt_sec(sec: int) -> str:
     return f"{sec} s" if sec < 180 else _fmt_min(sec)
 
 
+def _num_text(x: float) -> str:
+    """数字转成填写框里的文字: 去掉多余的 0, 最多 4 位小数."""
+    return f"{round(float(x), 4):g}"
+
+
+def _num(key: str, label: str, unit: str, scale: float, lo: float, hi: float,
+         integer: bool, desc: str):
+    """「具体设置」页的数值项.
+
+    unit/scale: 界面上按 unit 填写, 存储值 = 填写值 × scale (例如按分钟填, 按秒存).
+    lo/hi: 允许范围, 按界面单位 (unit) 计.
+    """
+    def fmt(v, _scale=scale, _unit=unit):
+        try:
+            x = float(v) / _scale
+        except (TypeError, ValueError):
+            return str(v)
+        return f"×{_num_text(x)}" if _unit == "×" else f"{_num_text(x)} {_unit}"
+    return {
+        "key": key, "label": label, "kind": "num", "apply": APPLY_DELAY,
+        "page": "detail", "unit": unit, "scale": scale, "min": lo, "max": hi,
+        "integer": integer, "fmt": fmt, "desc": desc,
+    }
 
 
 SETTINGS_SCHEMA = [
-    {
-        "key": "DAILY_LIMIT", "label": "每日联网额度",
-        "kind": "choice", "apply": APPLY_DELAY,
-        "choices": [
-            (str(h * 3600), f"{h:g} h") for h in (0.5, 1, 1.5, 2, 3, 4, 6, 8)
-        ],
-        "fmt": _fmt_min,
-        "desc": "今天最多能联网多久.改动要 48 小时后才生效,期间仍按旧额度计算.",
-    },
-    {
-        "key": "COOLDOWN", "label": "联网冷静期",
-        "kind": "choice", "apply": APPLY_DELAY,
-        "choices": [
-            (str(m * 60), f"{m} min") for m in (1, 2, 5, 10, 15, 20, 30, 45, 60)
-        ],
-        "fmt": _fmt_min,
-        "desc": "提出申请后等多久才真的联网.想立刻联网请用 Network 页的快速访问(额度 2 倍消耗).",
-    },
+    _num("DAILY_LIMIT", "每日联网额度", "min", 60, 0, 1440, True,
+         "每天最多能联网多久."),
+    _num("COOLDOWN", "联网冷静期", "min", 60, 0, 240, True,
+         "提出申请后等多久才真的联网.想立刻联网请用快速访问."),
+    _num("ENFORCE_EVERY", "断网复查间隔", "s", 1, 5, 3600, True,
+         "离线时每隔多久强制复查并重新断网.越小越难绕开,但更频繁调用系统命令."),
+    _num("TICK_CLAMP", "计时单步上限", "s", 1, 1, 300, True,
+         "联网计时每一步最多计入多少秒;电脑睡眠或卡顿后醒来,不会一次计入一大段."),
+    _num("QUICK_MULTIPLIER", "快速访问消耗倍率", "×", 1, 1, 10, False,
+         "快速访问免冷静期,每联网 1 分钟消耗多少分钟今日额度."),
+    _num("LOAN_RATE", "紧急借贷偿还倍率", "×", 1, 1, 10, False,
+         "今天借 1 分钟额度,明天要扣多少分钟."),
+    _num("BREAK_COOLDOWN_RATE", "休息中冷静期倍率", "×", 1, 0, 1, False,
+         "休息倒计时中提交的普通申请,若时长不超过剩余休息时间,冷静期乘以这个倍率."),
+    _num("BREAK_CARRY_RATE", "暂停休息结转比例", "×", 1, 0, 1, False,
+         "暂停休息(或关闭程序)时,剩余休息时间按这个比例计入下一次休息."),
+    _num("FILL_WINDOW", "整点记录补填时限", "min", 60, 1, 1440, True,
+         "整点过后多久之内还能补填;超时自动记为「超时自动记录内容」."),
     {
         "key": "NET_MODE", "label": "断网方式",
         "kind": "choice", "apply": APPLY_DELAY,
@@ -112,15 +135,6 @@ SETTINGS_SCHEMA = [
         "desc": "即时生效.整体缩放界面字号,适配不同分辨率.",
     },
     {
-        "key": "ENFORCE_EVERY", "label": "断网复查间隔",
-        "kind": "choice", "apply": APPLY_DELAY,
-        "choices": [
-            (str(s), f"{s} s") for s in (15, 30, 60, 120, 300)
-        ],
-        "fmt": _fmt_sec,
-        "desc": "离线状态下每隔多久强制复查并重新断网(越小越难被绕开,代价是更频繁调用系统命令).",
-    },
-    {
         "key": "CHIME_WAV", "label": "整点提示音",
         "kind": "combo", "apply": APPLY_INSTANT,
         "choices": [
@@ -133,7 +147,12 @@ SETTINGS_SCHEMA = [
     },
 ]
 
+for _s in SETTINGS_SCHEMA:
+    _s.setdefault("page", "basic")
+
 SCHEMA_BY_KEY = {s["key"]: s for s in SETTINGS_SCHEMA}
+BASIC_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "basic"]
+DETAIL_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "detail"]
 DELAYED_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_DELAY]
 INSTANT_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_INSTANT]
 
@@ -206,6 +225,16 @@ class SettingsManager:
             return value
         if spec["kind"] in ("text", "combo", "instant"):
             return "" if value is None else str(value).strip()
+        if spec["kind"] == "num":
+            if isinstance(value, bool):
+                value = int(value)
+            try:
+                x = float(str(value).strip())
+            except (TypeError, ValueError):
+                return value
+            if x != x or x in (float("inf"), float("-inf")):
+                return value
+            return int(round(x)) if spec.get("integer") else x
         if spec["kind"] == "choice":
 
             if isinstance(value, bool):
@@ -291,6 +320,9 @@ class SettingsManager:
         if spec is None:
             return "unknown", tr("未知配置项 {key}", key=key)
         value = self._coerce(key, value)
+        ok, msg = self.validate(key, value)
+        if not ok:
+            return "invalid", msg
         first_change = not self.changed.get(key)
 
         if spec["apply"] == APPLY_INSTANT or config.dev_mode_enabled():
@@ -332,6 +364,54 @@ class SettingsManager:
         return "staged", tr("{label} 已提交,将于 {at}.",
                             label=tr(spec['label']), at=self.staged_apply_text(key))
 
+    def validate(self, key: str, value):
+        """数值项: 必须是数字且在允许范围内. 其他项总是通过."""
+        spec = SCHEMA_BY_KEY.get(key) or {}
+        if spec.get("kind") != "num":
+            return True, ""
+        label = tr(spec["label"])
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return False, tr("{label}: 请填写数字.", label=label)
+        x = value / spec["scale"]
+        lo, hi = spec["min"], spec["max"]
+        if x < lo - 1e-9 or x > hi + 1e-9:
+            unit = spec["unit"]
+            rng = (f"{_num_text(lo)} ~ {_num_text(hi)}" if unit == "×"
+                   else f"{_num_text(lo)} ~ {_num_text(hi)} {unit}")
+            return False, tr("{label} 允许的范围是 {rng}.", label=label, rng=rng)
+        return True, ""
+
+    # ---- 界面单位 <-> 存储值 (数值项) ----
+
+    def ui_number(self, key: str, value=None) -> str:
+        spec = SCHEMA_BY_KEY[key]
+        v = self.value(key) if value is None else value
+        try:
+            return _num_text(float(v) / spec["scale"])
+        except (TypeError, ValueError):
+            return str(v)
+
+    def from_ui_number(self, key: str, text: str):
+        """把填写框里的文字换成存储值; 不是数字时原样返回 (stage 会拒绝)."""
+        spec = SCHEMA_BY_KEY[key]
+        try:
+            x = float(str(text).strip())
+        except (TypeError, ValueError):
+            return str(text).strip()
+        return self._coerce(key, x * spec["scale"])
+
+    def wait_tag(self, key: str) -> str:
+        """修改这一项是否需要等待: 'instant' 即时生效 / 'first' 首次修改免等待 /
+        'dev' 开发者模式下即时 / '' 需要等待."""
+        spec = SCHEMA_BY_KEY.get(key) or {}
+        if spec.get("apply") == APPLY_INSTANT:
+            return "instant"
+        if config.dev_mode_enabled():
+            return "dev"
+        if not self.ever_changed(key):
+            return "first"
+        return ""
+
     def staged_apply_text(self, key: str) -> str:
         at = self.apply_at(key)
         return f"{at:%Y-%m-%d %H:%M}" if at else ""
@@ -372,6 +452,14 @@ class SettingsManager:
     def config_value(self, key: str):
         value = self.value(key)
         spec = SCHEMA_BY_KEY.get(key) or {}
+        if spec.get("kind") == "num":
+            ok, _ = self.validate(key, value)
+            if not ok:
+                # 文件被手动改坏时退回默认值, 不让程序带着离谱的数值运行.
+                value = self._coerce(key, DEFAULT_SETTINGS.get(key))
+            if key == "FILL_WINDOW":
+                return timedelta(seconds=int(value))
+            return value
         if spec.get("kind") == "choice":
             for raw, _label in spec.get("choices", []):
                 if str(raw) == str(value):

@@ -15,9 +15,7 @@ from netproxy import ProxyController
 from data_manager import month_prefixes
 
 
-QUICK_MULTIPLIER = 2.0   # 快速访问: 免冷静期, 每联网 1 秒消耗 2 秒今日额度
-LOAN_RATE = 2.0          # 紧急借贷: 今日额度 +1 秒, 明天额度 -2 秒
-BREAK_COOLDOWN_RATE = 0.4  # 计时器休息中提交的普通申请: 冷静期 ×0.4
+# 倍率类数值在 config.py (可在 Settings → 具体设置 中修改), 这里每次用时现读.
 
 
 class NetGuard:
@@ -89,16 +87,17 @@ class NetGuard:
     @property
     def quick_left(self) -> float:
         """剩余额度按快速访问能换到多少联网时间."""
-        return self.remaining / QUICK_MULTIPLIER
+        return self.remaining / config.QUICK_MULTIPLIER
 
     @property
     def loan_left(self) -> float:
         """还能借多少今日额度."""
-        return self.tomorrow_remaining / LOAN_RATE
+        return self.tomorrow_remaining / config.LOAN_RATE
 
     @property
     def grant_quick(self) -> bool:
-        return self.grant_rate > 1.0
+        # 倍率可改 (甚至改成 1.0), 所以不能再用 grant_rate > 1 判断是不是快速访问.
+        return bool(getattr(self, "_grant_is_quick", self.grant_rate > 1.0))
 
     @property
     def dev_mode(self) -> bool:
@@ -328,7 +327,7 @@ class NetGuard:
                 return False, "Tomorrow's quota is already fully borrowed."
             return False, (f"You can borrow at most {fmt_hm(self.loan_left)} today "
                            f"(tomorrow has {fmt_hm(self.tomorrow_remaining)} left, "
-                           f"{LOAN_RATE:g}x per minute borrowed).")
+                           f"{config.LOAN_RATE:g}x per minute borrowed).")
         return True, ""
 
     def borrow(self, minutes: int, reason: str):
@@ -341,9 +340,9 @@ class NetGuard:
             return False, msg
         add = minutes * 60.0
         self.bonus += add
-        self.tomorrow_used += add * LOAN_RATE
+        self.tomorrow_used += add * config.LOAN_RATE
         self._save()
-        self._log(f"LOAN     +{minutes} min today, -{int(minutes * LOAN_RATE)} min tomorrow"
+        self._log(f"LOAN     +{minutes} min today, -{int(minutes * config.LOAN_RATE)} min tomorrow"
                   f"  reason: {reason}")
         return True, ""
 
@@ -351,11 +350,11 @@ class NetGuard:
         need = max(0.0, float(minutes)) * 60.0
         if need <= 0:
             return False, "Minimum is 1 minute."
-        if need * QUICK_MULTIPLIER > self.remaining + 1e-6:
+        if need * config.QUICK_MULTIPLIER > self.remaining + 1e-6:
             if self.quick_left < 60:
                 return False, "Not enough quota left today for quick access."
             return False, (f"Quick access can cover at most {fmt_hm(self.quick_left)} "
-                           f"({fmt_hm(self.remaining)} left today, {QUICK_MULTIPLIER:g}x cost).")
+                           f"({fmt_hm(self.remaining)} left today, {config.QUICK_MULTIPLIER:g}x cost).")
         return True, ""
 
 
@@ -377,7 +376,7 @@ class NetGuard:
                 return False, msg
             self.pending = {"minutes": minutes, "at": time.time(),
                             "reason": reason, "quick": True}
-            self._log(f"QUICK    {minutes} min (cost {int(minutes * QUICK_MULTIPLIER)} min quota)"
+            self._log(f"QUICK    {minutes} min (cost {int(minutes * config.QUICK_MULTIPLIER)} min quota)"
                       f"  reason: {reason}")
             return True, ""
 
@@ -410,7 +409,7 @@ class NetGuard:
         self.pending = {"minutes": p["minutes"], "at": time.time(),
                         "reason": p.get("reason", ""), "quick": True}
         self._log(f"QUICK    upgrade {p['minutes']} min "
-                  f"(cost {int(p['minutes'] * QUICK_MULTIPLIER)} min quota)")
+                  f"(cost {int(p['minutes'] * config.QUICK_MULTIPLIER)} min quota)")
         return True, ""
 
     def cancel(self):
@@ -431,6 +430,7 @@ class NetGuard:
     def _reset_grant(self):
         self.grant_left = 0.0
         self.grant_rate = 1.0
+        self._grant_is_quick = False
         if self._session is not None:
             self._session = None
             self._save_usage()
@@ -482,16 +482,18 @@ class NetGuard:
         if self.pending and time.time() >= self.pending["at"]:
             p, self.pending = self.pending, None
             self._reset_grant()
-            rate = QUICK_MULTIPLIER if p.get("quick") else 1.0
+            quick = bool(p.get("quick"))
+            rate = max(1.0, float(config.QUICK_MULTIPLIER)) if quick else 1.0
             secs = min(p["minutes"] * 60.0, self.remaining / rate)
             if secs > 0:
                 self.grant_left = secs
                 self.grant_rate = rate
-                self._open_session(p.get("reason", ""), rate > 1.0, p["minutes"])
+                self._grant_is_quick = quick
+                self._open_session(p.get("reason", ""), quick, p["minutes"])
                 self.unblock()
                 self._save()
                 self._log(f"START    {int(secs // 60)} min granted"
-                          + (f" (quick, {rate:g}x)" if rate > 1.0 else ""))
+                          + (f" (quick, {rate:g}x)" if quick else ""))
                 event = "started"
 
         now = time.monotonic()
@@ -655,7 +657,7 @@ def _selftest():
         n.cancel()
 
         # 休息中申请: 冷静期 ×0.4 (300s → 120s)
-        ok, msg = n.request(10, "x", cooldown_rate=BREAK_COOLDOWN_RATE)
+        ok, msg = n.request(10, "x", cooldown_rate=config.BREAK_COOLDOWN_RATE)
         assert ok and 110 < n.pending["at"] - time.time() <= 120, n.pending
         n.cancel()
         assert n.mode == "offline"

@@ -5,7 +5,7 @@ from tkinter import ttk
 from datetime import datetime, timedelta
 
 import config
-from config import COLORS, FILL_WINDOW
+from config import COLORS
 from i18n import tr
 from .widgets import wrap_label
 
@@ -156,7 +156,7 @@ class HourLogPage(tk.Frame):
         self.view_date = self.dm.today_date
         enabled = bool(self.dm.hour_enabled)
         auto_text = self.dm.auto_text
-        fill_hours = int(FILL_WINDOW.total_seconds() // 3600)
+        fill_hours = f"{config.FILL_WINDOW.total_seconds() / 3600:g}"
 
         self.lbl_state.config(
             text=tr("当前: {state}").format(state=tr("开启") if enabled else tr("关闭_状态")),

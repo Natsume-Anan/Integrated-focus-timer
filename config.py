@@ -23,7 +23,12 @@ IDLE, RUNNING, READY_BREAK, ON_BREAK = range(4)
 DAILY_LIMIT = 2 * 3600       
 COOLDOWN = 5 * 60            
 ENFORCE_EVERY = 60           
-TICK_CLAMP = 30              
+TICK_CLAMP = 30              # 联网计时每一步最多计入的秒数(睡眠/卡顿后不会一次扣一大段)
+
+QUICK_MULTIPLIER = 2.0       # 快速访问: 免冷静期, 每联网 1 秒消耗 2 秒今日额度
+LOAN_RATE = 2.0              # 紧急借贷: 今日额度 +1 秒, 明天额度 -2 秒
+BREAK_COOLDOWN_RATE = 0.4    # 休息中提交的普通申请(时长不超过剩余休息): 冷静期 ×0.4
+BREAK_CARRY_RATE = 0.8       # 暂停休息(含关闭程序): 剩余休息时间 ×0.8 计入下一次休息
 
 
 
@@ -133,6 +138,12 @@ DEFAULT_SETTINGS = {
     "NET_MODE": NET_MODE,
     "FILTER_MODE": FILTER_MODE,
     "FONT_SCALE": 0.9,
+    "TICK_CLAMP": TICK_CLAMP,
+    "FILL_WINDOW": int(FILL_WINDOW.total_seconds()),
+    "QUICK_MULTIPLIER": QUICK_MULTIPLIER,
+    "LOAN_RATE": LOAN_RATE,
+    "BREAK_COOLDOWN_RATE": BREAK_COOLDOWN_RATE,
+    "BREAK_CARRY_RATE": BREAK_CARRY_RATE,
 }
 
 
@@ -150,8 +161,6 @@ COLORS = {
     "danger_hover": "#b91c1c",
 }
 
-
-BREAK_CARRY_RATE = 0.6   # 暂停休息(含关闭程序): 剩余休息时间 ×0.6 计入下一次休息
 
 
 def compute_F(t: float) -> float:

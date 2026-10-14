@@ -14,10 +14,10 @@ import toast
 from config import (
     COLORS, APP_NAME, IDLE, RUNNING, READY_BREAK, ON_BREAK,
     ensure_builtin_chime, load_json_file, save_json_file,
-    compute_F, fmt_hm, fmt_ms, BREAK_CARRY_RATE
+    compute_F, fmt_hm, fmt_ms
 )
 from i18n import tr
-from net_guard import NetGuard, QUICK_MULTIPLIER, LOAN_RATE, BREAK_COOLDOWN_RATE
+from net_guard import NetGuard
 from data_manager import DataManager
 from settings_manager import SettingsManager
 from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage, StatsPage
@@ -494,21 +494,33 @@ class BreakTimerApp:
         self._status(tr("本次专注结束"), COLORS["success"])
 
     def _show_on_break(self):
-        self.btn_action.config(text=tr("⏸  暂停休息"), state="!disabled")
+        self.btn_action.config(text=tr("⏸  暂停休息"))
         self._status(tr("休息中 ☕"), COLORS["warn"])
         self.lbl_sub.config(text=tr("休息吧,倒计时中…"))
+        self._sync_break_lock()
+
+    def _break_locked(self) -> bool:
+        """网络正在使用时不允许暂停休息."""
+        return self.state == ON_BREAK and self.net.mode == "online"
+
+    def _sync_break_lock(self):
+        if self.state == ON_BREAK:
+            self.btn_action.config(state="disabled" if self._break_locked() else "!disabled")
 
     def end_break_early(self, silent: bool = False):
         """暂停休息(关闭程序也算):剩余时间 ×0.6 计入下一次休息."""
         if self.state != ON_BREAK:
             return
+        if not silent and self._break_locked():
+            toast.warn(tr("网络正在使用,不能暂停休息."))
+            return
         left = max(0, int(self.countdown_seconds))
-        add = int(round(left * BREAK_CARRY_RATE))
+        add = int(round(left * config.BREAK_CARRY_RATE))
         if add > 0:
             self._set_break_carry(self.break_carry + add)
             if not silent:
                 toast.info(tr("休息已暂停.\n剩余 {left} 按 ×{r:g} 计入下次休息: +{add}").format(
-                    left=fmt_ms(left), r=BREAK_CARRY_RATE, add=fmt_ms(add)))
+                    left=fmt_ms(left), r=config.BREAK_CARRY_RATE, add=fmt_ms(add)))
         if silent:
             self.state = IDLE
             self.countdown_seconds = 0
@@ -571,7 +583,10 @@ class BreakTimerApp:
                 m = self.countdown_seconds // 60
                 s = self.countdown_seconds % 60
                 self.lbl_time.config(text=f"{m:02d}:{s:02d}")
-                self.lbl_sub.config(text=tr("休息剩余 {m} 分 {s:02d} 秒").format(m=m, s=s))
+                sub = tr("休息剩余 {m} 分 {s:02d} 秒").format(m=m, s=s)
+                if self._break_locked():
+                    sub += "\n" + tr("网络正在使用,不能暂停休息.")
+                self.lbl_sub.config(text=sub)
                 self.countdown_seconds -= 1
                 self.update_job = self.root.after(1000, self.update)
             else:
@@ -776,9 +791,9 @@ class BreakTimerApp:
             self._log_notice(f"NET_MODE -> {self.net.net_mode}")
         if status != "instant":
             return
-        if key in ("HOUR_LOG_ENABLED", "AUTO_TEXT", None):
+        if key in ("HOUR_LOG_ENABLED", "AUTO_TEXT", "FILL_WINDOW", None):
 
-            if key in ("AUTO_TEXT", None):
+            if key in ("AUTO_TEXT", "FILL_WINDOW", None):
                 if "log" in self.pages:
                     self.pages["log"].refresh()
             if key == "HOUR_LOG_ENABLED":
@@ -905,7 +920,7 @@ class BreakTimerApp:
         )
         self.btn_net_req.pack(side="left")
         self.btn_net_quick = ttk.Button(
-            btns, text=tr("⚡  快速访问(×{a:g})").format(a=QUICK_MULTIPLIER),
+            btns, text=tr("⚡  快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER),
             style="Danger.TButton", command=self.on_net_quick
         )
         self.btn_net_quick.pack(side="left", padx=(8, 0))
@@ -930,7 +945,7 @@ class BreakTimerApp:
         )
         self.btn_net_ctrl.pack(side="left", ipadx=10)
         self.btn_net_upgrade = ttk.Button(
-            self.net_ctrl, text=tr("⚡  改为快速访问(×{a:g})").format(a=QUICK_MULTIPLIER),
+            self.net_ctrl, text=tr("⚡  改为快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER),
             style="Danger.TButton",
             command=self.on_net_upgrade
         )
@@ -945,9 +960,9 @@ class BreakTimerApp:
         if not ok:
             return
         rate = 1.0
-        if self.state == ON_BREAK and minutes * 60 > self.countdown_seconds:
-            # 休息中, 且申请时长长于剩余休息时间 → 冷静期 ×0.4
-            rate = BREAK_COOLDOWN_RATE
+        if self.state == ON_BREAK and minutes * 60 <= self.countdown_seconds:
+            # 休息中, 且申请时长不超过剩余休息时间 → 冷静期 ×BREAK_COOLDOWN_RATE
+            rate = config.BREAK_COOLDOWN_RATE
         ok, msg = self.net.request(minutes, reason, cooldown_rate=rate)
         if not ok:
             toast.warn(tr(msg))
@@ -965,8 +980,8 @@ class BreakTimerApp:
             return
         if not toast.ask(
             tr("快速访问跳过冷静期立刻联网,额度按 ×{a:g} 消耗.\n\n联网: {m} 分钟\n消耗: {cost} 今日额度\n\n确定吗?").format(
-                a=QUICK_MULTIPLIER, m=minutes,
-                cost=fmt_hm(minutes * 60 * QUICK_MULTIPLIER)),
+                a=config.QUICK_MULTIPLIER, m=minutes,
+                cost=fmt_hm(minutes * 60 * config.QUICK_MULTIPLIER)),
             title=tr("快速访问"), danger=True
         ):
             return
@@ -987,8 +1002,8 @@ class BreakTimerApp:
             return
         if not toast.ask(
             tr("紧急借贷不会联网,只会给今天加额度;代价是明天扣 {b:g} 倍.\n借到的额度今天用不完也不退.\n\n今天额度: +{add}\n明天额度: -{cost}\n\n确定吗?").format(
-                b=LOAN_RATE, add=fmt_hm(minutes * 60),
-                cost=fmt_hm(minutes * 60 * LOAN_RATE)),
+                b=config.LOAN_RATE, add=fmt_hm(minutes * 60),
+                cost=fmt_hm(minutes * 60 * config.LOAN_RATE)),
             title=tr("紧急借贷"), danger=True
         ):
             return
@@ -1028,7 +1043,7 @@ class BreakTimerApp:
             return
         if not toast.ask(
             tr("立刻结束冷静期并联网?\n\n联网: {m} 分钟\n消耗: {cost} 今日额度(×{a:g})\n\n确定吗?").format(
-                m=minutes, cost=fmt_hm(minutes * 60 * QUICK_MULTIPLIER), a=QUICK_MULTIPLIER),
+                m=minutes, cost=fmt_hm(minutes * 60 * config.QUICK_MULTIPLIER), a=config.QUICK_MULTIPLIER),
             title=tr("快速访问"), danger=True
         ):
             return
@@ -1046,15 +1061,15 @@ class BreakTimerApp:
         n = self.net
         mode = n.mode
         cooldown = int(self.settings.value("COOLDOWN"))
-        cooldown_m = cooldown // 60
+        cooldown_m = f"{cooldown / 60:g}"
 
         header = (tr("申请 → {min} 分钟冷静期 → 联网 → 到点自动断网").format(min=cooldown_m)
                   + "    ·    " + tr("⚡ 快速访问免冷静期(×{a:g})  ·  💳 借 1 分钟扣明天 {b:g} 分钟").format(
-                      a=QUICK_MULTIPLIER, b=LOAN_RATE))
+                      a=config.QUICK_MULTIPLIER, b=config.LOAN_RATE))
         if self.state == ON_BREAK:
             header += "\n" + tr("☕ 休息中提交申请,冷静期 ×{r:g}: 只需 {t}").format(
-                r=BREAK_COOLDOWN_RATE, t=fmt_ms(cooldown * BREAK_COOLDOWN_RATE)) \
-                + tr("(申请时长长于剩余休息 {left} 时生效)").format(
+                r=config.BREAK_COOLDOWN_RATE, t=fmt_ms(cooldown * config.BREAK_COOLDOWN_RATE)) \
+                + tr("(申请时长不超过剩余休息 {left} 时生效)").format(
                     left=fmt_ms(self.countdown_seconds))
         self.net_lbl_header.config(text=header, justify="left")
 
@@ -1090,6 +1105,8 @@ class BreakTimerApp:
                     text=tr("✕  取消申请") if mode == "pending" else tr("■  结束本次会话")
                 )
                 if mode == "pending":
+                    self.btn_net_upgrade.config(
+                        text=tr("⚡  改为快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER))
                     self.btn_net_upgrade.pack(side="left", padx=(8, 0))
                     self.net_ctrl_hint.pack(anchor="w", pady=(8, 0))
                 else:
@@ -1108,6 +1125,7 @@ class BreakTimerApp:
                 )
                 self.btn_net_req.config(state="!disabled")
             self.btn_net_quick.config(
+                text=tr("⚡  快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER),
                 state="!disabled" if n.quick_left >= 60 else "disabled")
             self.btn_net_loan.config(
                 state="!disabled" if n.loan_left >= 60 else "disabled")
@@ -1123,7 +1141,7 @@ class BreakTimerApp:
             if ok:
                 self.net_ctrl_hint.config(
                     text=tr("⚡ 可改为快速访问立刻联网:消耗 {cost} 今日额度(×{a:g}).").format(
-                        cost=fmt_hm(p["minutes"] * 60 * QUICK_MULTIPLIER), a=QUICK_MULTIPLIER),
+                        cost=fmt_hm(p["minutes"] * 60 * config.QUICK_MULTIPLIER), a=config.QUICK_MULTIPLIER),
                     fg=COLORS["text_dim"]
                 )
             else:
@@ -1147,19 +1165,19 @@ class BreakTimerApp:
             parts = []
             if usermin and n.can_quick(usermin)[0]:
                 parts.append(tr("⚡ 快速访问 {m} 分钟:立刻联网,消耗 {cost} 今日额度.").format(
-                    m=usermin, cost=fmt_hm(usermin * 60 * QUICK_MULTIPLIER)))
+                    m=usermin, cost=fmt_hm(usermin * 60 * config.QUICK_MULTIPLIER)))
             else:
                 parts.append(tr("⚡ 快速访问:跳过冷静期,额度按 ×{a:g} 消耗;最多 {cap}.").format(
-                    a=QUICK_MULTIPLIER, cap=fmt_hm(n.quick_left)))
+                    a=config.QUICK_MULTIPLIER, cap=fmt_hm(n.quick_left)))
             if n.loan_left < 60:
                 parts.append(tr("💳 明天的额度已经借完了."))
             elif usermin and n.can_borrow(usermin)[0]:
                 parts.append(tr("💳 借 {m} 分钟:今天额度 +{add},明天额度 -{cost}.最多可借 {cap}.").format(
                     m=usermin, add=fmt_hm(usermin * 60),
-                    cost=fmt_hm(usermin * 60 * LOAN_RATE), cap=fmt_hm(n.loan_left)))
+                    cost=fmt_hm(usermin * 60 * config.LOAN_RATE), cap=fmt_hm(n.loan_left)))
             else:
                 parts.append(tr("💳 紧急借贷:今天额度 +1 分钟,明天额度 -{b:g} 分钟;最多可借 {cap}.").format(
-                    b=LOAN_RATE, cap=fmt_hm(n.loan_left)))
+                    b=config.LOAN_RATE, cap=fmt_hm(n.loan_left)))
             self.net_loan_hint.config(text="\n".join(parts), fg=COLORS["text_dim"])
 
         self.net_bar["maximum"] = max(1.0, n.today_total)
@@ -1192,6 +1210,7 @@ class BreakTimerApp:
         self._net_last = now
         event = self.net.tick(dt)
         self.refresh_net()
+        self._sync_break_lock()
         if self.current_page == "rules" and "rules" in self.pages:
             self.pages["rules"].refresh()
         self.net_job = self.root.after(1000, self._net_tick)
