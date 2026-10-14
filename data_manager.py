@@ -47,6 +47,9 @@ class DataManager:
 
         self.study_file = os.path.join(self.data_dir, 'study_log.json')
         self.hour_file = os.path.join(self.data_dir, 'hour_log.json')
+        # 计时器的每一段专注 / 休息 (起止时刻), Statistics 页画每天的时间分布用; 只留最近 7 天
+        self.focus_file = os.path.join(self.data_dir, 'focus_log.json')
+        self.focus_sessions = []
 
         self.study_data: Dict[str, float] = {}
         self.hour_days: Dict[str, Dict[str, str]] = {}
@@ -61,6 +64,7 @@ class DataManager:
         self.prune_study_data()
         self.load_hour_log()
         self.finalize_hours()
+        self.load_focus_log()
 
 
     @property
@@ -165,6 +169,89 @@ class DataManager:
     def month_study(self, prefix: str) -> Dict[str, float]:
         return {k: v for k, v in self.study_data.items() if k.startswith(prefix)}
 
+
+    # ---- 专注计时: 每一段专注 / 休息的起止时刻 ----
+
+    FOCUS_DAYS = 7
+    _TS = '%Y-%m-%d %H:%M:%S'
+
+    def _focus_floor(self, now: datetime = None) -> datetime:
+        now = now or datetime.now()
+        return now.replace(hour=0, minute=0, second=0, microsecond=0) \
+            - timedelta(days=self.FOCUS_DAYS - 1)
+
+    def load_focus_log(self):
+        try:
+            with open(self.focus_file, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+            recs = d.get("sessions", []) if isinstance(d, dict) else []
+        except Exception:
+            recs = []
+        out = []
+        for r in recs:
+            try:
+                st = datetime.strptime(r["s"], self._TS)
+                en = datetime.strptime(r["e"], self._TS)
+            except (KeyError, TypeError, ValueError):
+                continue
+            if r.get("k") in ("study", "break") and en > st:
+                out.append({"k": r["k"], "s": r["s"], "e": r["e"]})
+        self.focus_sessions = out
+        self._prune_focus()
+
+    def _prune_focus(self) -> bool:
+        floor = self._focus_floor().strftime(self._TS)
+        before = len(self.focus_sessions)
+        self.focus_sessions = [r for r in self.focus_sessions if r["e"] > floor]
+        return len(self.focus_sessions) != before
+
+    def save_focus_log(self):
+        if self.uninstalling:
+            return
+        self._prune_focus()
+        try:
+            tmp = self.focus_file + ".tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({"sessions": self.focus_sessions}, f, indent=1)
+            os.replace(tmp, self.focus_file)
+        except (IOError, OSError):
+            pass
+
+    def add_focus_session(self, kind: str, start: datetime, end: datetime):
+        """kind: 'study' 专注 / 'break' 休息."""
+        if kind not in ("study", "break") or start is None or end is None:
+            return
+        if (end - start).total_seconds() < 1:
+            return
+        self.focus_sessions.append({
+            "k": kind, "s": start.strftime(self._TS), "e": end.strftime(self._TS)})
+        self.save_focus_log()
+
+    def focus_hours(self, day: datetime, live=None):
+        """某一天 24 个小时各自的 (专注秒数, 休息秒数).
+
+        live: 正在进行的一段 (kind, start), 计到此刻为止."""
+        day0 = day.replace(hour=0, minute=0, second=0, microsecond=0)
+        study = [0.0] * 24
+        rest = [0.0] * 24
+        segs = []
+        for r in self.focus_sessions:
+            segs.append((r["k"], datetime.strptime(r["s"], self._TS),
+                         datetime.strptime(r["e"], self._TS)))
+        if live and live[1] is not None:
+            segs.append((live[0], live[1], datetime.now()))
+        for kind, st, en in segs:
+            for h in range(24):
+                h0 = day0 + timedelta(hours=h)
+                h1 = h0 + timedelta(hours=1)
+                sec = (min(en, h1) - max(st, h0)).total_seconds()
+                if sec > 0:
+                    (study if kind == "study" else rest)[h] += sec
+        for h in range(24):
+            # 理论上不会重叠; 万一重叠, 专注优先, 一小时最多 3600 秒
+            study[h] = min(3600.0, study[h])
+            rest[h] = min(3600.0 - study[h], rest[h])
+        return list(zip(study, rest))
 
     def load_hour_log(self):
         try:

@@ -72,6 +72,7 @@ class BreakTimerApp:
         self.state = IDLE
         self.start_mono = None
         self.start_wall = None
+        self.break_start_wall = None
         self.last_t_minutes = 0.0
         self.countdown_seconds = 0
         self.update_job = None
@@ -233,7 +234,8 @@ class BreakTimerApp:
 
         self.pages = {}
         self.pages["cal"] = CalendarPage(self.content, self.dm)
-        self.pages["stats"] = StatsPage(self.content, self.dm, self.net)
+        self.pages["stats"] = StatsPage(self.content, self.dm, self.net,
+                                        focus_live=self._focus_live)
         self.pages["log"] = HourLogPage(
             self.content, self.dm,
             on_text_changed=self.update_log_badge,
@@ -452,6 +454,7 @@ class BreakTimerApp:
             elapsed_minutes = (time.monotonic() - self.start_mono) / 60.0
             self.last_t_minutes = elapsed_minutes
             self.dm.add_study_session(self.start_wall, end_wall, elapsed_minutes)
+            self.dm.add_focus_session("study", self.start_wall, end_wall)
             self.refresh_display()
 
             self.state = READY_BREAK
@@ -468,6 +471,7 @@ class BreakTimerApp:
                 self._set_break_carry(0)
             self.countdown_seconds = total
             self.state = ON_BREAK
+            self.break_start_wall = datetime.now()
             self._show_on_break()
             self.schedule_update()
 
@@ -508,12 +512,13 @@ class BreakTimerApp:
             self.btn_action.config(state="disabled" if self._break_locked() else "!disabled")
 
     def end_break_early(self, silent: bool = False):
-        """暂停休息(关闭程序也算):剩余时间 ×0.6 计入下一次休息."""
+        """暂停休息(关闭程序也算):剩余时间 ×BREAK_CARRY_RATE 计入下一次休息."""
         if self.state != ON_BREAK:
             return
         if not silent and self._break_locked():
             toast.warn(tr("网络正在使用,不能暂停休息."))
             return
+        self._record_break_end()
         left = max(0, int(self.countdown_seconds))
         add = int(round(left * config.BREAK_CARRY_RATE))
         if add > 0:
@@ -526,6 +531,20 @@ class BreakTimerApp:
             self.countdown_seconds = 0
         else:
             self.reset_to_idle()
+
+    def _record_break_end(self):
+        """一段休息结束 (自然结束 / 暂停 / 关闭程序): 记入专注计时统计."""
+        if self.break_start_wall is not None:
+            self.dm.add_focus_session("break", self.break_start_wall, datetime.now())
+            self.break_start_wall = None
+
+    def _focus_live(self):
+        """正在进行的一段, 供 Statistics 页画到此刻: (kind, 开始时刻) 或 None."""
+        if self.state == RUNNING and self.start_wall is not None:
+            return ("study", self.start_wall)
+        if self.state == ON_BREAK and self.break_start_wall is not None:
+            return ("break", self.break_start_wall)
+        return None
 
     def _idle_sub_text(self) -> str:
         text = tr("开始专注时按 [开始].")
@@ -590,6 +609,7 @@ class BreakTimerApp:
                 self.countdown_seconds -= 1
                 self.update_job = self.root.after(1000, self.update)
             else:
+                self._record_break_end()
                 toast.success(tr("休息结束,可以开始下一轮了!"))
                 self.reset_to_idle()
         else:
@@ -839,9 +859,11 @@ class BreakTimerApp:
             font=config.font("h1", bold=True)
         ).pack(anchor="w")
         self.net_lbl_header = tk.Label(
-            hdr, text="", bg=bg, fg=COLORS["text_dim"], font=config.font("body")
+            hdr, text="", bg=bg, fg=COLORS["text_dim"], font=config.font("body"),
+            anchor="w", justify="left"
         )
-        self.net_lbl_header.pack(anchor="w", pady=(4, 0))
+        self.net_lbl_header.pack(anchor="w", fill="x", pady=(4, 0))
+        wrap_label(self.net_lbl_header, 8)
 
         ttk.Separator(page, orient="horizontal", style="UI.TSeparator").pack(fill="x", padx=26)
 
@@ -1079,8 +1101,8 @@ class BreakTimerApp:
             self._net_set_status("Developer mode — network unrestricted", COLORS["warn"])
             self.net_lbl_time.config(text="DEV")
             self.net_lbl_sub.config(
-                text="开发者模式已开启:本程序不会断网,也不会申请/计时.\n"
-                     "调试完成后请到 Settings 页关掉它."
+                text=tr("开发者模式已开启:本程序不会断网,也不会申请/计时.\n"
+                        "调试完成后请到 Settings 页关掉它.")
             )
             self.net_form.pack_forget()
             self.net_ctrl.pack_forget()
