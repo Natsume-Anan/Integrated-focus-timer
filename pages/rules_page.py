@@ -13,7 +13,8 @@ from netproxy import (
     WHITE_DOMAINS, WHITE_APPS, BLACK_DOMAINS, BLACK_APPS,
 )
 from netproxy.rules import MODE_BLACKLIST, MODE_WHITELIST, keys_for_mode
-from .widgets import Modal, ScrollArea, wrap_label, smooth
+from .widgets import (Modal, ScrollArea, wrap_label, smooth, cfg,
+                      show_pack, hide_pack, show_grid, hide_grid)
 from . import ai_dialogs
 
 _WHY_TEXT = {
@@ -317,27 +318,27 @@ class RulesPage(tk.Frame):
         mode = self._mode()
         active = keys_for_mode(mode)
 
-        self.lbl_sub.config(text=tr(_MODE_TEXT[mode]))
+        cfg(self.lbl_sub, text=tr(_MODE_TEXT[mode]))
         for key, fr in self._frames.items():
             if key in active:
-                fr.grid()
+                show_grid(fr)
             else:
-                fr.grid_remove()
+                hide_grid(fr)
         for m, b in self.btn_modes.items():
-            b.config(style="Accent.TButton" if m == mode else "TButton")
+            cfg(b, style="Accent.TButton" if m == mode else "TButton")
         staged = self.settings.staged("FILTER_MODE") if self.settings else None
         if staged:
             target = tr("白名单模式") if staged["value"] == MODE_WHITELIST else tr("黑名单模式")
-            self.lbl_pending_mode.config(
+            cfg(self.lbl_pending_mode, 
                 text=tr("待生效: 切换到{mode}   ·   {when}").format(
                     mode=target, when=self.settings.apply_at_text("FILTER_MODE")))
         else:
-            self.lbl_pending_mode.config(text="")
+            cfg(self.lbl_pending_mode, text="")
 
         if proxy_on:
-            self.btn_settings.pack_forget()
+            hide_pack(self.btn_settings)
             run = tr("运行中") if c.running else tr("未运行")
-            self.lbl_mode.config(
+            cfg(self.lbl_mode, 
                 text=tr("Proxy 模式 · 本地代理 127.0.0.1:{port} · {run}").format(
                     port=c.port, run=run),
                 fg=COLORS["success"] if c.running else COLORS["warn"])
@@ -347,13 +348,13 @@ class RulesPage(tk.Frame):
             else:
                 gate = tr("只拦黑名单里的网站 / 应用,其余放行.")
         else:
-            self.lbl_mode.config(
+            cfg(self.lbl_mode, 
                 text=tr("当前是 Adapter 模式 —— 规则已保存,但暂未启用."),
                 fg=COLORS["warn"])
-            self.btn_settings.pack(anchor="w", pady=(6, 0))
+            show_pack(self.btn_settings, anchor="w", pady=(6, 0))
             gate = tr("在 Settings 里把「断网方式」改成 Proxy 后,这些规则才会生效.")
-        self.lbl_gate.config(text=gate)
-        self.lbl_stats.config(
+        cfg(self.lbl_gate, text=gate)
+        cfg(self.lbl_stats, 
             text=tr("已放行 {a} 次 · 已拦截 {b} 次(本次运行)").format(a=c.allowed, b=c.blocked))
 
         if force or self._rules_version != r.version:
@@ -376,9 +377,9 @@ class RulesPage(tk.Frame):
             for line in pend:
                 self.lb_pending.insert("end", line)
         if r.in_setup_window():
-            self.lbl_setup.config(text=tr("初始化窗口内:放宽也立即生效.之后加入白名单 / 移出黑名单要等冷静期."))
+            cfg(self.lbl_setup, text=tr("初始化窗口内:放宽也立即生效.之后加入白名单 / 移出黑名单要等冷静期."))
         else:
-            self.lbl_setup.config(text=tr("加入白名单,移出黑名单要等冷静期;加入黑名单,移出白名单立即生效."))
+            cfg(self.lbl_setup, text=tr("加入白名单,移出黑名单要等冷静期;加入黑名单,移出白名单立即生效."))
 
         seq = (c.event_seq, sum(e["count"] for e in c.events))
         if force or self._shown.get("_events") != seq:

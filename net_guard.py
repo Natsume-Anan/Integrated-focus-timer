@@ -132,13 +132,33 @@ class NetGuard:
         try:
             with open(self.state_file, 'r', encoding='utf-8') as f:
                 d = json.load(f)
-            if d.get("date") == self.date:
-                self.used = max(0.0, float(d.get("used", 0.0)))
-                self.bonus = max(0.0, float(d.get("bonus", 0.0)))
-                self.tomorrow_used = max(0.0, float(d.get("tomorrow_used", 0.0)))
-                self.debt = max(0.0, float(d.get("debt", 0.0)))
         except Exception:
-            pass
+            return
+        if not isinstance(d, dict):
+            return
+        saved = str(d.get("date") or "")
+
+        def num(key):
+            try:
+                return max(0.0, float(d.get(key, 0.0)))
+            except (TypeError, ValueError):
+                return 0.0
+
+        if saved == self.date:
+            self.used = num("used")
+            self.bonus = num("bonus")
+            self.tomorrow_used = num("tomorrow_used")
+            self.debt = num("debt")
+        elif saved and saved < self.date:
+            # 存档是之前某一天的: 程序关着跨过了零点.
+            # 借贷要还的部分照样变成今天的欠款 —— 以前这里什么都不读,
+            # 借完额度后关掉程序, 第二天再打开, 欠款就凭空消失了.
+            # 中间隔了几天也一样: 欠款记到借贷之后第一次打开程序的那一天.
+            self.debt = num("tomorrow_used")
+            if self.debt > 0:
+                self._save()
+                self._log(f"LOAN     repay {int(self.debt // 60)} min today "
+                          f"(borrowed on {saved})")
 
     def _save(self):
         if self.dead:
@@ -648,6 +668,33 @@ def _selftest():
         m.used = m.bonus = m.tomorrow_used = m.debt = 0.0
         m._load()
         assert (m.used, m.bonus, m.tomorrow_used, m.debt) == (100.0, 600.0, 1200.0, 300.0)
+
+        # 借贷后关掉程序, 之后某天才打开: 欠款照样要还, 其余清零
+        for later in ("2099-01-01", "2099-01-05"):
+            m = NetGuard.__new__(NetGuard)
+            m.state_file, m.log_file, m.usage_file = n.state_file, n.log_file, n.usage_file
+            m.dead, m.usage, m._usage_dirty, m._session = False, [], False, None
+            m.date = later
+            m.used = m.bonus = m.tomorrow_used = m.debt = 0.0
+            m._load()
+            assert (m.used, m.bonus, m.tomorrow_used) == (0.0, 0.0, 0.0)
+            assert m.debt == 1200.0, (later, m.debt)
+            # 当天再次打开, 欠款还在 (已经写回今天的存档)
+            m2 = NetGuard.__new__(NetGuard)
+            m2.state_file, m2.date = n.state_file, later
+            m2.used = m2.bonus = m2.tomorrow_used = m2.debt = 0.0
+            m2._load()
+            assert m2.debt == 1200.0, "欠款要写回存档, 当天重开也不能消失"
+            n.date = _dt.datetime.now().strftime('%Y-%m-%d')
+            n._save()                                   # 恢复成借贷当天的存档
+        # 没借过的话, 新的一天什么都不带过来
+        n.tomorrow_used = 0.0
+        n._save()
+        m = NetGuard.__new__(NetGuard)
+        m.state_file, m.date = n.state_file, "2099-01-01"
+        m.used = m.bonus = m.tomorrow_used = m.debt = 0.0
+        m._load()
+        assert m.debt == 0.0
         n.dead = True
 
         n.used, n.bonus, n.tomorrow_used, n.debt = 0.0, 0.0, 0.0, 0.0

@@ -16,6 +16,7 @@ EN = {
     "取消": "Cancel",
     "当前": "Current",
     "立即生效中…": "applying…",
+    "正在加载…": "Loading…",
     "正在重新加载界面…": "Reloading the interface…",
     "切换语言 / 字号 / 主题需要重建所有页面,请稍候": "Changing language / font size / theme rebuilds every page, one moment",
     "开启": "ON",

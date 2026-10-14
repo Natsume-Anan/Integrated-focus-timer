@@ -7,7 +7,7 @@ import config
 from config import COLORS, fmt_hm
 from data_manager import month_prefixes, tally_items
 from i18n import tr, is_en
-from .widgets import ScrollArea, wrap_label, smooth
+from .widgets import ScrollArea, wrap_label, smooth, cfg, show_pack, hide_pack
 
 
 # 图表颜色都跟随当前主题 (config.CHART_PALETTE / COLORS 会在切换主题时原地更新)
@@ -34,6 +34,7 @@ class StatsPage(tk.Frame):
         self.focus_live = focus_live
         self.page = "log"
         self.mode = {"log": "pct", "net": "pct"}
+        self._tabs_log_on = None
         self._focus_days = []
         self._focus_geom = None
         self._build()
@@ -123,7 +124,8 @@ class StatsPage(tk.Frame):
             legend = ScrollArea(col, height=config.scaled(170), bg=COLORS["bg_card"])
             legend.pack(fill="both", expand=True, padx=8, pady=(0, 8))
             self.cols.append({"title": title, "total": total, "canvas": canvas,
-                              "size": size, "legend": legend})
+                              "size": size, "legend": legend,
+                              "rows": [], "empty": None, "sig": None})
         body.rowconfigure(0, weight=1)
 
 
@@ -140,14 +142,14 @@ class StatsPage(tk.Frame):
     def _style_buttons(self):
         for key, b in self.tab_btns.items():
             on = key == self.page
-            b.config(bg=COLORS["accent"] if on else COLORS["bg_card"],
+            cfg(b, bg=COLORS["accent"] if on else COLORS["bg_card"],
                      fg=COLORS["on_accent"] if on else COLORS["text"],
                      activebackground=COLORS["accent_hover"] if on else COLORS["border"],
                      activeforeground=COLORS["on_accent"] if on else COLORS["text"])
         cur = self.mode.get(self.page, "pct")
         for key, b in self.mode_btns.items():
             on = key == cur
-            b.config(bg=COLORS["text"] if on else COLORS["bg_card"],
+            cfg(b, bg=COLORS["text"] if on else COLORS["bg_card"],
                      fg=COLORS["bg"] if on else COLORS["text_dim"],
                      activebackground=COLORS["border"], activeforeground=COLORS["text"])
 
@@ -159,37 +161,39 @@ class StatsPage(tk.Frame):
 
     def refresh(self):
         log_on = bool(self.dm.hour_enabled)
-        for b in self.tab_btns.values():
-            b.pack_forget()
-        if log_on:
-            self.tab_btns["log"].pack(side="left", padx=(0, 4))
-        else:
-            if self.page == "log":
-                self.page = "net"
-        self.tab_btns["net"].pack(side="left", padx=(0, 4))
-        self.tab_btns["focus"].pack(side="left", padx=(0, 4))
+        if not log_on and self.page == "log":
+            self.page = "net"
+        # 标签按钮只在 "整点记录" 开关变化时才重新排列 (重复 pack 会触发整页重新布局)
+        if self._tabs_log_on != log_on:
+            self._tabs_log_on = log_on
+            for b in self.tab_btns.values():
+                b.pack_forget()
+            if log_on:
+                self.tab_btns["log"].pack(side="left", padx=(0, 4))
+            self.tab_btns["net"].pack(side="left", padx=(0, 4))
+            self.tab_btns["focus"].pack(side="left", padx=(0, 4))
         self._style_buttons()
 
         if self.page == "focus":
-            self.mode_bar.pack_forget()
-            self.focus_legend.pack(side="right")
-            self.pie_body.pack_forget()
-            self.focus_body.pack(fill="both", expand=True, padx=26, pady=(10, 16))
-            self.lbl_note.config(text=tr(
+            hide_pack(self.mode_bar)
+            show_pack(self.focus_legend, side="right")
+            hide_pack(self.pie_body)
+            show_pack(self.focus_body, fill="both", expand=True, padx=26, pady=(10, 16))
+            cfg(self.lbl_note, text=tr(
                 "最近 7 天计时器的专注与休息.每根条是一个小时,按比例分成专注、休息与空白;鼠标停在条上可查看分钟数."))
             self._load_focus()
             self._draw_focus()
             return
-        self.focus_legend.pack_forget()
-        self.focus_body.pack_forget()
-        self.mode_bar.pack(side="right")
-        self.pie_body.pack(fill="both", expand=True, padx=20, pady=(10, 16))
+        hide_pack(self.focus_legend)
+        hide_pack(self.focus_body)
+        show_pack(self.mode_bar, side="right")
+        show_pack(self.pie_body, fill="both", expand=True, padx=20, pady=(10, 16))
 
         if self.page == "log":
-            self.lbl_note.config(text=tr(
+            cfg(self.lbl_note, text=tr(
                 "整点记录里每一项活动的总时间.一小时写了多项(用 / 连接)时,这一小时均分给每一项."))
         else:
-            self.lbl_note.config(text=tr(
+            cfg(self.lbl_note, text=tr(
                 "每个联网理由的实际联网时间,不计快速访问的倍数.一次申请写了多个理由(用 / 连接)时均分."))
 
         this, last = month_prefixes()
@@ -199,35 +203,62 @@ class StatsPage(tk.Frame):
     def _draw_column(self, col, title: str, data: dict):
         pct_mode = self.mode[self.page] == "pct"
         items = sorted(data.items(), key=lambda kv: (-kv[1], kv[0]))
+        # 数据和显示方式都没变 → 什么都不用画 (切回这页时几乎零开销)
+        sig = (title, pct_mode, tuple(items))
+        if col["sig"] == sig:
+            return
+        col["sig"] = sig
+
         total = sum(v for _, v in items)
-        col["title"].config(text=title)
-        col["total"].config(text=tr("合计 {t} · {n} 项").format(t=fmt_hm(total), n=len(items)))
+        cfg(col["title"], text=title)
+        cfg(col["total"], text=tr("合计 {t} · {n} 项").format(t=fmt_hm(total), n=len(items)))
 
         slices = [(k, v, PALETTE[i]) for i, (k, v) in enumerate(items[:len(PALETTE)])]
         rest = sum(v for _, v in items[len(PALETTE):])
         if rest > 0:
             slices.append((tr("其他"), rest, _c("chart_other")))
         self._draw_pie(col["canvas"], col["size"], slices, total, pct_mode)
+        self._fill_legend(col, items, total, pct_mode)
 
+    def _fill_legend(self, col, items, total, pct_mode):
+        """图例的每一行控件循环使用: 只在行数不够时新建, 多出来的收起来."""
         inner = col["legend"].inner
-        for w in inner.winfo_children():
-            w.destroy()
         card = COLORS["bg_card"]
-        if not items:
-            tk.Label(inner, text=tr("暂无数据"), bg=card, fg=COLORS["text_dim"],
-                     font=config.font("small")).pack(anchor="w", padx=6, pady=4)
-        for i, (k, v) in enumerate(items):
+        if col["empty"] is None:
+            col["empty"] = tk.Label(inner, text=tr("暂无数据"), bg=card,
+                                    fg=COLORS["text_dim"], font=config.font("small"))
+        if items:
+            hide_pack(col["empty"])
+        else:
+            show_pack(col["empty"], anchor="w", padx=6, pady=4)
+
+        rows = col["rows"]
+        created = False
+        while len(rows) < len(items):
             row = tk.Frame(inner, bg=card)
-            row.pack(fill="x", padx=4, pady=1)
+            sw = tk.Frame(row, bg=card, width=config.scaled(12), height=config.scaled(12))
+            sw.pack(side="left", padx=(2, 8))
+            val = tk.Label(row, text="", bg=card, fg=COLORS["text"], width=9, anchor="e",
+                           font=config.font("small", bold=True))
+            val.pack(side="right")
+            name = tk.Label(row, text="", bg=card, fg=COLORS["text"], anchor="w",
+                            font=config.font("small"))
+            name.pack(side="left", fill="x", expand=True)
+            rows.append((row, sw, val, name))
+            created = True
+
+        for i, (row, sw, val, name) in enumerate(rows):
+            if i >= len(items):
+                hide_pack(row)
+                continue
+            k, v = items[i]
             color = PALETTE[i] if i < len(PALETTE) else _c("chart_other")
-            tk.Frame(row, bg=color, width=config.scaled(12),
-                     height=config.scaled(12)).pack(side="left", padx=(2, 8))
-            value = f"{v / total * 100:.1f}%" if pct_mode else fmt_hm(v)
-            tk.Label(row, text=value, bg=card, fg=COLORS["text"], width=9, anchor="e",
-                     font=config.font("small", bold=True)).pack(side="right")
-            tk.Label(row, text=k, bg=card, fg=COLORS["text"], anchor="w",
-                     font=config.font("small")).pack(side="left", fill="x", expand=True)
-        col["legend"].bind_children()
+            cfg(sw, bg=color)
+            cfg(val, text=f"{v / total * 100:.1f}%" if pct_mode else fmt_hm(v))
+            cfg(name, text=k)
+            show_pack(row, fill="x", padx=4, pady=1)
+        if created:
+            col["legend"].bind_children()
         col["legend"].scroll_to_top()
 
     @staticmethod
@@ -272,7 +303,12 @@ class StatsPage(tk.Frame):
 
     def _focus_tick(self):
         try:
-            if self.page == "focus":
+            if not self.winfo_exists():
+                return              # 界面重建后旧页面已销毁, 不再续约
+        except Exception:
+            return
+        try:
+            if self.page == "focus" and self.winfo_ismapped():
                 self._load_focus()
                 self._draw_focus()
         finally:

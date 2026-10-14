@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import config
 from config import COLORS
 from i18n import tr
-from .widgets import wrap_label
+from .widgets import wrap_label, cfg
 
 
 class HourLogPage(tk.Frame):
@@ -158,23 +158,23 @@ class HourLogPage(tk.Frame):
         auto_text = self.dm.auto_text
         fill_hours = f"{config.FILL_WINDOW.total_seconds() / 3600:g}"
 
-        self.lbl_state.config(
+        cfg(self.lbl_state, 
             text=tr("当前: {state}").format(state=tr("开启") if enabled else tr("关闭_状态")),
             fg=COLORS["success"] if enabled else COLORS["text_dim"]
         )
         if enabled:
-            self.lbl_hint.config(
+            cfg(self.lbl_hint, 
                 text=(tr("每次提示音后填写上一小时做了什么;每行时间是该小时的结束时刻(00:00 = 昨天 23:00–24:00);")
                       + " " + tr("留空 {h} 小时 → 自动记为「{text}」.").format(
                           h=fill_hours, text=auto_text)
                       + " " + tr("(开关在 Settings 页,改动 48 小时后生效)"))
             )
         else:
-            self.lbl_hint.config(
+            cfg(self.lbl_hint, 
                 text=(tr("整点记录已关闭 —— 不响铃,不自动补记,也不记录任何内容.")
                       + " " + tr("(开关在 Settings 页,改动 48 小时后生效)"))
             )
-        self.lbl_date.config(
+        cfg(self.lbl_date, 
             text=tr("{date}(今天)").format(date=self.view_date)
                  + ("" if enabled else tr("   ·  记录已关闭"))
         )
@@ -188,7 +188,7 @@ class HourLogPage(tk.Frame):
             text = self._get(h)
             if focused is not ent and var.get() != text:
                 var.set(text)
-            ent.config(state="normal" if (enabled and ended) else "disabled")
+            cfg(ent, state="normal" if (enabled and ended) else "disabled")
 
             is_wait = awaiting is not None and awaiting == start
             is_now = enabled and start <= now < end
@@ -197,12 +197,12 @@ class HourLogPage(tk.Frame):
                 label += tr("   ◂ 现在")
             elif is_wait:
                 label += tr("   ◂ 待填写")
-            lbl.config(
+            cfg(lbl,
                 text=label,
                 fg=COLORS["accent"] if (is_wait or is_now) else
                    (COLORS["text"] if (enabled and ended) else COLORS["text_dim"])
             )
-            ent.config(
+            cfg(ent,
                 highlightbackground=COLORS["accent"] if is_wait else COLORS["border"]
             )
 

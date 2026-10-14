@@ -21,7 +21,8 @@ from net_guard import NetGuard
 from data_manager import DataManager
 from settings_manager import SettingsManager
 from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage, StatsPage
-from pages.widgets import wrap_label, frozen, LoadingCover
+from pages.widgets import (wrap_label, frozen, LoadingCover, cfg,
+                           show_pack, hide_pack)
 
 
 def _enable_per_monitor_dpi():
@@ -99,13 +100,19 @@ class BreakTimerApp:
         self.var_loan = tk.BooleanVar(value=False)
 
         toast.bind_root(root)
-        self._build_layout(root)
-        self.show_page("timer")
+        # 先定好窗口大小, 再在加载页后面一页一页地建界面
         self._apply_geometry()
+        cover = LoadingCover(root, tr("正在加载…"), "", steps=self.LAYOUT_STEPS).show()
+        try:
+            self._build_layout(root, cover)
+            self.show_page("timer")
+            self.refresh_display()
+            self.update_log_badge()
+            self.update_settings_badge()
+        finally:
+            with frozen(root):
+                cover.close()
 
-        self.refresh_display()
-        self.update_log_badge()
-        self.update_settings_badge()
         self._start_midnight_timer()
         self._schedule_hourly()
         self._schedule_apply_check()
@@ -282,7 +289,25 @@ class BreakTimerApp:
         )
 
 
-    def _build_layout(self, parent):
+    # _layout_steps 每建好一部分 yield 一次 (供加载页前进进度条); 次数 = LAYOUT_STEPS
+    LAYOUT_STEPS = 9
+
+    def _build_layout(self, parent, cover=None):
+        for _ in self._layout_steps(parent):
+            if cover is not None:
+                cover.step()
+
+    def _prepare_page(self, page):
+        """在加载页后面把页面先排一次版 (创建好所有子窗口), 再收起来.
+        这样第一次切到这页时不用再从头创建, 切换更快."""
+        page.grid(row=0, column=0, sticky="nsew")
+        try:
+            page.update_idletasks()
+        except Exception:
+            pass
+        page.grid_remove()
+
+    def _layout_steps(self, parent):
         bg, card = COLORS["bg"], COLORS["bg_card"]
 
         self.topbar = tk.Frame(parent, bg=COLORS["accent"], height=4)
@@ -331,15 +356,25 @@ class BreakTimerApp:
         self.content.grid_columnconfigure(0, weight=1)
 
         self.pages = {}
+        yield
+
+        # 只有当前页挂在界面上 (grid), 其余页 grid_remove:
+        # 看不见的页面不参与布局和重画, 每秒的刷新也不会去画它们.
         self.pages["cal"] = CalendarPage(self.content, self.dm)
+        self._prepare_page(self.pages["cal"])
+        yield
         self.pages["stats"] = StatsPage(self.content, self.dm, self.net,
                                         focus_live=self._focus_live)
+        self._prepare_page(self.pages["stats"])
+        yield
         self.pages["log"] = HourLogPage(
             self.content, self.dm,
             on_text_changed=self.update_log_badge,
             on_toggle=self.on_hour_log_toggle,
             on_open_settings=lambda: self.show_page("settings")
         )
+        self._prepare_page(self.pages["log"])
+        yield
         self.pages["settings"] = SettingsPage(
             self.content, self.settings,
             on_changed=self.on_settings_changed, on_sound=self.play_chime,
@@ -348,38 +383,48 @@ class BreakTimerApp:
             on_font_scale=self.on_font_scale_changed,
             on_theme=self.on_theme_changed
         )
+        self._prepare_page(self.pages["settings"])
+        yield
         self.pages["rules"] = RulesPage(
             self.content, self.net.proxy, settings=self.settings,
             on_changed=self.on_settings_changed,
             on_open_settings=lambda: self.show_page("settings")
         )
+        self._prepare_page(self.pages["rules"])
+        yield
         self.pages["net"] = tk.Frame(self.content, bg=bg)
-        self.pages["timer"] = tk.Frame(self.content, bg=bg)
-        self.pages["uninstall"] = tk.Frame(self.content, bg=bg)
-        for f in self.pages.values():
-            f.grid(row=0, column=0, sticky="nsew")
-
         self._build_net_page(self.pages["net"])
+        self._prepare_page(self.pages["net"])
+        yield
+        self.pages["timer"] = tk.Frame(self.content, bg=bg)
         self._build_timer_page(self.pages["timer"])
+        self._prepare_page(self.pages["timer"])
+        yield
+        self.pages["uninstall"] = tk.Frame(self.content, bg=bg)
         self._build_uninstall_page(self.pages["uninstall"])
+        self._prepare_page(self.pages["uninstall"])
+        yield
 
 
     def rebuild_ui(self):
         if self._rebuilding or self.shutting_down:
             return
         self._rebuilding = True
+        # 加载页盖住整个窗口; 旧界面在它后面拆掉, 新界面在它后面一页一页建好
+        # (进度条随之前进), 最后在冻结中撤掉加载页, 新界面整窗一次显示.
         cover = LoadingCover(self.root, tr("正在重新加载界面…"),
-                             tr("切换语言 / 字号 / 主题需要重建所有页面,请稍候")).show()
+                             tr("切换语言 / 字号 / 主题需要重建所有页面,请稍候"),
+                             steps=self.LAYOUT_STEPS + 1).show()
         try:
-            with frozen(self.root):
-                try:
-                    self._rebuild_ui()
-                finally:
-                    cover.close()       # 在冻结中撤掉加载页, 新界面整窗一次显示
+            self._rebuild_ui(cover)
         finally:
-            self._rebuilding = False
+            try:
+                with frozen(self.root):
+                    cover.close()
+            finally:
+                self._rebuilding = False
 
-    def _rebuild_ui(self):
+    def _rebuild_ui(self, cover=None):
         for job in (self.midnight_job, self.hourly_job, self.update_job,
                     self.net_job, getattr(self, "apply_job", None)):
             if job:
@@ -397,10 +442,13 @@ class BreakTimerApp:
                 except Exception:
                     pass
         self._apply_theme()
+        if cover is not None:
+            cover.recolor()
+            cover.step()
         self.pages = {}
         self.nav_btns = {}
-        self._build_layout(self.root)
         self._apply_geometry()
+        self._build_layout(self.root, cover)
         self.show_page(self.current_page or "timer")
 
         self.refresh_display()
@@ -448,16 +496,23 @@ class BreakTimerApp:
         self.current_page = key
         for k, b in self.nav_btns.items():
             if k == key:
-                b.config(
+                cfg(b,
                     bg=COLORS["accent"], fg=COLORS["on_accent"],
                     activebackground=COLORS["accent_hover"],
                     activeforeground=COLORS["on_accent"]
                 )
             else:
-                b.config(
+                cfg(b,
                     bg=COLORS["bg_card"], fg=COLORS["text"],
                     activebackground=COLORS["border"], activeforeground=COLORS["text"]
                 )
+        # 只把目标页挂到界面上, 其余页收起 (不参与布局 / 重画)
+        target = self.pages[key]
+        if target.winfo_manager() != "grid":
+            target.grid(row=0, column=0, sticky="nsew")
+        for k, f in self.pages.items():
+            if k != key and f.winfo_manager() == "grid":
+                f.grid_remove()
         if key == "cal":
             self.pages["cal"].show()
         elif key == "stats":
@@ -472,7 +527,6 @@ class BreakTimerApp:
             self.pages["settings"].refresh()
         elif key == "uninstall":
             self.refresh_uninstall()
-        self.pages[key].tkraise()
         self.update_log_badge()
         self.update_settings_badge()
 
@@ -908,9 +962,9 @@ class BreakTimerApp:
         if not b:
             return
         if not self.dm.hour_enabled:
-            b.config(text=self.nav_labels["log"] + "  (off)")
+            cfg(b, text=self.nav_labels["log"] + "  (off)")
         else:
-            b.config(text=self.nav_labels["log"] + (" ●" if self.dm.awaiting_slot() else ""))
+            cfg(b, text=self.nav_labels["log"] + (" ●" if self.dm.awaiting_slot() else ""))
 
     def on_hour_log_toggle(self, enabled: bool):
         self.update_log_badge()
@@ -944,7 +998,7 @@ class BreakTimerApp:
             mark += f"  ⏳{staged}"
         if config.dev_mode_enabled():
             mark += "  🛠"
-        b.config(text=self.nav_labels["settings"] + mark)
+        cfg(b, text=self.nav_labels["settings"] + mark)
 
 
     def on_dev_mode_changed(self, enabled: bool):
@@ -1191,8 +1245,20 @@ class BreakTimerApp:
         self.refresh_net(force=True)
 
     def _net_set_status(self, text: str, color: str):
-        self.net_lbl_status.config(text=text)
-        self.net_dot_canvas.itemconfig(self.net_dot_id, fill=color)
+        cfg(self.net_lbl_status, text=text)
+        if self.net_dot_canvas.itemcget(self.net_dot_id, "fill") != color:
+            self.net_dot_canvas.itemconfig(self.net_dot_id, fill=color)
+
+    def _net_bar_set(self, n):
+        mx, val = max(1.0, n.today_total), float(n.quota_used)
+        try:
+            if float(self.net_bar["maximum"]) != mx:
+                self.net_bar["maximum"] = mx
+            if abs(float(self.net_bar["value"]) - val) >= 0.5:
+                self.net_bar["value"] = val
+        except Exception:
+            self.net_bar["maximum"] = mx
+            self.net_bar["value"] = val
 
     def refresh_net(self, force: bool = False):
         n = self.net
@@ -1208,91 +1274,91 @@ class BreakTimerApp:
                 r=config.BREAK_COOLDOWN_RATE, t=fmt_ms(cooldown * config.BREAK_COOLDOWN_RATE)) \
                 + tr("(申请时长不超过剩余休息 {left} 时生效)").format(
                     left=fmt_ms(self.countdown_seconds))
-        self.net_lbl_header.config(text=header, justify="left")
+        cfg(self.net_lbl_header, text=header, justify="left")
 
         if mode == "dev":
 
 
             self._net_set_status("Developer mode — network unrestricted", COLORS["warn"])
-            self.net_lbl_time.config(text="DEV")
-            self.net_lbl_sub.config(
+            cfg(self.net_lbl_time, text="DEV")
+            cfg(self.net_lbl_sub, 
                 text=tr("开发者模式已开启:本程序不会断网,也不会申请/计时.\n"
                         "调试完成后请到 Settings 页关掉它.")
             )
-            self.net_form.pack_forget()
-            self.net_ctrl.pack_forget()
-            self.net_bar["maximum"] = max(1.0, n.today_total)
-            self.net_bar["value"] = n.quota_used
-            self.net_lbl_quota.config(
+            hide_pack(self.net_form)
+            hide_pack(self.net_ctrl)
+            self._net_bar_set(n)
+            cfg(self.net_lbl_quota, 
                 text=f"Used today: {fmt_hm(n.quota_used)} / {fmt_hm(n.today_total)}"
                      f"     (developer mode — not counting)"
             )
-            self.net_lbl_debt.config(text="")
+            cfg(self.net_lbl_debt, text="")
             return
 
         if mode != self._net_view or force:
             self._net_view = mode
-            self.net_form.pack_forget()
-            self.net_ctrl.pack_forget()
+            # 只在需要时才收起 / 显示 (重复 pack 会触发整页重新布局)
             if mode == "offline":
-                self.net_form.pack(anchor="w")
+                hide_pack(self.net_ctrl)
+                show_pack(self.net_form, anchor="w", fill="x")
             else:
-                self.net_ctrl.pack(anchor="w")
-                self.btn_net_ctrl.config(
+                hide_pack(self.net_form)
+                show_pack(self.net_ctrl, anchor="w")
+                cfg(self.btn_net_ctrl, 
                     text=tr("✕  取消申请") if mode == "pending" else tr("■  结束本次会话")
                 )
                 if mode == "pending":
-                    self.btn_net_upgrade.config(
+                    cfg(self.btn_net_upgrade, 
                         text=tr("⚡  改为快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER))
-                    self.btn_net_upgrade.pack(side="left", padx=(8, 0))
-                    self.net_ctrl_hint.pack(anchor="w", pady=(8, 0))
+                    show_pack(self.btn_net_upgrade, side="left", padx=(8, 0))
+                    show_pack(self.net_ctrl_hint, anchor="w", pady=(8, 0))
                 else:
-                    self.btn_net_upgrade.pack_forget()
-                    self.net_ctrl_hint.pack_forget()
+                    hide_pack(self.btn_net_upgrade)
+                    hide_pack(self.net_ctrl_hint)
 
         if mode == "offline":
             self._net_set_status(tr("离线"), COLORS["text_dim"])
-            self.net_lbl_time.config(text=tr("离线"))
+            cfg(self.net_lbl_time, text=tr("离线"))
             if n.remaining < 60:
-                self.net_lbl_sub.config(text=tr("今天的额度已用完."))
-                self.btn_net_req.config(state="disabled")
+                cfg(self.net_lbl_sub, text=tr("今天的额度已用完."))
+                cfg(self.btn_net_req, state="disabled")
             else:
-                self.net_lbl_sub.config(
+                cfg(self.net_lbl_sub, 
                     text=tr("在下面提交申请,冷静期结束后自动联网.")
                 )
-                self.btn_net_req.config(state="!disabled")
-            self.btn_net_quick.config(
+                cfg(self.btn_net_req, state="!disabled")
+            cfg(self.btn_net_quick, 
                 text=tr("⚡  快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER),
                 state="!disabled" if n.quick_left >= 60 else "disabled")
-            self.btn_net_loan.config(
+            cfg(self.btn_net_loan, 
                 state="!disabled" if n.loan_left >= 60 else "disabled")
         elif mode == "pending":
             p = n.pending
             self._net_set_status(tr("冷静期中 —— 仍可取消"), COLORS["warn"])
-            self.net_lbl_time.config(text=fmt_ms(p["at"] - time.time()))
+            cfg(self.net_lbl_time, text=fmt_ms(p["at"] - time.time()))
             start_at = datetime.fromtimestamp(p["at"]).strftime("%H:%M")
-            self.net_lbl_sub.config(
+            cfg(self.net_lbl_sub, 
                 text=tr("已申请 {m} 分钟 · {at} 联网").format(m=p['minutes'], at=start_at)
             )
             ok, msg = n.can_quick(p["minutes"])
             if ok:
-                self.net_ctrl_hint.config(
+                cfg(self.net_ctrl_hint, 
                     text=tr("⚡ 可改为快速访问立刻联网:消耗 {cost} 今日额度(×{a:g}).").format(
                         cost=fmt_hm(p["minutes"] * 60 * config.QUICK_MULTIPLIER), a=config.QUICK_MULTIPLIER),
                     fg=COLORS["text_dim"]
                 )
             else:
-                self.net_ctrl_hint.config(text="⚡ " + msg, fg=COLORS["text_dim"])
+                cfg(self.net_ctrl_hint, text="⚡ " + msg, fg=COLORS["text_dim"])
         else:
             self._net_set_status(tr("联网中"), COLORS["success"])
-            self.net_lbl_time.config(text=fmt_ms(n.grant_left))
+            cfg(self.net_lbl_time, text=fmt_ms(n.grant_left))
             if n.grant_quick:
-                self.net_lbl_sub.config(
+                cfg(self.net_lbl_sub, 
                     text=tr("⚡ 快速访问 —— 额度按 ×{a:g} 消耗,归零自动断网.").format(
                         a=n.grant_rate)
                 )
             else:
-                self.net_lbl_sub.config(
+                cfg(self.net_lbl_sub, 
                     text=tr("本次会话剩余时间,归零自动断网.")
                 )
 
@@ -1315,11 +1381,10 @@ class BreakTimerApp:
             else:
                 parts.append(tr("💳 紧急借贷:今天额度 +1 分钟,明天额度 -{b:g} 分钟;最多可借 {cap}.").format(
                     b=config.LOAN_RATE, cap=fmt_hm(n.loan_left)))
-            self.net_loan_hint.config(text="\n".join(parts), fg=COLORS["text_dim"])
+            cfg(self.net_loan_hint, text="\n".join(parts), fg=COLORS["text_dim"])
 
-        self.net_bar["maximum"] = max(1.0, n.today_total)
-        self.net_bar["value"] = n.quota_used
-        self.net_lbl_quota.config(
+        self._net_bar_set(n)
+        cfg(self.net_lbl_quota, 
             text=tr("今日已用: {used} / {total}     今日剩余: {left}     可快速访问: {quick}").format(
                 used=fmt_hm(n.quota_used), total=fmt_hm(n.today_total),
                 left=fmt_hm(n.remaining), quick=fmt_hm(n.quick_left))
@@ -1331,7 +1396,7 @@ class BreakTimerApp:
                 left=fmt_hm(n.tomorrow_remaining)))
         if n.debt > 0:
             bits.append(tr("今天要先还昨天借的 {debt}").format(debt=fmt_hm(n.debt)))
-        self.net_lbl_debt.config(text="\n".join(bits))
+        cfg(self.net_lbl_debt, text="\n".join(bits))
 
     def _safe_minutes(self):
         try:

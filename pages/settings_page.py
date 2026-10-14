@@ -8,7 +8,8 @@ import toast
 from config import COLORS
 from i18n import tr
 from settings_manager import APPLY_INSTANT, SCHEMA_BY_KEY, BASIC_SPECS, DETAIL_SPECS
-from .widgets import ScrollArea, Switch, wrap_label, frozen, smooth
+from .widgets import (ScrollArea, Switch, wrap_label, frozen, smooth, cfg, set_var,
+                      show_pack, hide_pack, show_grid, hide_grid)
 
 
 class SettingsPage(tk.Frame):
@@ -121,14 +122,14 @@ class SettingsPage(tk.Frame):
 
     def show_tab(self, key: str):
         self._tab = key
-        self.area.pack_forget()
-        self.area_num.pack_forget()
-        (self.area if key == "basic" else self.area_num).pack(fill="both", expand=True)
+        on, off = (self.area, self.area_num) if key == "basic" else (self.area_num, self.area)
+        hide_pack(off)
+        show_pack(on, fill="both", expand=True)
         for k, b in self._tab_btns.items():
             if k == key:
-                b.config(bg=COLORS["accent"], fg=COLORS["on_accent"])
+                cfg(b, bg=COLORS["accent"], fg=COLORS["on_accent"])
             else:
-                b.config(bg=COLORS["bg_card"], fg=COLORS["text"])
+                cfg(b, bg=COLORS["bg_card"], fg=COLORS["text"])
 
     # ---- 标记: 不需要等待的设置项 ----
 
@@ -215,7 +216,7 @@ class SettingsPage(tk.Frame):
         row = self._num_rows[key]
         text = self.sm.ui_number(key)
         if force or row["synced"] is None or row["var"].get().strip() == row["synced"]:
-            row["var"].set(text)
+            set_var(row["var"], text)
         row["synced"] = text
 
     def _num_edited(self, key: str) -> bool:
@@ -377,9 +378,9 @@ class SettingsPage(tk.Frame):
 
         if spec["kind"] in ("choice", "combo", "instant", "float"):
             label = self.sm.label_for(key, current, translate=True)
-            row["var"].set(label if label is not None else self.sm.display(key))
+            set_var(row["var"], label if label is not None else self.sm.display(key))
         else:
-            row["var"].set(str(current))
+            set_var(row["var"], str(current))
 
 
     def _stage(self, key: str):
@@ -514,13 +515,13 @@ class SettingsPage(tk.Frame):
 
 
     def refresh(self):
-        self._retranslate()
-
+        # 文字翻译不用每次刷新都重设: 换语言时整个界面会重建.
+        # 下面只改真正变了的属性 (cfg), 避免每次刷新把几十个控件全部重画一遍.
         if self.sw_dev is not None:
             dev = bool(getattr(config, "DEV_MODE", False))
             if self.sw_dev.get() != dev:
                 self.sw_dev.set(dev)
-            self.lbl_dev_state.config(
+            cfg(self.lbl_dev_state,
                 text=tr("已开启 —— 网络不受限制") if dev else tr("已关闭(正常模式)"),
                 fg=COLORS["danger"] if dev else COLORS["text_dim"]
             )
@@ -531,39 +532,39 @@ class SettingsPage(tk.Frame):
                 key = spec["key"]
                 row = self._rows[key]
                 self._sync_widget(key)
-                row["lbl_current"].config(
+                cfg(row["lbl_current"],
                     text=f"{tr('当前')}: {tr(self.sm.display(key))}")
                 text, color = self._badge(key)
-                row["badge"].config(text=text, fg=color)
+                cfg(row["badge"], text=text, fg=color)
 
                 if self.sm.is_staged(key):
-                    row["lbl_pending"].config(
+                    cfg(row["lbl_pending"],
                         text=tr("待生效: {value}   ·   {when}").format(
                             value=tr(self.sm.display_value(key, self.sm.staged(key)['value'])),
                             when=self.sm.apply_at_text(key))
                     )
-                    row["btn_cancel"].pack(side="left", padx=(10, 0))
+                    show_pack(row["btn_cancel"], side="left", padx=(10, 0))
                 else:
-                    row["lbl_pending"].config(text="")
-                    row["btn_cancel"].pack_forget()
+                    cfg(row["lbl_pending"], text="")
+                    hide_pack(row["btn_cancel"])
 
             for spec in DETAIL_SPECS:
                 key = spec["key"]
                 row = self._num_rows[key]
                 self._sync_num(key)
-                row["lbl_current"].config(
+                cfg(row["lbl_current"],
                     text=f"{tr('当前')}: {self.sm.display(key)}")
                 text, color = self._badge(key)
-                row["badge"].config(text=text, fg=color)
+                cfg(row["badge"], text=text, fg=color)
                 if self.sm.is_staged(key):
-                    row["lbl_pending"].config(
+                    cfg(row["lbl_pending"],
                         text=tr("待生效: {value}   ·   {when}").format(
                             value=self.sm.display_value(key, self.sm.staged(key)['value']),
                             when=self.sm.apply_at_text(key)))
-                    row["pend"].grid()
+                    show_grid(row["pend"])
                 else:
-                    row["lbl_pending"].config(text="")
-                    row["pend"].grid_remove()
+                    cfg(row["lbl_pending"], text="")
+                    hide_grid(row["pend"])
         finally:
             self._syncing = False
 
@@ -572,12 +573,14 @@ class SettingsPage(tk.Frame):
         if n and nxt is not None:
             h, rem = divmod(int(nxt), 3600)
             m = rem // 60
-            self.lbl_global.config(
+            cfg(self.lbl_global,
                 text=tr("待生效修改 {n} 项 · 最近一项 {h} 小时 {m} 分后生效").format(
                     n=n, h=h, m=m),
                 fg=COLORS["warn"]
             )
-            self.btn_cancel_all.state(["!disabled"])
+            if self.btn_cancel_all.instate(["disabled"]):
+                self.btn_cancel_all.state(["!disabled"])
         else:
-            self.lbl_global.config(text=tr("当前没有待生效的修改."), fg=COLORS["text_dim"])
-            self.btn_cancel_all.state(["disabled"])
+            cfg(self.lbl_global, text=tr("当前没有待生效的修改."), fg=COLORS["text_dim"])
+            if not self.btn_cancel_all.instate(["disabled"]):
+                self.btn_cancel_all.state(["disabled"])
