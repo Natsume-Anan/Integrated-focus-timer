@@ -118,7 +118,7 @@ class RulesPage(tk.Frame):
             self._make_panel(grid, key, title, hint, row=0,
                              col=0 if key in (WHITE_DOMAINS, BLACK_DOMAINS) else 1)
 
-        tk.Label(body, text=tr("⏳  等待生效的放宽"), bg=bg, fg=COLORS["text"],
+        tk.Label(body, text=tr("⏳  等待生效的改动"), bg=bg, fg=COLORS["text"],
                  font=config.font("body", bold=True)).pack(anchor="w", pady=(10, 2))
         self.lbl_setup = tk.Label(body, text="", bg=bg, fg=COLORS["text_dim"],
                                   font=config.font("small"), anchor="w", justify="left")
@@ -185,13 +185,16 @@ class RulesPage(tk.Frame):
                    command=lambda k=key: self._pick(k)).pack(side="left", padx=(6, 0))
 
 
-    def _toast_status(self, status: str, action: str = "add"):
+    def _toast_status(self, status: str, key: str = None, item: str = None):
         if status == "applied":
             toast.success(tr("已生效."))
         elif status == "staged":
-            p = self.rules.pending[-1] if self.rules.pending else None
+            p = self.rules.pending_for(key, item) if key and item else None
+            p = p or (self.rules.pending[-1] if self.rules.pending else None)
             at = f"{p['apply_at']:%Y-%m-%d %H:%M}" if p else ""
-            toast.info(tr("放宽规则要等冷静期,将于 {at} 生效.").format(at=at))
+            toast.info(tr("这项改动要等冷静期,将于 {at} 生效.").format(at=at))
+        elif status == "cancelled":
+            toast.info(tr("已取消排队中的改动,名单保持原样."))
         elif status == "exists":
             toast.info(tr("已经在名单里了."))
         elif status == "missing":
@@ -203,10 +206,10 @@ class RulesPage(tk.Frame):
         text = self._entries[key].get().strip()
         if not text:
             return
-        status, _item = self.rules.add(key, text)
-        if status in ("applied", "staged"):
+        status, item = self.rules.add(key, text)
+        if status in ("applied", "staged", "cancelled"):
             self._entries[key].set("")
-        self._toast_status(status)
+        self._toast_status(status, key, item)
         self.refresh(force=True)
 
     def _remove(self, key):
@@ -216,10 +219,13 @@ class RulesPage(tk.Frame):
         if not picks:
             toast.info(tr("先在列表里选中要删除的项."))
             return
-        last = None
-        for item in picks:
-            last, _ = self.rules.remove(key, item)
-        self._toast_status(last, "remove")
+        statuses = [self.rules.remove(key, item)[0] for item in picks]
+        for st in ("staged", "applied", "cancelled"):
+            if st in statuses:
+                self._toast_status(st, key, picks[-1] if len(picks) == 1 else None)
+                break
+        else:
+            self._toast_status(statuses[-1])
         self.refresh(force=True)
 
     def _cancel_pending(self):
@@ -376,10 +382,11 @@ class RulesPage(tk.Frame):
             self.lb_pending.delete(0, "end")
             for line in pend:
                 self.lb_pending.insert("end", line)
-        if r.in_setup_window():
-            cfg(self.lbl_setup, text=tr("初始化窗口内:放宽也立即生效.之后加入白名单 / 移出黑名单要等冷静期."))
+        if r.dev_getter():
+            cfg(self.lbl_setup, text=tr("开发者模式:名单改动立即生效."))
         else:
-            cfg(self.lbl_setup, text=tr("加入白名单,移出黑名单要等冷静期;加入黑名单,移出白名单立即生效."))
+            cfg(self.lbl_setup, text=tr(
+                "第一次加入名单的网站 / 应用立即生效;删除,以及删掉后再次加入,都要等 48 小时."))
 
         seq = (c.event_seq, sum(e["count"] for e in c.events))
         if force or self._shown.get("_events") != seq:

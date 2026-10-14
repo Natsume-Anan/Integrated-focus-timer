@@ -198,7 +198,7 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
             tr("· 预览框里的文字可以直接修改:不想让模型看到的网站或应用,删掉那一行即可;也可以自己补充.") + "\n" +
             tr("· 内容只发给下面这一家模型服务商,本程序不保存这些内容.") + "\n" +
             (tr("· 黑名单模式下,模型只给候选条目,不会给出理由或评价.") if black else
-             tr("· 模型给出的只是候选,由你勾选后才会加入名单;加入白名单仍要等冷静期.")),
+             tr("· 模型给出的只是候选,由你勾选后才会加入名单.")),
             dim=True, small=True)
         info.pack(fill="x", pady=(4, 10))
         wrap_label(info, 20)
@@ -338,10 +338,7 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
                     line += "   " + tr("(推荐,不在本机记录中)")
             lb.insert("end", line)
         lb.select_set(0, "end")
-        if black:
-            hint = tr("加入黑名单立即生效.")
-        else:
-            hint = tr("加入白名单属于放宽,需要等待冷静期后才生效(初始化窗口内除外).")
+        hint = tr("第一次加入名单的条目立即生效;曾经加入过又删掉的,再次加入要等冷静期.")
         _label(fr, hint, dim=True, small=True).pack(fill="x")
 
         def adopt():
@@ -351,7 +348,7 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
                 return
             statuses = [rules.add(items[i][0], items[i][1]["item"])[0] for i in picked]
             if "staged" in statuses:
-                toast.info(tr("已提交,放宽规则要等冷静期后生效."))
+                toast.info(tr("已提交;其中曾经加入过的条目要等冷静期后生效."))
             elif "applied" in statuses:
                 toast.success(tr("已加入名单."))
             else:

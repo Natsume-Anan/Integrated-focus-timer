@@ -6,10 +6,11 @@
     黑名单模式   默认放行,只拦黑名单里的域名 / 应用(与是否联网无关)
     白名单模式   默认拦截,离线时只放行白名单;联网会话中全部放行(联网申请就是为了解除限制)
 
-「放宽」(加入白名单 / 移出黑名单)要等 LOOSEN_DELAY_HOURS 小时才生效,
-「收紧」(加入黑名单 / 移出白名单)立刻生效 —— 与 settings_manager 的冷静期同一个思路.
-第一次改动名单后的 SETUP_GRACE_HOURS 小时是初始化窗口,放宽也立即生效,
-否则第一次配置白名单会被 48 小时卡死.
+名单改动的等待规则(黑 / 白名单相同):
+    某个网站 / 应用第一次加入某张名单 → 立即生效;
+    其余改动 —— 曾经在这张名单里、删掉后再次加入,以及任何删除 —— 都要等
+    CHANGE_DELAY_HOURS 小时才生效.
+「曾经加入过」记在 history 里,删除后也不会忘.开发者模式下一切改动立即生效.
 
 本模块不依赖 tkinter / config,可以单独测试.
 """
@@ -29,8 +30,8 @@ LIST_KEYS = (WHITE_DOMAINS, WHITE_APPS, BLACK_DOMAINS, BLACK_APPS)
 MODE_BLACKLIST = "blacklist"
 MODE_WHITELIST = "whitelist"
 
-LOOSEN_DELAY_HOURS = 48
-SETUP_GRACE_HOURS = 2
+CHANGE_DELAY_HOURS = 48
+LOOSEN_DELAY_HOURS = CHANGE_DELAY_HOURS   # 旧名字, 保留兼容
 
 _LOOPBACK = {"localhost", "::1", "0.0.0.0"}
 
@@ -99,16 +100,16 @@ DEFAULT_TEMPLATE = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 
 class RuleStore:
 
-    def __init__(self, path: str, loosen_delay_hours: float = LOOSEN_DELAY_HOURS,
-                 grace_hours: float = SETUP_GRACE_HOURS, now=None, template: str = None):
+    def __init__(self, path: str, delay_hours: float = CHANGE_DELAY_HOURS,
+                 now=None, template: str = None):
         self.path = path
         self.template = template
-        self.delay = timedelta(hours=loosen_delay_hours)
-        self.grace = timedelta(hours=grace_hours)
+        self.delay = timedelta(hours=delay_hours)
         self._now = now or datetime.now
-        self.dev_getter = lambda: False          # 开发者模式:放宽不用等
+        self.dev_getter = lambda: False          # 开发者模式:改动不用等
         self._lock = threading.RLock()
         self.lists = {k: [] for k in LIST_KEYS}
+        self.history = {k: set() for k in LIST_KEYS}   # 每张名单里出现过的条目
         self.pending = []
         self.created = None
         self.version = 0
@@ -147,6 +148,13 @@ class RuleStore:
                 continue
             if op in ("add", "remove") and key in LIST_KEYS and item:
                 self.pending.append({"op": op, "list": key, "item": item, "apply_at": at})
+        hist = raw.get("history") if isinstance(raw.get("history"), dict) else {}
+        for k in LIST_KEYS:
+            seen = {normalize(k, x) for x in (hist.get(k) or [])}
+            seen.update(self.lists[k])
+            seen.update(p["item"] for p in self.pending if p["list"] == k)
+            seen.discard("")
+            self.history[k] = seen
         try:
             self.created = datetime.fromisoformat(raw["created"])
         except Exception:
@@ -170,6 +178,7 @@ class RuleStore:
             "created": (self.created.isoformat(timespec="seconds")
                         if self.created else None),
             "lists": self.lists,
+            "history": {k: sorted(v) for k, v in self.history.items()},
             "pending": [
                 {"op": p["op"], "list": p["list"], "item": p["item"],
                  "apply_at": p["apply_at"].isoformat(timespec="seconds")}
@@ -196,10 +205,10 @@ class RuleStore:
     def items(self, key: str) -> list:
         return list(self._snap[key])
 
-    def in_setup_window(self) -> bool:
-        """初始化窗口从「第一次动名单」开始算,不是从程序第一次启动开始算."""
-        return (self.dev_getter() or self.created is None
-                or self._now() - self.created < self.grace)
+    def is_new(self, key: str, raw) -> bool:
+        """这一项从没进过这张名单 → 加入时立即生效."""
+        item = normalize(key, raw)
+        return bool(item) and item not in self.history[key]
 
     def _find_pending(self, op, key, item):
         for i, p in enumerate(self.pending):
@@ -214,57 +223,65 @@ class RuleStore:
             return True
         return False
 
+    def pending_for(self, key: str, item: str):
+        for p in self.pending:
+            if p["list"] == key and p["item"] == item:
+                return p
+        return None
+
+    def _stage(self, op, key, item):
+        self.pending.append({"op": op, "list": key, "item": item,
+                             "apply_at": self._now() + self.delay})
+        self._save()
+
 
     def add(self, key: str, raw):
-        """返回 (status, item).status: applied / staged / exists / invalid"""
+        """返回 (status, item).
+        status: applied 立即生效 / staged 进入等待 / cancelled 取消了排队中的删除 /
+                exists 已在名单里 / invalid 格式不对"""
         item = normalize(key, raw)
         if not item:
             return "invalid", ""
         with self._lock:
             if self.created is None:
                 self.created = self._now()
-            loosening = is_white(key)
-            if not loosening:
-                self._drop_pending("remove", key, item)
             if item in self.lists[key]:
-                self._save()
+                if self._drop_pending("remove", key, item):
+                    self._save()
+                    return "cancelled", item
                 return "exists", item
-            if loosening and not self.in_setup_window():
-                if self._find_pending("add", key, item) >= 0:
-                    return "exists", item
-                self.pending.append({"op": "add", "list": key, "item": item,
-                                     "apply_at": self._now() + self.delay})
-                self._save()
+            if self._find_pending("add", key, item) >= 0:
+                return "staged", item
+            if item in self.history[key] and not self.dev_getter():
+                self._stage("add", key, item)
                 return "staged", item
             self.lists[key].append(item)
-            self._drop_pending("add", key, item)
+            self.history[key].add(item)
             self._save()
             self._rebuild()
             return "applied", item
 
     def remove(self, key: str, raw):
-        """返回 (status, item).status: applied / staged / missing / invalid"""
+        """返回 (status, item).
+        status: applied 立即生效(仅开发者模式) / staged 进入等待 /
+                cancelled 取消了排队中的加入 / missing 名单里没有 / invalid"""
         item = normalize(key, raw)
         if not item:
             return "invalid", ""
         with self._lock:
             if self.created is None:
                 self.created = self._now()
-            loosening = not is_white(key)
-            if not loosening:
-                self._drop_pending("add", key, item)
             if item not in self.lists[key]:
-                self._save()
+                if self._drop_pending("add", key, item):
+                    self._save()
+                    return "cancelled", item
                 return "missing", item
-            if loosening and not self.in_setup_window():
-                if self._find_pending("remove", key, item) >= 0:
-                    return "staged", item
-                self.pending.append({"op": "remove", "list": key, "item": item,
-                                     "apply_at": self._now() + self.delay})
-                self._save()
+            if self._find_pending("remove", key, item) >= 0:
+                return "staged", item
+            if not self.dev_getter():
+                self._stage("remove", key, item)
                 return "staged", item
             self.lists[key].remove(item)
-            self._drop_pending("remove", key, item)
             self._save()
             self._rebuild()
             return "applied", item
@@ -289,6 +306,7 @@ class RuleStore:
                 lst = self.lists[p["list"]]
                 if p["op"] == "add" and p["item"] not in lst:
                     lst.append(p["item"])
+                    self.history[p["list"]].add(p["item"])
                 elif p["op"] == "remove" and p["item"] in lst:
                     lst.remove(p["item"])
             self._save()
@@ -337,13 +355,14 @@ def _selftest():
     path = os.path.join(tempfile.mkdtemp(), "r.json")
     rs = RuleStore(path, now=lambda: clock[0])
 
-    assert rs.in_setup_window()
+    # 第一次加入: 黑白名单都立即生效
     assert rs.add(WHITE_DOMAINS, "school.edu.cn")[0] == "applied"
     assert rs.add(WHITE_DOMAINS, "school.edu.cn")[0] == "exists"
     assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "applied"
     assert rs.add(BLACK_APPS, "steam")[0] == "applied"
     assert rs.add(WHITE_APPS, "code.exe")[0] == "applied"
     assert rs.add(WHITE_DOMAINS, "???")[0] == "invalid"
+    assert not rs.pending
 
     def d(host, exe, online):                       # 黑名单模式
         return rs.decide(host, exe, online, MODE_BLACKLIST)
@@ -374,42 +393,57 @@ def _selftest():
     assert keys_for_mode(MODE_WHITELIST) == (WHITE_DOMAINS, WHITE_APPS)
     assert keys_for_mode("whatever") == (BLACK_DOMAINS, BLACK_APPS)
 
-    clock[0] += timedelta(hours=3)
-    assert not rs.in_setup_window()
-    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
-    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "exists"
+    # 删除一律要等
     assert rs.remove(BLACK_DOMAINS, "bilibili.com")[0] == "staged"
-    assert w("wikipedia.org", "", False)[0] is False
-    assert d("bilibili.com", "", True)[0] is False, "放宽要等冷静期"
-    assert rs.remove(WHITE_APPS, "code.exe")[0] == "applied", "收紧立即生效"
-    assert w("x.com", "code.exe", False)[0] is False
+    assert rs.remove(WHITE_APPS, "code.exe")[0] == "staged"
+    assert rs.remove(WHITE_APPS, "code.exe")[0] == "staged", "重复删除不重复排队"
+    assert len(rs.pending) == 2
+    assert d("bilibili.com", "", True)[0] is False, "删除要等冷静期"
+    assert w("x.com", "code.exe", False)[0] is True
+    # 等待中再加回 = 取消排队中的删除
+    assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "cancelled"
+    assert len(rs.pending) == 1
+    # 删掉之后再次加入: 要等
+    clock[0] += timedelta(hours=49)
+    assert len(rs.promote_due()) == 1 and "code.exe" not in rs.items(WHITE_APPS)
+    assert not rs.is_new(WHITE_APPS, "code") and rs.is_new(WHITE_APPS, "new.exe")
+    assert rs.add(WHITE_APPS, "code.exe")[0] == "staged", "曾经加入过的再次加入要等"
+    assert rs.add(WHITE_APPS, "code.exe")[0] == "staged"
+    assert rs.remove(WHITE_APPS, "code.exe")[0] == "cancelled", "删掉排队中的加入 = 取消"
+    assert not rs.pending
+    assert rs.add(BLACK_APPS, "qq.exe")[0] == "applied", "新条目立即生效(包括收紧)"
+    assert rs.remove(WHITE_DOMAINS, "nothere.com")[0] == "missing"
 
-    assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "exists"
-    assert not any(p["op"] == "remove" and p["item"] == "bilibili.com" for p in rs.pending), \
-        "重新加回黑名单应当取消待生效的移除"
-    assert rs.remove(WHITE_DOMAINS, "wikipedia.org")[0] == "missing"
-    assert not rs.pending, "收紧应当顺手取消同一项待生效的放宽"
-
-    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
+    # history 写进文件, 重新读取后仍然记得
+    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "applied"
+    assert rs.remove(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
     rs2 = RuleStore(path, now=lambda: clock[0])
-    assert len(rs2.pending) == 1 and rs2.items(BLACK_APPS) == ["steam.exe"]
+    assert len(rs2.pending) == 1 and rs2.items(BLACK_APPS) == ["steam.exe", "qq.exe"]
     clock[0] += timedelta(hours=47)
     assert rs2.promote_due() == []
     clock[0] += timedelta(hours=2)
     assert len(rs2.promote_due()) == 1
-    assert rs2.decide("en.wikipedia.org", "", False, MODE_WHITELIST) == (True, "whitelist-domain")
-    assert rs2.cancel_pending(0) is False
+    rs3 = RuleStore(path, now=lambda: clock[0])
+    assert rs3.add(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
+    assert rs3.cancel_pending(0) and not rs3.pending
 
-    dev = [True]
-    rs3 = RuleStore(os.path.join(tempfile.mkdtemp(), "d.json"), now=lambda: clock[0])
-    rs3.dev_getter = lambda: dev[0]
-    rs3.add(BLACK_DOMAINS, "x.com")
-    clock[0] += timedelta(hours=10)
-    dev[0] = False
-    assert rs3.remove(BLACK_DOMAINS, "x.com")[0] == "staged"
+    # 旧格式文件(没有 history): 当前名单里的条目算作已加入过
+    old = os.path.join(tempfile.mkdtemp(), "old.json")
+    with open(old, "w", encoding="utf-8") as f:
+        json.dump({"lists": {BLACK_DOMAINS: ["a.com"]}, "pending": []}, f)
+    rs4 = RuleStore(old, now=lambda: clock[0])
+    assert not rs4.is_new(BLACK_DOMAINS, "a.com") and rs4.is_new(BLACK_DOMAINS, "b.com")
+
+    # 开发者模式: 一切改动立即生效, 排队中的也立即生效
+    dev = [False]
+    rs5 = RuleStore(os.path.join(tempfile.mkdtemp(), "d.json"), now=lambda: clock[0])
+    rs5.dev_getter = lambda: dev[0]
+    rs5.add(BLACK_DOMAINS, "x.com")
+    assert rs5.remove(BLACK_DOMAINS, "x.com")[0] == "staged"
     dev[0] = True
-    assert rs3.promote_due() and not rs3.pending, "开发者模式下排队的放宽应当立即生效"
-    assert rs3.add(WHITE_DOMAINS, "y.com")[0] == "applied", "开发者模式下放宽立即生效"
+    assert rs5.promote_due() and not rs5.pending
+    assert rs5.add(BLACK_DOMAINS, "x.com")[0] == "applied"
+    assert rs5.remove(BLACK_DOMAINS, "x.com")[0] == "applied"
     return "netproxy.rules selftest OK"
 
 
