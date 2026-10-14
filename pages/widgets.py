@@ -1,6 +1,8 @@
 
 
+import sys
 import tkinter as tk
+from contextlib import contextmanager
 from tkinter import ttk
 
 import config
@@ -24,7 +26,7 @@ class Switch(tk.Canvas):
             self.create_oval(self.W - self.H + 1, 1, self.W - 1, self.H - 1, outline=""),
             self.create_rectangle(r, 1, self.W - r, self.H - 1, outline=""),
         ]
-        self._knob = self.create_oval(0, 0, 0, 0, fill="#ffffff", outline="")
+        self._knob = self.create_oval(0, 0, 0, 0, fill=COLORS["on_accent"], outline="")
         self.bind("<Button-1>", self._on_click)
         self._draw()
 
@@ -44,7 +46,7 @@ class Switch(tk.Canvas):
 
     def _draw(self):
         for item in self._track:
-            self.itemconfig(item, fill=COLORS["accent"] if self._on else "#cbd5e1")
+            self.itemconfig(item, fill=COLORS["accent"] if self._on else COLORS["switch_off"])
         pad = 3
         d = self.H - 2 * pad
         x = (self.W - self.H + pad) if self._on else pad
@@ -170,3 +172,130 @@ def section_title(parent, text: str, bg: str = None, sub: str = None):
     wrap.title_label = lbl
     wrap.sub_label = sub_lbl
     return wrap
+
+
+# ---- 渲染: 一次性换帧 ----
+#
+# Tk 在 Windows 上每个控件都是一个独立的子窗口, 各自重绘.
+# 切页面 / 重建控件时, 它们会一块一块地画出来, 看起来像"撕裂".
+# frozen() 先让整个窗口停止重绘, 等所有改动和布局都做完,
+# 再一次性把整窗画出来 —— 旧画面直接换成新画面, 中间没有半成品.
+# 非 Windows 或调用失败时退化为普通更新, 不影响功能.
+
+_WM_SETREDRAW = 0x000B
+_RDW_INVALIDATE = 0x0001
+_RDW_ALLCHILDREN = 0x0080
+_RDW_UPDATENOW = 0x0100
+
+_user32 = None
+if sys.platform == "win32":
+    try:
+        import ctypes
+        from ctypes import wintypes
+        _user32 = ctypes.WinDLL("user32")
+        _user32.SendMessageW.argtypes = [wintypes.HWND, wintypes.UINT,
+                                         wintypes.WPARAM, wintypes.LPARAM]
+        _user32.SendMessageW.restype = ctypes.c_ssize_t
+        _user32.RedrawWindow.argtypes = [wintypes.HWND, ctypes.c_void_p,
+                                         ctypes.c_void_p, wintypes.UINT]
+        _user32.RedrawWindow.restype = wintypes.BOOL
+    except Exception:
+        _user32 = None
+
+_freeze_depth = {}
+
+
+def _client_hwnd(top):
+    # 只冻结窗口内部 (客户区), 不冻结带标题栏的外层窗口:
+    # 对顶层窗口用 WM_SETREDRAW 会让系统误以为窗口不可见, 反而会闪.
+    if _user32 is None:
+        return None
+    try:
+        return int(top.winfo_id())
+    except Exception:
+        return None
+
+
+@contextmanager
+def frozen(widget):
+    """with frozen(w): ... 里的所有改动, 结束时一次性显示."""
+    top = widget.winfo_toplevel()
+    key = str(top)
+    depth = _freeze_depth.get(key, 0)
+    hwnd = _client_hwnd(top) if depth == 0 else None
+    _freeze_depth[key] = depth + 1
+    if hwnd:
+        try:
+            _user32.SendMessageW(hwnd, _WM_SETREDRAW, 0, 0)
+        except Exception:
+            hwnd = None
+    try:
+        yield
+    finally:
+        _freeze_depth[key] -= 1
+        if _freeze_depth[key] <= 0:
+            _freeze_depth.pop(key, None)
+            try:
+                top.update_idletasks()      # 布局在冻结状态下算完
+            except Exception:
+                pass
+            if hwnd:
+                try:
+                    _user32.SendMessageW(hwnd, _WM_SETREDRAW, 1, 0)
+                    _user32.RedrawWindow(hwnd, None, None,
+                                         _RDW_INVALIDATE | _RDW_ALLCHILDREN
+                                         | _RDW_UPDATENOW)
+                except Exception:
+                    pass
+                try:
+                    top.update_idletasks()  # 一口气把整窗画完
+                except Exception:
+                    pass
+
+
+def smooth(method):
+    """装饰器: 让控件自己的刷新方法在 frozen() 中执行."""
+    def wrapper(self, *args, **kwargs):
+        with frozen(self):
+            return method(self, *args, **kwargs)
+    wrapper.__name__ = method.__name__
+    wrapper.__doc__ = method.__doc__
+    return wrapper
+
+
+class LoadingCover(tk.Frame):
+    """盖在整个窗口上的加载页. 用在耗时较长、无法避免停顿的操作前."""
+
+    def __init__(self, root, text: str = "", sub: str = ""):
+        bg = COLORS["bg"]
+        super().__init__(root, bg=bg)
+        box = tk.Frame(self, bg=bg)
+        box.place(relx=0.5, rely=0.45, anchor="center")
+
+        bar = tk.Frame(box, bg=COLORS["border"], width=config.scaled(160),
+                       height=config.scaled(4))
+        bar.pack(pady=(0, config.scaled(16)))
+        bar.pack_propagate(False)
+        tk.Frame(bar, bg=COLORS["accent"], width=config.scaled(56)).pack(
+            side="left", fill="y")
+
+        tk.Label(box, text=text, bg=bg, fg=COLORS["text"],
+                 font=config.font("h2", bold=True)).pack()
+        if sub:
+            tk.Label(box, text=sub, bg=bg, fg=COLORS["text_dim"],
+                     font=config.font("small")).pack(pady=(6, 0))
+
+    def show(self):
+        self.place(x=0, y=0, relwidth=1, relheight=1)
+        self.lift()
+        try:
+            self.update()               # 立刻画出来, 再开始耗时工作
+        except Exception:
+            pass
+        return self
+
+    def close(self):
+        try:
+            self.destroy()
+        except Exception:
+            pass

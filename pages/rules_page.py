@@ -13,7 +13,7 @@ from netproxy import (
     WHITE_DOMAINS, WHITE_APPS, BLACK_DOMAINS, BLACK_APPS,
 )
 from netproxy.rules import MODE_BLACKLIST, MODE_WHITELIST, keys_for_mode
-from .widgets import Modal, ScrollArea, wrap_label
+from .widgets import Modal, ScrollArea, wrap_label, smooth
 from . import ai_dialogs
 
 _WHY_TEXT = {
@@ -232,6 +232,7 @@ class RulesPage(tk.Frame):
         return MODE_WHITELIST if getattr(config, "FILTER_MODE", MODE_BLACKLIST) == MODE_WHITELIST \
             else MODE_BLACKLIST
 
+    @smooth
     def _set_mode(self, mode: str):
         if self.settings is None:
             return

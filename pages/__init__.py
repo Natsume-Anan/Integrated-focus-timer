@@ -1,5 +1,6 @@
 
-from .widgets import Modal, ScrollArea, Switch, section_title, wrap_label
+from .widgets import (Modal, ScrollArea, Switch, section_title, wrap_label,
+                      frozen, smooth, LoadingCover)
 from .calendar_page import CalendarPage
 from .hour_log_page import HourLogPage
 from .settings_page import SettingsPage
@@ -8,5 +9,6 @@ from .stats_page import StatsPage
 
 __all__ = [
     "Modal", "ScrollArea", "Switch", "section_title", "wrap_label",
+    "frozen", "smooth", "LoadingCover",
     "CalendarPage", "HourLogPage", "SettingsPage", "RulesPage", "StatsPage",
 ]

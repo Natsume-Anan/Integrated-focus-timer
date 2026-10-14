@@ -21,7 +21,7 @@ from net_guard import NetGuard
 from data_manager import DataManager
 from settings_manager import SettingsManager
 from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage, StatsPage
-from pages.widgets import wrap_label
+from pages.widgets import wrap_label, frozen, LoadingCover
 
 
 def _enable_per_monitor_dpi():
@@ -61,12 +61,8 @@ class BreakTimerApp:
             pass
 
         root.title(APP_NAME)
-        root.configure(bg=COLORS["bg"])
         root.resizable(False, False)
-
         self.style = ttk.Style(root)
-        self.style.theme_use("clam")
-        self._theme_ttk()
 
 
         self.state = IDLE
@@ -90,6 +86,7 @@ class BreakTimerApp:
         self.settings = SettingsManager()
         i18n.init_from_config()
         config.UI_SCALE = self.ui_scale * float(self.settings.value("FONT_SCALE") or 1.0)
+        self._apply_theme()
         self.dm.hour_enabled = bool(self.settings.value("HOUR_LOG_ENABLED"))
         self.net = NetGuard(self.dm.data_dir)
         self._net_view = None
@@ -139,11 +136,90 @@ class BreakTimerApp:
                 pass
 
 
+    def _apply_theme(self):
+        """按设置里的 THEME 换色: 根窗口底色, tk 控件默认色, ttk 样式, 标题栏."""
+        config.apply_theme(getattr(config, "THEME", config.DEFAULT_THEME))
+        self.root.configure(bg=COLORS["bg"])
+        self._apply_tk_options()
+        self.style = ttk.Style(self.root)
+        self.style.theme_use("clam")
+        self._theme_ttk()
+        self._apply_titlebar()
+
+    def _apply_tk_options(self):
+        """没有单独指定颜色的 tk 控件 (列表框, 多行文本, 下拉框弹出列表) 的默认色."""
+        t, r = config.TTK_COLORS, self.root
+        for cls in ("Listbox", "Text"):
+            r.option_add(f"*{cls}.background", t["list_bg"], "interactive")
+            r.option_add(f"*{cls}.foreground", t["list_fg"], "interactive")
+            r.option_add(f"*{cls}.selectBackground", t["list_select"], "interactive")
+            r.option_add(f"*{cls}.selectForeground", t["list_on_select"], "interactive")
+            r.option_add(f"*{cls}.highlightColor", COLORS["accent"], "interactive")
+        r.option_add("*Text.insertBackground", t["list_fg"], "interactive")
+        r.option_add("*Button.highlightThickness", 0, "interactive")
+        r.option_add("*TCombobox*Listbox.background", t["list_bg"], "interactive")
+        r.option_add("*TCombobox*Listbox.foreground", t["list_fg"], "interactive")
+        r.option_add("*TCombobox*Listbox.selectBackground", t["list_select"], "interactive")
+        r.option_add("*TCombobox*Listbox.selectForeground", t["list_on_select"], "interactive")
+
+    def _apply_titlebar(self):
+        """Windows 10/11: 深色主题时让标题栏也变成深色."""
+        if sys.platform != "win32":
+            return
+        try:
+            import ctypes
+            self.root.update_idletasks()
+            hwnd = ctypes.windll.user32.GetParent(self.root.winfo_id())
+            dark = ctypes.c_int(1 if config.THEME.endswith("_dark") else 0)
+            for attr in (20, 19):   # DWMWA_USE_IMMERSIVE_DARK_MODE (新 / 旧版本号)
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(dark), ctypes.sizeof(dark)) == 0:
+                    break
+        except Exception:
+            pass
+
     def _theme_ttk(self):
         s = self.style
         bg, card = COLORS["bg"], COLORS["bg_card"]
         ac, tx = COLORS["accent"], COLORS["text"]
         td = COLORS["text_dim"]
+        on_ac = COLORS["on_accent"]
+        t = config.TTK_COLORS
+
+        # clam 的基础色: 普通按钮 / 输入框 / 滚动条 / 下拉框等都从这里取色
+        s.configure(
+            ".", background=t["frame"], foreground=t["fg"],
+            bordercolor=t["border"], lightcolor=t["light"], darkcolor=t["dark"],
+            troughcolor=t["trough"], fieldbackground=t["field"],
+            selectbackground=t["select"], selectforeground=t["on_select"],
+            insertcolor=t["fg"], arrowcolor=t["fg"], focuscolor=t["border"]
+        )
+        s.map(".", foreground=[("disabled", t["disabled_fg"])],
+              background=[("disabled", t["frame"]), ("active", t["frame_hover"])])
+        s.map("TButton",
+              background=[("disabled", t["frame"]), ("pressed", t["dark"]),
+                          ("active", t["frame_hover"])],
+              foreground=[("disabled", t["disabled_fg"])])
+        s.map("TCombobox",
+              fieldbackground=[("readonly", "focus", t["select"]),
+                               ("readonly", t["frame"]), ("disabled", t["frame"])],
+              foreground=[("readonly", "focus", t["on_select"]),
+                          ("disabled", t["disabled_fg"])],
+              background=[("active", t["frame_hover"]), ("pressed", t["frame_hover"])])
+        s.map("TEntry", fieldbackground=[("readonly", t["frame"]),
+                                         ("disabled", t["frame"])])
+        s.map("TSpinbox", fieldbackground=[("readonly", t["frame"]),
+                                           ("disabled", t["frame"])])
+        s.map("TScrollbar", background=[("active", t["frame_hover"]),
+                                        ("pressed", t["frame_hover"])])
+        s.configure("TCheckbutton", background=bg, foreground=tx,
+                    indicatorbackground=t["field"], indicatorforeground=t["fg"],
+                    upperbordercolor=t["border"], lowerbordercolor=t["border"])
+        s.map("TCheckbutton",
+              background=[("active", bg)],
+              indicatorbackground=[("pressed", t["frame"]), ("selected", t["field"])])
+        s.configure("TLabel", background=bg, foreground=tx)
+        s.configure("TFrame", background=bg)
 
         s.configure("Card.TFrame", background=card)
         s.configure("TopBar.TFrame", background=COLORS["accent"])
@@ -151,36 +227,58 @@ class BreakTimerApp:
         s.configure("UI.TLabel", background=bg, foreground=td, font=config.font("body"))
         s.configure("UI.Bold.TLabel", background=bg, foreground=tx, font=config.font("body", bold=True))
         s.configure("Card.TLabel", background=card, foreground=tx, font=config.font("body"))
-        s.configure("Card.Bold.TLabel", background=card, foreground="#0f172a", font=config.font("body", bold=True))
+        s.configure("Card.Bold.TLabel", background=card, foreground=COLORS["text_strong"],
+                    font=config.font("body", bold=True))
+        s.configure("UI.TCheckbutton", background=bg, foreground=td, font=config.font("small"))
+        s.map("UI.TCheckbutton", background=[("active", bg)],
+              foreground=[("active", tx)])
 
         s.configure(
             "Accent.TButton",
-            background=ac, foreground="#ffffff",
+            background=ac, foreground=on_ac,
+            bordercolor=ac, lightcolor=ac, darkcolor=ac,
             font=config.font("body", bold=True),
             borderwidth=0, focusthickness=0, padding=(18, 10)
         )
         s.map(
             "Accent.TButton",
-            background=[("active", COLORS["accent_hover"]), ("disabled", "#94a3b8")],
-            foreground=[("disabled", "#cbd5e1")]
+            background=[("disabled", COLORS["accent_disabled"]),
+                        ("active", COLORS["accent_hover"])],
+            foreground=[("disabled", COLORS["on_accent_disabled"])],
+            bordercolor=[("disabled", COLORS["accent_disabled"]),
+                         ("active", COLORS["accent_hover"])],
+            lightcolor=[("disabled", COLORS["accent_disabled"]),
+                        ("active", COLORS["accent_hover"])],
+            darkcolor=[("disabled", COLORS["accent_disabled"]),
+                       ("active", COLORS["accent_hover"])]
         )
 
         s.configure("UI.TSeparator", background=COLORS["border"])
         s.configure(
             "Quota.Horizontal.TProgressbar",
             troughcolor=COLORS["border"], background=ac,
+            bordercolor=COLORS["border"], lightcolor=ac, darkcolor=ac,
             borderwidth=0, thickness=8
         )
+        dg = COLORS["danger"]
         s.configure(
             "Danger.TButton",
-            background=COLORS["danger"], foreground="#ffffff",
+            background=dg, foreground=on_ac,
+            bordercolor=dg, lightcolor=dg, darkcolor=dg,
             font=config.font("body", bold=True),
             borderwidth=0, focusthickness=0, padding=(18, 10)
         )
         s.map(
             "Danger.TButton",
-            background=[("active", COLORS["danger_hover"]), ("disabled", "#fca5a5")],
-            foreground=[("disabled", "#ffffff")]
+            background=[("disabled", COLORS["danger_disabled"]),
+                        ("active", COLORS["danger_hover"])],
+            foreground=[("disabled", on_ac)],
+            bordercolor=[("disabled", COLORS["danger_disabled"]),
+                         ("active", COLORS["danger_hover"])],
+            lightcolor=[("disabled", COLORS["danger_disabled"]),
+                        ("active", COLORS["danger_hover"])],
+            darkcolor=[("disabled", COLORS["danger_disabled"]),
+                       ("active", COLORS["danger_hover"])]
         )
 
 
@@ -247,7 +345,8 @@ class BreakTimerApp:
             on_changed=self.on_settings_changed, on_sound=self.play_chime,
             on_dev_mode=self.on_dev_mode_changed,
             on_language=self.on_language_changed,
-            on_font_scale=self.on_font_scale_changed
+            on_font_scale=self.on_font_scale_changed,
+            on_theme=self.on_theme_changed
         )
         self.pages["rules"] = RulesPage(
             self.content, self.net.proxy, settings=self.settings,
@@ -269,45 +368,55 @@ class BreakTimerApp:
         if self._rebuilding or self.shutting_down:
             return
         self._rebuilding = True
+        cover = LoadingCover(self.root, tr("正在重新加载界面…"),
+                             tr("切换语言 / 字号 / 主题需要重建所有页面,请稍候")).show()
         try:
-            for job in (self.midnight_job, self.hourly_job, self.update_job,
-                        self.net_job, getattr(self, "apply_job", None)):
-                if job:
-                    try:
-                        self.root.after_cancel(job)
-                    except Exception:
-                        pass
-            self.midnight_job = self.hourly_job = self.update_job = None
-            self.net_job = self.apply_job = None
-
-            for w in (getattr(self, "topbar", None), getattr(self, "shell", None)):
-                if w is not None:
-                    try:
-                        w.destroy()
-                    except Exception:
-                        pass
-            self.style = ttk.Style(self.root)
-            self.style.theme_use("clam")
-            self._theme_ttk()
-            self.pages = {}
-            self.nav_btns = {}
-            self._build_layout(self.root)
-            self._apply_geometry()
-            self.show_page(self.current_page or "timer")
-
-            self.refresh_display()
-            self.update_log_badge()
-            self.update_settings_badge()
-            self._start_midnight_timer()
-            self._schedule_hourly()
-            self._restore_timer_view()
-            self._schedule_apply_check()
-            self._net_tick()
+            with frozen(self.root):
+                try:
+                    self._rebuild_ui()
+                finally:
+                    cover.close()       # 在冻结中撤掉加载页, 新界面整窗一次显示
         finally:
             self._rebuilding = False
 
+    def _rebuild_ui(self):
+        for job in (self.midnight_job, self.hourly_job, self.update_job,
+                    self.net_job, getattr(self, "apply_job", None)):
+            if job:
+                try:
+                    self.root.after_cancel(job)
+                except Exception:
+                    pass
+        self.midnight_job = self.hourly_job = self.update_job = None
+        self.net_job = self.apply_job = None
+
+        for w in (getattr(self, "topbar", None), getattr(self, "shell", None)):
+            if w is not None:
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+        self._apply_theme()
+        self.pages = {}
+        self.nav_btns = {}
+        self._build_layout(self.root)
+        self._apply_geometry()
+        self.show_page(self.current_page or "timer")
+
+        self.refresh_display()
+        self.update_log_badge()
+        self.update_settings_badge()
+        self._start_midnight_timer()
+        self._schedule_hourly()
+        self._restore_timer_view()
+        self._schedule_apply_check()
+        self._net_tick()
+
     def on_language_changed(self):
         i18n.init_from_config()
+        self.rebuild_ui()
+
+    def on_theme_changed(self):
         self.rebuild_ui()
 
     def on_font_scale_changed(self):
@@ -331,13 +440,18 @@ class BreakTimerApp:
         self.net_job = self.apply_job = None
 
     def show_page(self, key: str):
+        # 先在冻结状态下刷新目标页、再置顶, 最后整窗一次性显示 —— 避免切换时的撕裂
+        with frozen(self.root):
+            self._show_page(key)
+
+    def _show_page(self, key: str):
         self.current_page = key
-        self.pages[key].tkraise()
         for k, b in self.nav_btns.items():
             if k == key:
                 b.config(
-                    bg=COLORS["accent"], fg="#ffffff",
-                    activebackground=COLORS["accent_hover"], activeforeground="#ffffff"
+                    bg=COLORS["accent"], fg=COLORS["on_accent"],
+                    activebackground=COLORS["accent_hover"],
+                    activeforeground=COLORS["on_accent"]
                 )
             else:
                 b.config(
@@ -358,6 +472,7 @@ class BreakTimerApp:
             self.pages["settings"].refresh()
         elif key == "uninstall":
             self.refresh_uninstall()
+        self.pages[key].tkraise()
         self.update_log_badge()
         self.update_settings_badge()
 
@@ -1281,15 +1396,15 @@ class BreakTimerApp:
         )
         self.uni_lbl_last.pack(anchor="w")
 
-        warn_fr = tk.Frame(page, bg="#fef2f2", highlightbackground=danger, highlightthickness=1)
+        warn_fr = tk.Frame(page, bg=COLORS["danger_bg"], highlightbackground=danger, highlightthickness=1)
         warn_fr.pack(padx=26, pady=(0, 10), fill="x")
         tk.Label(
             warn_fr, text=tr("⚠  警告:这会永久删除全部数据"),
-            bg="#fef2f2", fg=danger, font=config.font("body", bold=True),
+            bg=COLORS["danger_bg"], fg=danger, font=config.font("body", bold=True),
             anchor="w"
         ).pack(fill="x", padx=16, pady=(10, 2))
         tk.Label(
-            warn_fr, justify="left", anchor="w", bg="#fef2f2", fg=COLORS["text"],
+            warn_fr, justify="left", anchor="w", bg=COLORS["danger_bg"], fg=COLORS["text"],
             font=config.font("small"),
             text=(
                 "• Study history, calendar, hour log, network quota, request log\n"
@@ -1306,10 +1421,9 @@ class BreakTimerApp:
         row.pack(anchor="w", pady=(0, 6))
         ttk.Label(row, text=tr("输入 UNINSTALL 以确认"), style="UI.TLabel").pack(side="left", padx=(0, 8))
         ttk.Entry(row, textvariable=self.var_confirm, width=16).pack(side="left")
-        tk.Checkbutton(
+        ttk.Checkbutton(
             form, text=tr("同时删除本程序文件"), variable=self.var_del_self,
-            bg=bg, activebackground=bg, fg=COLORS["text_dim"],
-            font=config.font("small"), anchor="w"
+            style="UI.TCheckbutton"
         ).pack(anchor="w", pady=(0, 8))
         self.btn_uninstall = ttk.Button(
             form, text=tr("🗑  卸载并清除数据"),

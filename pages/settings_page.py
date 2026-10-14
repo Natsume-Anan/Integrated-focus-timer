@@ -8,12 +8,13 @@ import toast
 from config import COLORS
 from i18n import tr
 from settings_manager import APPLY_INSTANT, SCHEMA_BY_KEY, BASIC_SPECS, DETAIL_SPECS
-from .widgets import ScrollArea, Switch, wrap_label
+from .widgets import ScrollArea, Switch, wrap_label, frozen, smooth
 
 
 class SettingsPage(tk.Frame):
     def __init__(self, master, settings, on_changed=None, on_sound=None,
-                 on_dev_mode=None, on_language=None, on_font_scale=None):
+                 on_dev_mode=None, on_language=None, on_font_scale=None,
+                 on_theme=None):
         super().__init__(master, bg=COLORS["bg"])
         self.sm = settings
         self.on_changed = on_changed
@@ -21,6 +22,7 @@ class SettingsPage(tk.Frame):
         self.on_dev_mode = on_dev_mode
         self.on_language = on_language
         self.on_font_scale = on_font_scale
+        self.on_theme = on_theme
         self._rows = {}          # 基本设置页的行
         self._num_rows = {}      # 具体设置页的行
         self._tab = "basic"
@@ -72,7 +74,7 @@ class SettingsPage(tk.Frame):
                 tabs, text=tr(text), font=config.font("body", bold=True),
                 padx=14, pady=4, cursor="hand2"), text)
             b.pack(side="left", padx=(0, 6))
-            b.bind("<Button-1>", lambda e, k=key: self.show_tab(k))
+            b.bind("<Button-1>", lambda e, k=key: self._click_tab(k))
             self._tab_btns[key] = b
 
         self.stack = tk.Frame(self, bg=bg)
@@ -113,6 +115,10 @@ class SettingsPage(tk.Frame):
 
         self.show_tab(self._tab)
 
+    @smooth
+    def _click_tab(self, key: str):
+        self.show_tab(key)
+
     def show_tab(self, key: str):
         self._tab = key
         self.area.pack_forget()
@@ -120,7 +126,7 @@ class SettingsPage(tk.Frame):
         (self.area if key == "basic" else self.area_num).pack(fill="both", expand=True)
         for k, b in self._tab_btns.items():
             if k == key:
-                b.config(bg=COLORS["accent"], fg="#ffffff")
+                b.config(bg=COLORS["accent"], fg=COLORS["on_accent"])
             else:
                 b.config(bg=COLORS["bg_card"], fg=COLORS["text"])
 
@@ -377,6 +383,13 @@ class SettingsPage(tk.Frame):
 
 
     def _stage(self, key: str):
+        if key in ("LANGUAGE", "FONT_SCALE", "THEME"):
+            # 这几项会重建整个界面, 由 rebuild_ui 自己显示加载页
+            return self._stage_now(key)
+        with frozen(self):
+            return self._stage_now(key)
+
+    def _stage_now(self, key: str):
         value = self._widget_value(key)
         status, msg = self.sm.stage(key, value)
         if status == "invalid":
@@ -387,14 +400,24 @@ class SettingsPage(tk.Frame):
             if self.on_changed:
                 self.on_changed(status, key)
 
-            if key == "LANGUAGE" and self.on_language:
-                self.on_language()
-                return
-            if key == "FONT_SCALE" and self.on_font_scale:
-                self.on_font_scale()
+            if self._run_ui_hooks([key]):
                 return
         if status in ("instant", "staged", "nochange"):
             toast.info(tr(msg))
+
+    def _run_ui_hooks(self, keys) -> bool:
+        """语言 / 字号 / 主题改动后需要重建整个界面. 重建会销毁本页,
+        所以调用之后不要再碰本页的控件. 返回是否触发了重建."""
+        if "LANGUAGE" in keys and self.on_language:
+            self.on_language()
+            return True
+        if "FONT_SCALE" in keys and self.on_font_scale:
+            self.on_font_scale()
+            return True
+        if "THEME" in keys and self.on_theme:
+            self.on_theme()
+            return True
+        return False
 
     def _cancel(self, key: str):
         if self.sm.cancel(key):
@@ -421,6 +444,7 @@ class SettingsPage(tk.Frame):
             self._save_all_num()
             return
         staged, instant, same = 0, 0, 0
+        ui_keys = []
         for spec in BASIC_SPECS:
             key = spec["key"]
             try:
@@ -431,6 +455,7 @@ class SettingsPage(tk.Frame):
                 if value != self.sm.value(key):
                     self.sm.stage(key, value)
                     instant += 1
+                    ui_keys.append(key)
                 continue
             if value == self.sm.value(key):
                 same += 1
@@ -441,6 +466,7 @@ class SettingsPage(tk.Frame):
             elif status == "instant":
                 instant += 1
         self._report_saved(staged, instant)
+        self._run_ui_hooks(ui_keys)
 
     def _save_all_num(self):
         staged, instant, errors = 0, 0, []

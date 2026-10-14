@@ -8,6 +8,7 @@ from tkinter import ttk
 import config
 from config import COLORS
 from i18n import tr, is_en
+from .widgets import smooth
 
 DAYS = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 MONTHS_ZH = ("1 月", "2 月", "3 月", "4 月", "5 月", "6 月",
@@ -67,6 +68,7 @@ class CalendarPage(tk.Frame):
         for lbl, day in zip(self.day_labels, DAYS):
             lbl.config(text=tr(day))
 
+    @smooth
     def _go(self, offset: int):
         self.offset = offset
         self.refresh()
@@ -122,7 +124,7 @@ class CalendarPage(tk.Frame):
                     date_str = f"{self.display_year}-{self.display_month:02d}-{day:02d}"
                     hours = month_data.get(date_str, 0.0)
                     bg_color = COLORS["accent"] if date_str == today_str else COLORS["bg_card"]
-                    fg_color = "#ffffff" if date_str == today_str else COLORS["text"]
+                    fg_color = COLORS["on_accent"] if date_str == today_str else COLORS["text"]
                     text = f"{day}\n{hours:.1f}h" if hours > 0 else str(day)
                     lbl = tk.Label(
                         self.grid_frame, text=text, bg=bg_color, fg=fg_color,

@@ -135,6 +135,18 @@ SETTINGS_SCHEMA = [
         "desc": "即时生效.整体缩放界面字号,适配不同分辨率.",
     },
     {
+        "key": "THEME", "label": "界面主题",
+        "kind": "choice", "apply": APPLY_INSTANT,
+        "choices": [
+            ("classic", "经典 (蓝白)"),
+            ("claude", "Claude (浅色)"),
+            ("claude_dark", "Claude (深色)"),
+        ],
+        "fmt": lambda v: {"claude": "Claude", "claude_dark": "Claude Dark"}.get(
+            str(v), "Classic"),
+        "desc": "即时生效.界面配色:经典蓝白,或参考 Claude 的米白 / 炭灰配色.",
+    },
+    {
         "key": "CHIME_WAV", "label": "整点提示音",
         "kind": "combo", "apply": APPLY_INSTANT,
         "choices": [
@@ -476,6 +488,8 @@ class SettingsManager:
                 return max(0.75, min(2.0, float(value)))
             except (TypeError, ValueError):
                 return 1.0
+        if key == "THEME":
+            return str(value) if str(value) in config.THEMES else config.DEFAULT_THEME
         if key in ("LANGUAGE", "AUTO_TEXT"):
             return str(value)
         if key == "CHIME_WAV":

@@ -138,6 +138,7 @@ DEFAULT_SETTINGS = {
     "NET_MODE": NET_MODE,
     "FILTER_MODE": FILTER_MODE,
     "FONT_SCALE": 0.9,
+    "THEME": "classic",
     "TICK_CLAMP": TICK_CLAMP,
     "FILL_WINDOW": int(FILL_WINDOW.total_seconds()),
     "QUICK_MULTIPLIER": QUICK_MULTIPLIER,
@@ -147,19 +148,160 @@ DEFAULT_SETTINGS = {
 }
 
 
-COLORS = {
-    "bg":           "#ffffff",
-    "bg_card":      "#f8f9fa",
-    "accent":       "#2563eb",
-    "accent_hover": "#1d4ed8",
-    "text":         "#1e293b",
-    "text_dim":     "#64748b",
-    "success":      "#16a34a",
-    "warn":         "#d97706",
-    "border":       "#e2e8f0",
-    "danger":       "#dc2626",
-    "danger_hover": "#b91c1c",
+# ---- 主题 ----
+# 每个主题是一整套颜色. 程序各处只从 COLORS / CHART_PALETTE 取色,
+# 切换主题时 apply_theme() 原地替换它们的内容, 再由界面重建生效.
+#
+# ttk 一项是 clam 主题的底色 (输入框/滚动条/普通按钮等系统控件用),
+# 经典主题里填的就是 clam 的原始默认值, 所以经典主题外观和以前一样.
+
+THEMES = {
+    "classic": {
+        "colors": {
+            "bg":           "#ffffff",
+            "bg_card":      "#f8f9fa",
+            "accent":       "#2563eb",
+            "accent_hover": "#1d4ed8",
+            "text":         "#1e293b",
+            "text_dim":     "#64748b",
+            "text_strong":  "#0f172a",
+            "success":      "#16a34a",
+            "warn":         "#d97706",
+            "border":       "#e2e8f0",
+            "danger":       "#dc2626",
+            "danger_hover": "#b91c1c",
+            "danger_bg":    "#fef2f2",
+            "on_accent":    "#ffffff",
+            "accent_disabled":    "#94a3b8",
+            "on_accent_disabled": "#cbd5e1",
+            "danger_disabled":    "#fca5a5",
+            "switch_off":   "#cbd5e1",
+            "chart_other":  "#94a3b8",
+            "chart_empty":  "#e2e8f0",
+            "chart_future": "#f1f5f9",
+            "focus_study":  "#2563eb",
+            "focus_break":  "#16a34a",
+        },
+        "chart": (
+            "#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed",
+            "#0891b2", "#db2777", "#65a30d", "#ea580c",
+        ),
+        "ttk": {
+            "frame": "#dcdad5", "frame_hover": "#eeebe7", "fg": "#000000",
+            "field": "#ffffff", "border": "#9e9a91", "light": "#eeebe7",
+            "dark": "#cfcdc8", "trough": "#bab5ab", "select": "#4a6984",
+            "on_select": "#ffffff", "disabled_fg": "#999999",
+            "list_bg": "#ffffff", "list_fg": "#000000",
+            "list_select": "#0078d7", "list_on_select": "#ffffff",
+        },
+    },
+
+    # 参考 Claude 的浅色界面: 通体米白, 卡片只靠细描边区分, 陶土橙强调色.
+    "claude": {
+        "colors": {
+            "bg":           "#faf9f5",
+            "bg_card":      "#faf9f5",
+            "accent":       "#c96442",
+            "accent_hover": "#b25535",
+            "text":         "#141413",
+            "text_dim":     "#73726c",
+            "text_strong":  "#141413",
+            "success":      "#5b7f4a",
+            "warn":         "#b8741a",
+            "border":       "#e6e3d8",
+            "danger":       "#b5412f",
+            "danger_hover": "#9a3424",
+            "danger_bg":    "#f8ebe5",
+            "on_accent":    "#ffffff",
+            "accent_disabled":    "#dcb4a5",
+            "on_accent_disabled": "#fbf4f0",
+            "danger_disabled":    "#e0aca2",
+            "switch_off":   "#d4d1c6",
+            "chart_other":  "#b3b0a6",
+            "chart_empty":  "#e6e3d9",
+            "chart_future": "#f4f2eb",
+            "focus_study":  "#c96442",
+            "focus_break":  "#788c5d",
+        },
+        "chart": (
+            "#c96442", "#6a9bcc", "#788c5d", "#d4a27f", "#9b7bb8",
+            "#4a8f86", "#b5577a", "#a68a3e", "#5e6b8a",
+        ),
+        "ttk": {
+            "frame": "#faf9f5", "frame_hover": "#f0eee6", "fg": "#141413",
+            "field": "#ffffff", "border": "#d9d6cb", "light": "#faf9f5",
+            "dark": "#e8e5db", "trough": "#ebe8df", "select": "#f1d8cc",
+            "on_select": "#141413", "disabled_fg": "#a8a69e",
+            "list_bg": "#ffffff", "list_fg": "#141413",
+            "list_select": "#f1d8cc", "list_on_select": "#141413",
+        },
+    },
+
+    # 参考 Claude 的深色界面: 炭灰底色, 亮一点的陶土橙.
+    "claude_dark": {
+        "colors": {
+            "bg":           "#262624",
+            "bg_card":      "#30302e",
+            "accent":       "#d97757",
+            "accent_hover": "#e38b6d",
+            "text":         "#f5f4ee",
+            "text_dim":     "#a3a199",
+            "text_strong":  "#ffffff",
+            "success":      "#8fb47a",
+            "warn":         "#e0a458",
+            "border":       "#43423d",
+            "danger":       "#e5705e",
+            "danger_hover": "#ee8676",
+            "danger_bg":    "#3a2925",
+            "on_accent":    "#ffffff",
+            "accent_disabled":    "#5e4339",
+            "on_accent_disabled": "#9a877e",
+            "danger_disabled":    "#5e3a34",
+            "switch_off":   "#55544e",
+            "chart_other":  "#77756e",
+            "chart_empty":  "#3d3c38",
+            "chart_future": "#2d2d2b",
+            "focus_study":  "#d97757",
+            "focus_break":  "#8fa673",
+        },
+        "chart": (
+            "#d97757", "#7eaedb", "#8fa673", "#ddb28f", "#ad8fca",
+            "#5fa89e", "#cc6f91", "#c2a457", "#8090b5",
+        ),
+        "ttk": {
+            "frame": "#3a3a37", "frame_hover": "#46453f", "fg": "#f5f4ee",
+            "field": "#1f1e1d", "border": "#4d4c46", "light": "#3a3a37",
+            "dark": "#2f2f2c", "trough": "#2b2b29", "select": "#6a4334",
+            "on_select": "#ffffff", "disabled_fg": "#6f6d66",
+            "list_bg": "#1f1e1d", "list_fg": "#f5f4ee",
+            "list_select": "#6a4334", "list_on_select": "#ffffff",
+        },
+    },
 }
+
+THEME_NAMES = tuple(THEMES)
+DEFAULT_THEME = "classic"
+THEME = DEFAULT_THEME
+
+COLORS = dict(THEMES[DEFAULT_THEME]["colors"])
+CHART_PALETTE = list(THEMES[DEFAULT_THEME]["chart"])
+TTK_COLORS = dict(THEMES[DEFAULT_THEME]["ttk"])
+
+
+def apply_theme(name: str = None) -> str:
+    """把 COLORS / CHART_PALETTE / TTK_COLORS 换成指定主题的颜色 (原地修改,
+    已经 import 了 COLORS 的模块也能看到). 未知名字退回默认主题. 返回实际主题名."""
+    global THEME
+    if name not in THEMES:
+        name = DEFAULT_THEME
+    t = THEMES[name]
+    COLORS.clear()
+    COLORS.update(t["colors"])
+    CHART_PALETTE[:] = t["chart"]
+    TTK_COLORS.clear()
+    TTK_COLORS.update(t["ttk"])
+    THEME = name
+    return name
 
 
 

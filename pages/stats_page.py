@@ -7,20 +7,17 @@ import config
 from config import COLORS, fmt_hm
 from data_manager import month_prefixes, tally_items
 from i18n import tr, is_en
-from .widgets import ScrollArea, wrap_label
+from .widgets import ScrollArea, wrap_label, smooth
 
 
-PALETTE = (
-    "#2563eb", "#16a34a", "#d97706", "#dc2626", "#7c3aed",
-    "#0891b2", "#db2777", "#65a30d", "#ea580c",
-)
-OTHER_COLOR = "#94a3b8"
-EMPTY_COLOR = "#e2e8f0"
+# 图表颜色都跟随当前主题 (config.CHART_PALETTE / COLORS 会在切换主题时原地更新)
+PALETTE = config.CHART_PALETTE
 
-FOCUS_STUDY = "#2563eb"    # 专注: 蓝
-FOCUS_BREAK = "#16a34a"    # 休息: 绿
-FOCUS_BLANK = "#e2e8f0"    # 空白: 灰
-FOCUS_FUTURE = "#f1f5f9"   # 今天还没到的小时
+
+def _c(key: str) -> str:
+    return COLORS[key]
+
+
 WEEKDAYS_ZH = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
 WEEKDAYS_EN = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
@@ -85,8 +82,8 @@ class StatsPage(tk.Frame):
 
         # 专注计时页的图例
         self.focus_legend = tk.Frame(bar, bg=bg)
-        for color, text in ((FOCUS_STUDY, tr("专注")), (FOCUS_BREAK, tr("休息")),
-                            (FOCUS_BLANK, tr("空白"))):
+        for color, text in ((_c("focus_study"), tr("专注")), (_c("focus_break"), tr("休息")),
+                            (_c("chart_empty"), tr("空白"))):
             tk.Frame(self.focus_legend, bg=color, width=config.scaled(12),
                      height=config.scaled(12)).pack(side="left", padx=(10, 4))
             tk.Label(self.focus_legend, text=text, bg=bg, fg=COLORS["text_dim"],
@@ -130,10 +127,12 @@ class StatsPage(tk.Frame):
         body.rowconfigure(0, weight=1)
 
 
+    @smooth
     def _set_page(self, key: str):
         self.page = key
         self.refresh()
 
+    @smooth
     def _set_mode(self, key: str):
         self.mode[self.page] = key
         self.refresh()
@@ -142,14 +141,14 @@ class StatsPage(tk.Frame):
         for key, b in self.tab_btns.items():
             on = key == self.page
             b.config(bg=COLORS["accent"] if on else COLORS["bg_card"],
-                     fg="#ffffff" if on else COLORS["text"],
+                     fg=COLORS["on_accent"] if on else COLORS["text"],
                      activebackground=COLORS["accent_hover"] if on else COLORS["border"],
-                     activeforeground="#ffffff" if on else COLORS["text"])
+                     activeforeground=COLORS["on_accent"] if on else COLORS["text"])
         cur = self.mode.get(self.page, "pct")
         for key, b in self.mode_btns.items():
             on = key == cur
             b.config(bg=COLORS["text"] if on else COLORS["bg_card"],
-                     fg="#ffffff" if on else COLORS["text_dim"],
+                     fg=COLORS["bg"] if on else COLORS["text_dim"],
                      activebackground=COLORS["border"], activeforeground=COLORS["text"])
 
 
@@ -207,7 +206,7 @@ class StatsPage(tk.Frame):
         slices = [(k, v, PALETTE[i]) for i, (k, v) in enumerate(items[:len(PALETTE)])]
         rest = sum(v for _, v in items[len(PALETTE):])
         if rest > 0:
-            slices.append((tr("其他"), rest, OTHER_COLOR))
+            slices.append((tr("其他"), rest, _c("chart_other")))
         self._draw_pie(col["canvas"], col["size"], slices, total, pct_mode)
 
         inner = col["legend"].inner
@@ -220,7 +219,7 @@ class StatsPage(tk.Frame):
         for i, (k, v) in enumerate(items):
             row = tk.Frame(inner, bg=card)
             row.pack(fill="x", padx=4, pady=1)
-            color = PALETTE[i] if i < len(PALETTE) else OTHER_COLOR
+            color = PALETTE[i] if i < len(PALETTE) else _c("chart_other")
             tk.Frame(row, bg=color, width=config.scaled(12),
                      height=config.scaled(12)).pack(side="left", padx=(2, 8))
             value = f"{v / total * 100:.1f}%" if pct_mode else fmt_hm(v)
@@ -238,19 +237,19 @@ class StatsPage(tk.Frame):
         x0, y0, x1, y1 = pad, pad, size - pad, size - pad
         cx, cy, r = size / 2.0, size / 2.0, size / 2.0 - pad
         if total <= 0:
-            cv.create_oval(x0, y0, x1, y1, fill=EMPTY_COLOR, outline="")
+            cv.create_oval(x0, y0, x1, y1, fill=_c("chart_empty"), outline="")
             cv.create_text(cx, cy, text=tr("暂无数据"), fill=COLORS["text_dim"],
                            font=config.font("small"))
             return
         if len(slices) == 1:
-            cv.create_oval(x0, y0, x1, y1, fill=slices[0][2], outline="#ffffff")
+            cv.create_oval(x0, y0, x1, y1, fill=slices[0][2], outline=COLORS["bg_card"])
         start = 90.0
         labels = []
         for name, v, color in slices:
             extent = -360.0 * v / total
             if len(slices) > 1:
                 cv.create_arc(x0, y0, x1, y1, start=start, extent=extent,
-                              fill=color, outline="#ffffff", width=2, style="pieslice")
+                              fill=color, outline=COLORS["bg_card"], width=2, style="pieslice")
             if v / total >= 0.06:
                 mid = math.radians(start + extent / 2.0)
                 rr = 0.62 * r if len(slices) > 1 else 0.0
@@ -258,7 +257,7 @@ class StatsPage(tk.Frame):
                 labels.append((cx + rr * math.cos(mid), cy - rr * math.sin(mid), text))
             start += extent
         for x, y, text in labels:
-            cv.create_text(x, y, text=text, fill="#ffffff",
+            cv.create_text(x, y, text=text, fill=COLORS["on_accent"],
                            font=config.font("tiny", bold=True))
 
     # ---- 专注计时 ----
@@ -326,21 +325,21 @@ class StatsPage(tk.Frame):
                 bx1 = bx0 + bar_w
                 future = day + timedelta(hours=h) > now
                 cv.create_rectangle(bx0, y0, bx1, y1, outline="",
-                                    fill=FOCUS_FUTURE if future else FOCUS_BLANK)
+                                    fill=_c("chart_future") if future else _c("chart_empty"))
                 hs = row_h * st / 3600.0
                 hb = row_h * br / 3600.0
                 if hs > 0:
-                    cv.create_rectangle(bx0, y1 - hs, bx1, y1, outline="", fill=FOCUS_STUDY)
+                    cv.create_rectangle(bx0, y1 - hs, bx1, y1, outline="", fill=_c("focus_study"))
                 if hb > 0:
                     cv.create_rectangle(bx0, y1 - hs - hb, bx1, y1 - hs, outline="",
-                                        fill=FOCUS_BREAK)
+                                        fill=_c("focus_break"))
             tot_s = sum(st for st, _ in hours)
             tot_b = sum(br for _, br in hours)
             tx = x1 + config.scaled(12)
-            cv.create_text(tx, y0 + row_h * 0.3, anchor="w", fill=FOCUS_STUDY,
+            cv.create_text(tx, y0 + row_h * 0.3, anchor="w", fill=_c("focus_study"),
                            font=config.font("small", bold=True),
                            text=f"{tr('专注')} {fmt_hm(tot_s)}")
-            cv.create_text(tx, y0 + row_h * 0.75, anchor="w", fill=FOCUS_BREAK,
+            cv.create_text(tx, y0 + row_h * 0.75, anchor="w", fill=_c("focus_break"),
                            font=config.font("small"),
                            text=f"{tr('休息')} {fmt_hm(tot_b)}")
         self._focus_geom = (x0, slot, top, row_h, gap)
@@ -376,7 +375,7 @@ class StatsPage(tk.Frame):
         text = f"{day:%m-%d}  {h:02d}:00–{(h + 1) % 24:02d}:00\n{body}"
 
         pad = config.scaled(6)
-        tid = cv.create_text(0, 0, text=text, anchor="nw", fill="#ffffff",
+        tid = cv.create_text(0, 0, text=text, anchor="nw", fill=COLORS["bg"],
                              font=config.font("small"), tags="tip", justify="left")
         bx = cv.bbox(tid)
         tw, th = bx[2] - bx[0], bx[3] - bx[1]
