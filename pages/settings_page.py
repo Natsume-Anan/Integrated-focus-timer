@@ -1,13 +1,15 @@
 
 
 import tkinter as tk
+from datetime import datetime
 from tkinter import filedialog, ttk
 
 import config
 import toast
 from config import COLORS
 from i18n import tr
-from settings_manager import APPLY_INSTANT, SCHEMA_BY_KEY, BASIC_SPECS, DETAIL_SPECS
+from settings_manager import (APPLY_INSTANT, SCHEMA_BY_KEY, BASIC_SPECS, DETAIL_SPECS,
+                              WEEKDAY_SPECS)
 from .widgets import (ScrollArea, Switch, wrap_label, frozen, smooth, cfg, set_var,
                       show_pack, hide_pack, show_grid, hide_grid)
 
@@ -25,7 +27,7 @@ class SettingsPage(tk.Frame):
         self.on_font_scale = on_font_scale
         self.on_theme = on_theme
         self._rows = {}          # 基本设置页的行
-        self._num_rows = {}      # 具体设置页的行
+        self._num_rows = {}      # 具体设置页 / 星期倍率页的行
         self._tab = "basic"
         self._syncing = False
         self.sw_dev = None
@@ -70,7 +72,8 @@ class SettingsPage(tk.Frame):
         tabs = tk.Frame(hdr, bg=bg)
         tabs.pack(side="left", padx=(24, 0))
         self._tab_btns = {}
-        for key, text in (("basic", "基本设置"), ("detail", "具体设置")):
+        for key, text in (("basic", "基本设置"), ("detail", "具体设置"),
+                          ("weekday", "星期倍率")):
             b = self._track(tk.Label(
                 tabs, text=tr(text), font=config.font("body", bold=True),
                 padx=14, pady=4, cursor="hand2"), text)
@@ -90,7 +93,21 @@ class SettingsPage(tk.Frame):
 
         # ---- 具体设置 ----
         self.area_num = ScrollArea(self.stack, height=420, bg=bg)
-        self._build_num_page(self.area_num.inner)
+        self._build_num_page(self.area_num.inner, DETAIL_SPECS, self.area_num)
+
+        # ---- 星期倍率 ----
+        self.area_week = ScrollArea(self.stack, height=420, bg=bg)
+        intro = self._track(tk.Label(
+            self.area_week.inner, text=tr(
+                "当天的联网额度 = 每日联网额度 × 当天的倍率.例如每日额度 2 h,周六倍率 ×1.5,"
+                "周六就能联网 3 h;倍率 ×0 表示当天不能联网."),
+            bg=bg, fg=COLORS["text_dim"], font=config.font("small"), anchor="w",
+            justify="left"),
+            "当天的联网额度 = 每日联网额度 × 当天的倍率.例如每日额度 2 h,周六倍率 ×1.5,"
+            "周六就能联网 3 h;倍率 ×0 表示当天不能联网.")
+        intro.pack(fill="x", pady=(2, 6))
+        wrap_label(intro, 12)
+        self._build_num_page(self.area_week.inner, WEEKDAY_SPECS, self.area_week)
 
         # ---- 两页共用的底栏 ----
         foot = tk.Frame(self, bg=bg)
@@ -122,9 +139,11 @@ class SettingsPage(tk.Frame):
 
     def show_tab(self, key: str):
         self._tab = key
-        on, off = (self.area, self.area_num) if key == "basic" else (self.area_num, self.area)
-        hide_pack(off)
-        show_pack(on, fill="both", expand=True)
+        areas = {"basic": self.area, "detail": self.area_num, "weekday": self.area_week}
+        for k, a in areas.items():
+            if k != key:
+                hide_pack(a)
+        show_pack(areas.get(key, self.area), fill="both", expand=True)
         for k, b in self._tab_btns.items():
             if k == key:
                 cfg(b, bg=COLORS["accent"], fg=COLORS["on_accent"])
@@ -145,7 +164,7 @@ class SettingsPage(tk.Frame):
 
     # ---- 具体设置页: 数值直接填写, 一项一行 ----
 
-    def _build_num_page(self, body):
+    def _build_num_page(self, body, specs, area):
         card = COLORS["bg_card"]
         grid = tk.Frame(body, bg=card, highlightbackground=COLORS["border"],
                         highlightthickness=1)
@@ -153,17 +172,17 @@ class SettingsPage(tk.Frame):
         grid.grid_columnconfigure(6, weight=1)
         small = config.font("small")
         r = 0
-        for i, spec in enumerate(DETAIL_SPECS):
+        for i, spec in enumerate(specs):
             key = spec["key"]
             if i:
                 tk.Frame(grid, bg=COLORS["border"], height=1).grid(
                     row=r, column=0, columnspan=7, sticky="ew", padx=8)
                 r += 1
             py_top = (8, 0)
-            self._track(tk.Label(
-                grid, text=tr(spec["label"]), bg=card, fg=COLORS["text"],
-                font=config.font("body", bold=True), anchor="w"), spec["label"]
-            ).grid(row=r, column=0, sticky="w", padx=(12, 6), pady=py_top)
+            name = self._track(tk.Label(
+                grid, text=tr(spec["short"]), bg=card, fg=COLORS["text"],
+                font=config.font("body", bold=True), anchor="w"), spec["short"])
+            name.grid(row=r, column=0, sticky="w", padx=(12, 6), pady=py_top)
             badge = tk.Label(grid, text="", bg=card, font=small, anchor="w")
             badge.grid(row=r, column=1, sticky="w", padx=(0, 8), pady=py_top)
 
@@ -197,19 +216,22 @@ class SettingsPage(tk.Frame):
             pend.grid_remove()
             r += 1
 
-            desc = self._track(tk.Label(
-                grid, text=tr(spec["desc"]), bg=card, fg=COLORS["text_dim"],
-                font=small, anchor="w", justify="left"), spec["desc"])
-            desc.grid(row=r, column=0, columnspan=7, sticky="ew", padx=12, pady=(1, 7))
-            wrap_label(desc, 24)
+            if spec["desc"]:
+                desc = self._track(tk.Label(
+                    grid, text=tr(spec["desc"]), bg=card, fg=COLORS["text_dim"],
+                    font=small, anchor="w", justify="left"), spec["desc"])
+                desc.grid(row=r, column=0, columnspan=7, sticky="ew", padx=12, pady=(1, 7))
+                wrap_label(desc, 24)
+            else:
+                tk.Frame(grid, bg=card, height=6).grid(row=r, column=0, columnspan=7)
             r += 1
 
             self._num_rows[key] = {
-                "spec": spec, "var": var, "entry": ent, "badge": badge,
+                "spec": spec, "var": var, "entry": ent, "badge": badge, "name": name,
                 "lbl_current": lbl_cur, "lbl_pending": lbl_pending,
                 "btn_cancel": btn_cancel, "pend": pend, "synced": None,
             }
-        self.area_num.bind_children()
+        area.bind_children()
 
     def _sync_num(self, key: str, force: bool = False):
         """把填写框同步成当前生效值; 用户改过但还没提交的框不动 (除非 force)."""
@@ -441,8 +463,8 @@ class SettingsPage(tk.Frame):
             self.on_changed("cancel", None)
 
     def _save_all(self):
-        if self._tab == "detail":
-            self._save_all_num()
+        if self._tab in ("detail", "weekday"):
+            self._save_all_num(DETAIL_SPECS if self._tab == "detail" else WEEKDAY_SPECS)
             return
         staged, instant, same = 0, 0, 0
         ui_keys = []
@@ -469,9 +491,9 @@ class SettingsPage(tk.Frame):
         self._report_saved(staged, instant)
         self._run_ui_hooks(ui_keys)
 
-    def _save_all_num(self):
+    def _save_all_num(self, specs):
         staged, instant, errors = 0, 0, []
-        for spec in DETAIL_SPECS:
+        for spec in specs:
             key = spec["key"]
             if not self._num_edited(key):
                 continue
@@ -548,12 +570,21 @@ class SettingsPage(tk.Frame):
                     cfg(row["lbl_pending"], text="")
                     hide_pack(row["btn_cancel"])
 
-            for spec in DETAIL_SPECS:
+            today = datetime.now().weekday()
+            for spec in DETAIL_SPECS + WEEKDAY_SPECS:
                 key = spec["key"]
                 row = self._num_rows[key]
                 self._sync_num(key)
-                cfg(row["lbl_current"],
-                    text=f"{tr('当前')}: {self.sm.display(key)}")
+                cur = f"{tr('当前')}: {self.sm.display(key)}"
+                if key in config.WEEKDAY_KEYS:
+                    # 星期倍率: 顺带显示这一天实际能联网多久, 并标出今天
+                    quota = float(config.DAILY_LIMIT) * float(self.sm.value(key))
+                    cur += f"  →  {config.fmt_hm(quota)}"
+                    is_today = config.WEEKDAY_KEYS.index(key) == today
+                    cfg(row["name"], text=tr(spec["short"]) + (
+                        f"  ({tr('今天')})" if is_today else ""),
+                        fg=COLORS["accent"] if is_today else COLORS["text"])
+                cfg(row["lbl_current"], text=cur)
                 text, color = self._badge(key)
                 cfg(row["badge"], text=text, fg=color)
                 if self.sm.is_staged(key):

@@ -7,7 +7,7 @@ import time
 import queue
 import threading
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import config
 from config import fmt_hm
@@ -55,9 +55,27 @@ class NetGuard:
             self.block()
 
 
+    def _day(self, offset: int = 0):
+        """self.date 所指的那一天 (+offset 天). 跨零点由 tick() 里的 _rollover 推进 self.date."""
+        try:
+            d = datetime.strptime(self.date, '%Y-%m-%d')
+        except (AttributeError, TypeError, ValueError):
+            d = datetime.now()
+        return d + timedelta(days=offset)
+
     @property
     def limit(self) -> float:
-        return float(config.DAILY_LIMIT)
+        """今天的每日额度 = DAILY_LIMIT × 今天(星期几)的倍率."""
+        return config.daily_quota(self._day())
+
+    @property
+    def tomorrow_limit(self) -> float:
+        """明天的每日额度, 按明天是星期几算 (紧急借贷借的是它)."""
+        return config.daily_quota(self._day(1))
+
+    @property
+    def quota_multiplier(self) -> float:
+        return config.quota_multiplier(self._day())
 
     @property
     def cooldown(self) -> float:
@@ -82,7 +100,7 @@ class NetGuard:
 
     @property
     def tomorrow_remaining(self) -> float:
-        return max(0.0, self.limit - self.tomorrow_used)
+        return max(0.0, self.tomorrow_limit - self.tomorrow_used)
 
     @property
     def quick_left(self) -> float:
@@ -781,6 +799,31 @@ def _selftest():
         n.ensure_online()
         assert ("stop", True) in fp.calls
         config.NET_MODE = "adapter"
+
+        # 星期倍率: 今天的额度按今天是星期几, 借贷借的是明天(按明天的倍率)
+        saved_mult = {k: getattr(config, k) for k in config.WEEKDAY_KEYS}
+        try:
+            for k in config.WEEKDAY_KEYS:
+                setattr(config, k, 1.0)
+            w = NetGuard.__new__(NetGuard)
+            w.dead = True
+            w.date = "2026-10-16"                      # 周五
+            w.used = w.bonus = w.tomorrow_used = w.debt = 0.0
+            config.QUOTA_MULT_FRI, config.QUOTA_MULT_SAT = 1.5, 0.0
+            assert abs(w.limit - 5400) < 1e-6 and abs(w.remaining - 5400) < 1e-6
+            assert w.tomorrow_limit == 0.0 and w.loan_left == 0.0, "明天 ×0 时借不到"
+            config.QUOTA_MULT_SAT = 2.0
+            assert abs(w.tomorrow_limit - 7200) < 1e-6
+            w.date = "2026-10-18"                      # 周日 → 明天周一
+            assert abs(w.limit - 3600) < 1e-6 and abs(w.tomorrow_limit - 3600) < 1e-6
+            w.date = "2026-10-17"                      # 跨零点换到周六
+            w.used = 3000.0
+            assert abs(w.remaining - 4200) < 1e-6
+            w.date = "not-a-date"                      # 坏数据退回今天
+            assert w.limit >= 0
+        finally:
+            for k, v in saved_mult.items():
+                setattr(config, k, v)
         return "net_guard selftest OK"
     finally:
         (config.DAILY_LIMIT, config.COOLDOWN,

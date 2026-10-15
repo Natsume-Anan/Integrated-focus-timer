@@ -1390,6 +1390,10 @@ class BreakTimerApp:
                 left=fmt_hm(n.remaining), quick=fmt_hm(n.quick_left))
         )
         bits = []
+        mult = n.quota_multiplier
+        if abs(mult - 1.0) > 1e-9:
+            bits.append(tr("今天的联网倍率 ×{m}: 每日额度 {base} → 今天 {quota}").format(
+                m=f"{mult:g}", base=fmt_hm(float(config.DAILY_LIMIT)), quota=fmt_hm(n.limit)))
         if n.bonus > 0:
             bits.append(tr("今天已借 {bonus},明天将扣 {cost}(明天剩余 {left})").format(
                 bonus=fmt_hm(n.bonus), cost=fmt_hm(n.tomorrow_used),

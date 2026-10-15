@@ -37,7 +37,7 @@ def _num_text(x: float) -> str:
 
 
 def _num(key: str, label: str, unit: str, scale: float, lo: float, hi: float,
-         integer: bool, desc: str):
+         integer: bool, desc: str, page: str = "detail", short: str = None):
     """「具体设置」页的数值项.
 
     unit/scale: 界面上按 unit 填写, 存储值 = 填写值 × scale (例如按分钟填, 按秒存).
@@ -51,8 +51,8 @@ def _num(key: str, label: str, unit: str, scale: float, lo: float, hi: float,
         return f"×{_num_text(x)}" if _unit == "×" else f"{_num_text(x)} {_unit}"
     return {
         "key": key, "label": label, "kind": "num", "apply": APPLY_DELAY,
-        "page": "detail", "unit": unit, "scale": scale, "min": lo, "max": hi,
-        "integer": integer, "fmt": fmt, "desc": desc,
+        "page": page, "unit": unit, "scale": scale, "min": lo, "max": hi,
+        "integer": integer, "fmt": fmt, "desc": desc, "short": short or label,
     }
 
 
@@ -75,6 +75,21 @@ SETTINGS_SCHEMA = [
          "暂停休息(或关闭程序)时,剩余休息时间按这个比例计入下一次休息."),
     _num("FILL_WINDOW", "整点记录补填时限", "min", 60, 1, 1440, True,
          "整点过后多久之内还能补填;超时自动记为「超时自动记录内容」."),
+    # ---- 星期倍率页: 当天联网额度 = 每日联网额度 × 当天倍率 ----
+    _num("QUOTA_MULT_MON", "周一联网倍率", "×", 1, 0, 10, False, "", page="weekday",
+         short="周一"),
+    _num("QUOTA_MULT_TUE", "周二联网倍率", "×", 1, 0, 10, False, "", page="weekday",
+         short="周二"),
+    _num("QUOTA_MULT_WED", "周三联网倍率", "×", 1, 0, 10, False, "", page="weekday",
+         short="周三"),
+    _num("QUOTA_MULT_THU", "周四联网倍率", "×", 1, 0, 10, False, "", page="weekday",
+         short="周四"),
+    _num("QUOTA_MULT_FRI", "周五联网倍率", "×", 1, 0, 10, False, "", page="weekday",
+         short="周五"),
+    _num("QUOTA_MULT_SAT", "周六联网倍率", "×", 1, 0, 10, False, "", page="weekday",
+         short="周六"),
+    _num("QUOTA_MULT_SUN", "周日联网倍率", "×", 1, 0, 10, False, "", page="weekday",
+         short="周日"),
     {
         "key": "NET_MODE", "label": "断网方式",
         "kind": "choice", "apply": APPLY_DELAY,
@@ -165,6 +180,7 @@ for _s in SETTINGS_SCHEMA:
 SCHEMA_BY_KEY = {s["key"]: s for s in SETTINGS_SCHEMA}
 BASIC_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "basic"]
 DETAIL_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "detail"]
+WEEKDAY_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "weekday"]
 DELAYED_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_DELAY]
 INSTANT_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_INSTANT]
 

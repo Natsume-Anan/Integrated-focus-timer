@@ -358,6 +358,17 @@ EN = {
     "尚未到来": "Not yet",
     "专注 {s} 分 · 休息 {b} 分 · 空白 {e} 分": "Focus {s} min · Break {b} min · Idle {e} min",
     "最近 7 天计时器的专注与休息.每根条是一个小时,按比例分成专注、休息与空白;鼠标停在条上可查看分钟数.": "Focus and break time from the timer over the last 7 days. Each bar is one hour, split into focus, break and idle time; hover over a bar to see the minutes.",
+    # ---- Settings: 星期倍率 ----
+    "星期倍率": "Weekdays",
+    "周一联网倍率": "Monday quota multiplier",
+    "周二联网倍率": "Tuesday quota multiplier",
+    "周三联网倍率": "Wednesday quota multiplier",
+    "周四联网倍率": "Thursday quota multiplier",
+    "周五联网倍率": "Friday quota multiplier",
+    "周六联网倍率": "Saturday quota multiplier",
+    "周日联网倍率": "Sunday quota multiplier",
+    "当天的联网额度 = 每日联网额度 × 当天的倍率.例如每日额度 2 h,周六倍率 ×1.5,周六就能联网 3 h;倍率 ×0 表示当天不能联网.": "Each day's network quota = daily quota × that day's multiplier. For example, with a 2 h daily quota and ×1.5 on Saturday, you get 3 h on Saturday; ×0 means no network that day.",
+    "今天的联网倍率 ×{m}: 每日额度 {base} → 今天 {quota}": "Today's quota multiplier ×{m}: daily quota {base} → today {quota}",
     # ---- Settings: 基本设置 / 具体设置 ----
     "基本设置": "Basic",
     "具体设置": "Details",

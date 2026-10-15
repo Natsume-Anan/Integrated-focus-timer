@@ -30,6 +30,30 @@ LOAN_RATE = 2.0              # 紧急借贷: 今日额度 +1 秒, 明天额度 -
 BREAK_COOLDOWN_RATE = 0.4    # 休息中提交的普通申请(时长不超过剩余休息): 冷静期 ×0.4
 BREAK_CARRY_RATE = 0.8       # 暂停休息(含关闭程序): 剩余休息时间 ×0.8 计入下一次休息
 
+# 按星期调整每日联网额度: 当天额度 = DAILY_LIMIT × 当天的倍率 (周一 ~ 周日)
+WEEKDAY_KEYS = ("QUOTA_MULT_MON", "QUOTA_MULT_TUE", "QUOTA_MULT_WED", "QUOTA_MULT_THU",
+                "QUOTA_MULT_FRI", "QUOTA_MULT_SAT", "QUOTA_MULT_SUN")
+QUOTA_MULT_MON = 1.0
+QUOTA_MULT_TUE = 1.0
+QUOTA_MULT_WED = 1.0
+QUOTA_MULT_THU = 1.0
+QUOTA_MULT_FRI = 1.0
+QUOTA_MULT_SAT = 1.0
+QUOTA_MULT_SUN = 1.0
+
+
+def quota_multiplier(day) -> float:
+    """某一天 (date / datetime) 的联网额度倍率."""
+    try:
+        return max(0.0, float(globals().get(WEEKDAY_KEYS[day.weekday()], 1.0)))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def daily_quota(day) -> float:
+    """某一天的联网额度 (秒) = 每日联网额度 × 当天倍率."""
+    return float(globals().get("DAILY_LIMIT", 0)) * quota_multiplier(day)
+
 
 
 
@@ -145,6 +169,13 @@ DEFAULT_SETTINGS = {
     "LOAN_RATE": LOAN_RATE,
     "BREAK_COOLDOWN_RATE": BREAK_COOLDOWN_RATE,
     "BREAK_CARRY_RATE": BREAK_CARRY_RATE,
+    "QUOTA_MULT_MON": QUOTA_MULT_MON,
+    "QUOTA_MULT_TUE": QUOTA_MULT_TUE,
+    "QUOTA_MULT_WED": QUOTA_MULT_WED,
+    "QUOTA_MULT_THU": QUOTA_MULT_THU,
+    "QUOTA_MULT_FRI": QUOTA_MULT_FRI,
+    "QUOTA_MULT_SAT": QUOTA_MULT_SAT,
+    "QUOTA_MULT_SUN": QUOTA_MULT_SUN,
 }
 
 
