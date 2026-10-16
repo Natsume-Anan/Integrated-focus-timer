@@ -108,6 +108,7 @@ class BreakTimerApp:
         self._bonus_first = 0.0
         self._bonus_job = None
         self._timer_extra = None
+        self._bonus_break_active = False   # 这一次休息含领到的时间: 可在联网中暂停, 暂停不打折
         self.last_t_minutes = 0.0
         self.countdown_seconds = 0
         self.update_job = None
@@ -645,9 +646,8 @@ class BreakTimerApp:
         self.btn_break.pack(side="left", ipadx=10, padx=(10, 0))
 
         # 连点按钮: 1 分钟内连点 10 次, 换 20 分钟休息时间 (每周最多 2 小时)
-        self.lbl_bonus = ttk.Button(btns, text="", style="Danger.TButton",
-                                    command=self._on_bonus_click)
-        self.lbl_bonus.pack(side="left", ipadx=10, padx=(24, 0))
+        self.lbl_bonus = ttk.Button(btns, text="", command=self._on_bonus_click)
+        self.lbl_bonus.pack(side="left", padx=(24, 0))
         self._bonus_show(self._bonus_idle_text())
         self._sync_timer_buttons()
 
@@ -763,7 +763,7 @@ class BreakTimerApp:
         self._bonus_clicks += 1
         need = int(config.BONUS_BREAK_CLICKS)
         if self._bonus_clicks < need:
-            self._bonus_show(tr("☕  我累了") + f"  ({self._bonus_clicks})")
+            self._bonus_show(tr("☕  我累了 ({i})").format(i=self._bonus_clicks))
             return
         self._bonus_reset()
         self._grant_bonus_break()
@@ -779,6 +779,7 @@ class BreakTimerApp:
         self._bonus_show(self._bonus_idle_text())
 
     def _bonus_idle_text(self) -> str:
+        # 按钮上只写几个字, 不写具体规则 (规则见 MECHANICS.md 6.5)
         if self._bonus_left_this_week() <= 0:
             return tr("☕  本周已领完")
         return tr("☕  我累了")
@@ -803,14 +804,19 @@ class BreakTimerApp:
         self._timer_extra = {"bonus_week": week, "bonus_used": used + add}
         if self.state == ON_BREAK:
             self.countdown_seconds += add          # 正在休息: 直接加到这次休息里
+            self._bonus_break_active = True
             self._save_timer_state()
             where = tr("已加到这次休息里.")
+            where += "\n" + tr("这次休息可以随时暂停(联网时也可以),剩余时间不打折.")
         else:
+            # 存进积攒的休息时间; 用到它的下一次休息享受"可暂停、不打折"
+            self._timer_extra["bonus_pending"] = True
             self._set_break_carry(self.break_carry + add)
             where = tr("已存入积攒的休息时间,可以按 [开始休息] 使用.")
+            where += "\n" + tr("下一次休息可以随时暂停(联网时也可以),剩余时间不打折.")
         msg = tr("获得 {t} 休息时间.").format(t=fmt_ms(add)) + where
         msg += "\n" + tr("本周还能领 {left}.").format(left=fmt_hm(left - add))
-        msg += "\n\n" + tr("这么想休息,也许是真的累了.注意休息,别硬撑.")
+        msg += "\n\n" + tr("这么想休息,也许是真的累了.休息不需要理由.")
         toast.success(msg, timeout=10000)
         if self.state == IDLE:
             self.lbl_sub.config(text=self._idle_sub_text())
@@ -825,11 +831,18 @@ class BreakTimerApp:
             self.reset_to_idle()
             return
         carry = int(self.break_carry)
-        if carry > 0:
+        bonus = bool(self._bonus_state().get("bonus_pending"))
+        if bonus:
+            self._bonus_break_active = True
+            self._timer_extra = {"bonus_pending": False}
+        if carry > 0 or bonus:
             self._set_break_carry(0)
         self.countdown_seconds = total
         self.state = ON_BREAK
         self.break_start_wall = datetime.now()
+        if bonus:
+            toast.info(tr("这次休息含领到的时间:可以随时暂停(联网时也可以),剩余时间不打折."),
+                       timeout=8000)
         self._show_on_break()
         self.schedule_update()
         if announce:
@@ -865,8 +878,9 @@ class BreakTimerApp:
         self._sync_break_lock()
 
     def _break_locked(self) -> bool:
-        """网络正在使用时不允许暂停休息."""
-        return self.state == ON_BREAK and self.net.mode == "online"
+        """网络正在使用时不允许暂停休息 —— 领到休息时间后的第一次休息除外."""
+        return (self.state == ON_BREAK and self.net.mode == "online"
+                and not self._bonus_break_active)
 
     def _sync_break_lock(self):
         if self.state == ON_BREAK:
@@ -881,12 +895,19 @@ class BreakTimerApp:
             return
         self._record_break_end()
         left = max(0, int(self.countdown_seconds))
-        add = int(round(left * config.BREAK_CARRY_RATE))
+        full = self._bonus_break_active
+        self._bonus_break_active = False
+        # 领到休息时间后的第一次休息: 暂停时剩余时间全部保留, 不按倍率打折
+        add = left if full else int(round(left * config.BREAK_CARRY_RATE))
         if add > 0:
             self._set_break_carry(self.break_carry + add)
             if not silent:
-                toast.info(tr("休息已暂停.\n剩余 {left} 按 ×{r:g} 计入下次休息: +{add}").format(
-                    left=fmt_ms(left), r=config.BREAK_CARRY_RATE, add=fmt_ms(add)))
+                if full:
+                    toast.info(tr("休息已暂停.\n这次不打折,剩余 {left} 全部留给下次休息.").format(
+                        left=fmt_ms(left)))
+                else:
+                    toast.info(tr("休息已暂停.\n剩余 {left} 按 ×{r:g} 计入下次休息: +{add}").format(
+                        left=fmt_ms(left), r=config.BREAK_CARRY_RATE, add=fmt_ms(add)))
         if silent:
             self.state = IDLE
             self.countdown_seconds = 0
@@ -1019,6 +1040,7 @@ class BreakTimerApp:
                 self.update_job = self.root.after(1000, self.update)
             else:
                 self._record_break_end()
+                self._bonus_break_active = False
                 toast.success(tr("休息结束,可以开始下一轮了!"))
                 self.reset_to_idle()
                 self._arm_idle_nudge()

@@ -388,6 +388,10 @@ EN = {
     "☕  本周已领完": "☕  Used up this week",
     "本周还能领 {left}.": "{left} left to claim this week.",
     "这么想休息,也许是真的累了.休息不需要理由.": "If you want a break this badly, you may really be tired. Rest doesn't need a reason.",
+    "休息已暂停.\n这次不打折,剩余 {left} 全部留给下次休息.": "Break paused.\nNo reduction this time: all {left} left goes to your next break.",
+    "这次休息含领到的时间:可以随时暂停(联网时也可以),剩余时间不打折.": "This break includes claimed time: you can pause it any time (even while online), and the rest is kept in full.",
+    "这次休息可以随时暂停(联网时也可以),剩余时间不打折.": "You can pause this break any time (even while online); the rest is kept in full.",
+    "下一次休息可以随时暂停(联网时也可以),剩余时间不打折.": "Your next break can be paused any time (even while online); the rest is kept in full.",
     # ---- Timer: 休息结束后的提醒 ----
     "⏱  该开始下一轮了": "⏱  Time for the next round",
     "休息结束已经 {t} 了,还没有开始下一轮专注.": "Your break ended {t} ago and the next focus round hasn't started yet.",
