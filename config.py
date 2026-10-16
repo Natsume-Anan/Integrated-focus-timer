@@ -6,7 +6,7 @@ import math
 import threading
 import tkinter as tk
 from tkinter import messagebox
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 
 if sys.platform == "win32":
@@ -156,6 +156,21 @@ def dev_mode_enabled() -> bool:
     if not dev_mode_defined():
         return False
     return bool(getattr(sys.modules["config"], "DEV_MODE", False))
+
+
+# ---- 配置期: 第一次打开软件时开始, 期间所有设置与名单的修改立即生效 ----
+SETUP_HOURS = 72
+SETUP_UNTIL = None          # datetime; 由 SettingsManager 从 app_settings.json 读入
+
+
+def setup_active() -> bool:
+    until = globals().get("SETUP_UNTIL")
+    return isinstance(until, datetime) and datetime.now() < until
+
+
+def changes_instant() -> bool:
+    """设置 / 名单的修改是否立即生效: 开发者模式或配置期内."""
+    return dev_mode_enabled() or setup_active()
 
 
 

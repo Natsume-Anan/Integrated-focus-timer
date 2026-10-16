@@ -17,7 +17,7 @@ from .widgets import (ScrollArea, Switch, wrap_label, frozen, smooth, cfg, set_v
 class SettingsPage(tk.Frame):
     def __init__(self, master, settings, on_changed=None, on_sound=None,
                  on_dev_mode=None, on_language=None, on_font_scale=None,
-                 on_theme=None):
+                 on_theme=None, on_end_setup=None):
         super().__init__(master, bg=COLORS["bg"])
         self.sm = settings
         self.on_changed = on_changed
@@ -26,6 +26,8 @@ class SettingsPage(tk.Frame):
         self.on_language = on_language
         self.on_font_scale = on_font_scale
         self.on_theme = on_theme
+        self.on_end_setup = on_end_setup
+        self.setup_card = None
         self._rows = {}          # 基本设置页的行
         self._num_rows = {}      # 具体设置页 / 星期倍率页的行
         self._tab = "basic"
@@ -87,6 +89,7 @@ class SettingsPage(tk.Frame):
         # ---- 基本设置 ----
         self.area = ScrollArea(self.stack, height=420, bg=bg)
         body = self.area.inner
+        self._build_setup_card(body)
         self._build_dev_mode(body)
         for spec in BASIC_SPECS:
             self._build_row(body, spec)
@@ -156,8 +159,8 @@ class SettingsPage(tk.Frame):
         tag = self.sm.wait_tag(key)
         if tag == "instant":
             return tr("⚡ 即时生效"), COLORS["success"]
-        if tag == "first":
-            return tr("⚡ 首次修改免等待"), COLORS["success"]
+        if tag == "setup":
+            return tr("⚡ 配置期内即时"), COLORS["success"]
         if tag == "free":
             return tr("⚡ 这一次修改免等待"), COLORS["success"]
         if tag == "dev":
@@ -262,6 +265,34 @@ class SettingsPage(tk.Frame):
         if not quiet and status in ("instant", "staged", "nochange"):
             toast.info(tr(msg))
         return status, msg
+
+    def _build_setup_card(self, body):
+        """配置期: 剩余时间 + 提前结束按钮. 不在配置期时整块隐藏."""
+        card = COLORS["bg_card"]
+        fr = tk.Frame(body, bg=card, highlightbackground=COLORS["accent"],
+                      highlightthickness=1)
+        self.setup_card = fr
+        row = tk.Frame(fr, bg=card)
+        row.pack(fill="x", padx=12, pady=(10, 2))
+        self._track(tk.Label(
+            row, text=tr("⏳  配置期"), bg=card, fg=COLORS["text"],
+            font=config.font("body", bold=True)), "⏳  配置期").pack(side="left")
+        self._track(ttk.Button(row, text=tr("结束配置期"), command=self._end_setup),
+                    "结束配置期").pack(side="right")
+        self.lbl_setup = tk.Label(fr, text="", bg=card, fg=COLORS["text_dim"],
+                                  font=config.font("small"), anchor="w", justify="left")
+        self.lbl_setup.pack(fill="x", padx=12, pady=(0, 10))
+        wrap_label(self.lbl_setup, 24)
+
+    def _end_setup(self):
+        if not toast.ask(
+            tr("结束配置期后,设置和名单的每次修改都要等 48 小时才生效.\n不能撤销.确定结束吗?"),
+            title=tr("结束配置期"), danger=True
+        ):
+            return
+        if self.on_end_setup:
+            self.on_end_setup()
+        self.refresh()
 
     def _build_dev_mode(self, body):
         if not config.dev_mode_defined():
@@ -542,6 +573,19 @@ class SettingsPage(tk.Frame):
     def refresh(self):
         # 文字翻译不用每次刷新都重设: 换语言时整个界面会重建.
         # 下面只改真正变了的属性 (cfg), 避免每次刷新把几十个控件全部重画一遍.
+        if self.setup_card is not None:
+            left = self.sm.setup_left_seconds()
+            if left > 0:
+                h, rem = divmod(left, 3600)
+                cfg(self.lbl_setup, text=tr(
+                    "还剩 {h} 小时 {m} 分.配置期内,所有设置和名单的修改立即生效;"
+                    "结束后每次修改都要等 48 小时.").format(h=h, m=rem // 60))
+                if self.setup_card.winfo_manager() != "pack":
+                    others = [w for w in self.area.inner.pack_slaves() if w is not self.setup_card]
+                    kw = {"before": others[0]} if others else {}
+                    self.setup_card.pack(fill="x", pady=(2, 8), **kw)
+            else:
+                hide_pack(self.setup_card)
         if self.sw_dev is not None:
             dev = bool(getattr(config, "DEV_MODE", False))
             if self.sw_dev.get() != dev:

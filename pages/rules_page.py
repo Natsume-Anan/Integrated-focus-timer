@@ -382,7 +382,9 @@ class RulesPage(tk.Frame):
             self.lb_pending.delete(0, "end")
             for line in pend:
                 self.lb_pending.insert("end", line)
-        if r.dev_getter():
+        if config.setup_active():
+            cfg(self.lbl_setup, text=tr("配置期内:名单的所有改动立即生效."))
+        elif r.dev_getter():
             cfg(self.lbl_setup, text=tr("开发者模式:名单改动立即生效."))
         else:
             cfg(self.lbl_setup, text=tr(

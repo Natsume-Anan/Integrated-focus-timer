@@ -41,9 +41,9 @@ class DataManager:
         self.old_dir = os.path.join(low_dir, OLD_APP_DIR)
 
 
-        self.uninstall_file = os.path.join(low_dir, f"{APP_NAME}.uninstall.json")
+        # 旧版本在数据目录外记录卸载次数的文件; 现在不再记录, 卸载时一并删除
+        self.legacy_uninstall_file = os.path.join(low_dir, f"{APP_NAME}.uninstall.json")
         self.uninstalling = False
-        self.uninstall_count, self.uninstall_last = self._load_uninstall_count()
 
         self.study_file = os.path.join(self.data_dir, 'study_log.json')
         self.hour_file = os.path.join(self.data_dir, 'hour_log.json')
@@ -70,25 +70,6 @@ class DataManager:
     @property
     def auto_text(self) -> str:
         return str(getattr(config, "AUTO_TEXT", AUTO_TEXT))
-
-
-    def _load_uninstall_count(self):
-        try:
-            with open(self.uninstall_file, 'r', encoding='utf-8') as f:
-                d = json.load(f)
-            return int(d.get("count", 0)), d.get("last")
-        except Exception:
-            return 0, None
-
-    def save_uninstall_count(self):
-        try:
-            with open(self.uninstall_file, 'w', encoding='utf-8') as f:
-                json.dump({
-                    "count": self.uninstall_count,
-                    "last": self.uninstall_last
-                }, f)
-        except IOError:
-            pass
 
 
     def _migrate_old_data(self):
@@ -358,8 +339,13 @@ class DataManager:
 
 
     def erase_all_data(self):
+        """卸载: 删除本程序留下的全部数据, 不留任何记录."""
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.old_dir, ignore_errors=True)
+        try:
+            os.remove(self.legacy_uninstall_file)
+        except OSError:
+            pass
 
 
 def tally_items(pairs) -> Dict[str, float]:

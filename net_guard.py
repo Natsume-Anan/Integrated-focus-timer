@@ -42,7 +42,7 @@ class NetGuard:
         self.pending = None
         self.proxy = ProxyController(
             data_dir, mode_getter=lambda: getattr(config, "FILTER_MODE", "blacklist"),
-            dev_getter=config.dev_mode_enabled)
+            dev_getter=config.changes_instant)
         self._nic_off_by_fallback = False
         self._applied_mode = self.net_mode
         self._load()

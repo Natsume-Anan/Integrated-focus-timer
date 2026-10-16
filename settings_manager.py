@@ -197,6 +197,9 @@ class SettingsManager:
         self.since = {}
         self.changed = {}
         self.free_next = set()   # 下一次修改免等待的项 (紧急借贷借得太多时给每日联网额度)
+        self.setup_until = None  # 配置期截止时刻 (第一次打开软件时开始)
+        import os as _os
+        self.fresh = not _os.path.exists(self.path)   # 第一次打开软件 (还没有设置文件)
         self.load()
         self.promote_due()
         self.apply_to_config()
@@ -220,6 +223,7 @@ class SettingsManager:
             self.since[k] = str(since.get(k) or DEFAULT_SINCE)
             self.changed[k] = bool(changed.get(k))
 
+        self.setup_until = self._parse_dt(raw.get("setup_until"))
         free = raw.get("free_next") if isinstance(raw.get("free_next"), list) else []
         self.free_next = {k for k in free if k in SCHEMA_BY_KEY}
 
@@ -241,6 +245,8 @@ class SettingsManager:
             "since": self.since,
             "changed": dict(self.changed),
             "free_next": sorted(self.free_next),
+            "setup_until": (self.setup_until.isoformat(timespec="seconds")
+                            if self.setup_until else None),
             "pending": {
                 k: {
                     "value": v["value"],
@@ -311,11 +317,6 @@ class SettingsManager:
     def ever_changed(self, key: str) -> bool:
         return bool(self.changed.get(key))
 
-    def first_change_pending(self, key: str) -> bool:
-        spec = SCHEMA_BY_KEY.get(key) or {}
-        if spec.get("apply") != APPLY_DELAY:
-            return False
-        return not self.ever_changed(key)
 
     def staged_count(self) -> int:
         return len(self.pending)
@@ -358,9 +359,7 @@ class SettingsManager:
         ok, msg = self.validate(key, value)
         if not ok:
             return "invalid", msg
-        first_change = not self.changed.get(key)
-
-        if spec["apply"] == APPLY_INSTANT or config.dev_mode_enabled():
+        if spec["apply"] == APPLY_INSTANT or config.changes_instant():
             self.effective[key] = value
             self.since[key] = f"{self._now():%Y-%m-%d %H:%M}"
             self.changed[key] = True
@@ -389,17 +388,6 @@ class SettingsManager:
             self.save()
             self.apply_to_config()
             return "instant", tr("{label} 已立即生效(这一次免等待已用掉).",
-                                 label=tr(spec['label']))
-
-        if first_change:
-
-            self.effective[key] = value
-            self.since[key] = f"{now:%Y-%m-%d %H:%M}"
-            self.changed[key] = True
-            self.pending.pop(key, None)
-            self.save()
-            self.apply_to_config()
-            return "instant", tr("{label} 首次修改,已立即生效;以后的修改需要等待冷静期.",
                                  label=tr(spec['label']))
 
         self.pending[key] = {
@@ -456,15 +444,15 @@ class SettingsManager:
         return True
 
     def wait_tag(self, key: str) -> str:
-        """修改这一项是否需要等待: 'instant' 即时生效 / 'first' 首次修改免等待 /
+        """修改这一项是否需要等待: 'instant' 即时生效 / 'setup' 配置期内即时 /
         'free' 这一次免等待 / 'dev' 开发者模式下即时 / '' 需要等待."""
         spec = SCHEMA_BY_KEY.get(key) or {}
         if spec.get("apply") == APPLY_INSTANT:
             return "instant"
         if config.dev_mode_enabled():
             return "dev"
-        if not self.ever_changed(key):
-            return "first"
+        if config.setup_active():
+            return "setup"
         if key in self.free_next:
             return "free"
         return ""
@@ -489,7 +477,7 @@ class SettingsManager:
 
     def promote_due(self) -> list:
         now = self._now()
-        dev = config.dev_mode_enabled()
+        dev = config.changes_instant()
         due = [k for k, v in self.pending.items() if dev or v["apply_at"] <= now]
         for k in due:
             self.effective[k] = self.pending[k]["value"]
@@ -544,6 +532,28 @@ class SettingsManager:
     def apply_to_config(self):
         for key in self.effective:
             setattr(config, key, self.config_value(key))
+        config.SETUP_UNTIL = self.setup_until
+
+    # ---- 配置期 ----
+
+    def start_setup(self, hours: float = None):
+        hours = config.SETUP_HOURS if hours is None else hours
+        self.setup_until = self._now() + timedelta(hours=hours)
+        self.save()
+        self.apply_to_config()
+
+    def end_setup(self):
+        self.setup_until = None
+        self.save()
+        self.apply_to_config()
+
+    def in_setup(self) -> bool:
+        return self.setup_until is not None and self._now() < self.setup_until
+
+    def setup_left_seconds(self) -> int:
+        if not self.in_setup():
+            return 0
+        return int((self.setup_until - self._now()).total_seconds())
 
 
     def raw_ui_value(self, key: str) -> str:
@@ -594,41 +604,46 @@ def _selftest():
     import tempfile
     tmp = os.path.join(tempfile.mkdtemp(), "settings.json")
     m = SettingsManager(tmp, delay_hours=48)
+    assert m.fresh, "还没有设置文件 = 第一次打开"
     assert m.value("DAILY_LIMIT") == DEFAULT_SETTINGS["DAILY_LIMIT"]
-    assert not m.is_staged("DAILY_LIMIT")
-    assert m.first_change_pending("DAILY_LIMIT"), "从没改过的项第一次改应当免冷静期"
+    assert not m.is_staged("DAILY_LIMIT") and not m.in_setup()
 
+    # 没有"首次修改免等待"了: 第一次改也要等
     st, _ = m.stage("DAILY_LIMIT", 3600)
-    assert st == "instant" and not m.is_staged("DAILY_LIMIT")
-    assert m.value("DAILY_LIMIT") == 3600 == config.DAILY_LIMIT, "首次修改要立即生效"
-    assert not m.first_change_pending("DAILY_LIMIT")
-
-    st, _ = m.stage("DAILY_LIMIT", 7200)
-    assert st == "staged" and m.is_staged("DAILY_LIMIT")
-    assert m.value("DAILY_LIMIT") == 3600, "第二次修改必须等冷静期"
+    assert st == "staged" and m.value("DAILY_LIMIT") == DEFAULT_SETTINGS["DAILY_LIMIT"]
     assert 47 * 3600 < m.pending_left_seconds("DAILY_LIMIT") <= 48 * 3600
+    assert m.wait_tag("DAILY_LIMIT") == ""
 
     st, _ = m.stage("CHIME_WAV", "__builtin__")
     assert st == "instant" and not m.is_staged("CHIME_WAV")
     assert config.CHIME_WAV == ""
 
-    assert m.cancel("DAILY_LIMIT") and not m.is_staged("DAILY_LIMIT")
-
-
-    m.stage("COOLDOWN", 120)      # 第一次修改立即生效
-    m.stage("COOLDOWN", 600)      # 第二次才进入冷静期
-    m.pending["COOLDOWN"]["apply_at"] = m._now() - timedelta(seconds=1)
-    assert m.promote_due() == ["COOLDOWN"]
-    assert m.value("COOLDOWN") == 600 and config.COOLDOWN == 600
-
-
-    m.stage("FILTER_MODE", "whitelist")
-    assert m.value("FILTER_MODE") == "whitelist" and not m.is_staged("FILTER_MODE")
-    m.stage("FILTER_MODE", "blacklist")
+    # 配置期: 改动立即生效, 排队中的也立即生效
+    m.start_setup(72)
+    assert m.in_setup() and config.setup_active() and m.wait_tag("COOLDOWN") == "setup"
+    assert 71 * 3600 < m.setup_left_seconds() <= 72 * 3600
+    assert m.promote_due() == ["DAILY_LIMIT"] and config.DAILY_LIMIT == 3600
+    st, _ = m.stage("COOLDOWN", 120)
+    assert st == "instant" and config.COOLDOWN == 120
     m2 = SettingsManager(tmp, delay_hours=48)
-    assert m2.is_staged("FILTER_MODE") and m2.value("FILTER_MODE") == "whitelist"
-    assert m2.ever_changed("FILTER_MODE") and not m2.ever_changed("ENFORCE_EVERY")
-    assert m2.cancel_all() == 1
+    assert not m2.fresh and m2.in_setup(), "配置期写进文件, 重启后仍在"
+    m2.end_setup()
+    assert not m2.in_setup() and not config.setup_active()
+    st, _ = m2.stage("COOLDOWN", 600)
+    assert st == "staged" and m2.value("COOLDOWN") == 120
+    m2.pending["COOLDOWN"]["apply_at"] = m2._now() - timedelta(seconds=1)
+    assert m2.promote_due() == ["COOLDOWN"]
+    assert m2.value("COOLDOWN") == 600 and config.COOLDOWN == 600
+
+    m2.stage("FILTER_MODE", "whitelist")
+    m3 = SettingsManager(tmp, delay_hours=48)
+    assert m3.is_staged("FILTER_MODE") and m3.value("FILTER_MODE") == DEFAULT_SETTINGS["FILTER_MODE"]
+    assert m3.cancel_all() == 1
+
+    # 配置期过期
+    m3.setup_until = m3._now() - timedelta(seconds=1)
+    m3.apply_to_config()
+    assert not m3.in_setup() and not config.setup_active()
     return "settings_manager selftest OK"
 
 

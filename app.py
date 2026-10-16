@@ -124,6 +124,11 @@ class BreakTimerApp:
         self.timer_file = os.path.join(self.dm.data_dir, "timer_state.json")
         self.break_carry = self._load_break_carry()
         self.settings = SettingsManager()
+        # 第一次打开软件 (还没有设置文件): 开始 72 小时配置期, 界面建好后弹出介绍
+        self._first_run = self.settings.fresh
+        if self._first_run:
+            self.settings.start_setup()
+        self._setup_was_active = self.settings.in_setup()
         i18n.init_from_config()
         config.UI_SCALE = self.ui_scale * float(self.settings.value("FONT_SCALE") or 1.0)
         self._apply_theme()
@@ -160,6 +165,8 @@ class BreakTimerApp:
         self.root.bind("<Map>", self._on_window_map)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         self.var_confirm.trace_add("write", self._on_confirm_change)
+        if self._first_run:
+            self.root.after(600, self._show_welcome)
 
 
     def _apply_geometry(self):
@@ -420,7 +427,8 @@ class BreakTimerApp:
             on_dev_mode=self.on_dev_mode_changed,
             on_language=self.on_language_changed,
             on_font_scale=self.on_font_scale_changed,
-            on_theme=self.on_theme_changed
+            on_theme=self.on_theme_changed,
+            on_end_setup=self.end_setup_period
         )
         self._prepare_page(self.pages["settings"])
         yield
@@ -1174,7 +1182,55 @@ class BreakTimerApp:
             return
         self.check_pending_settings()
         self._check_idle_nudge()
+        self._check_setup_period()
         self.apply_job = self.root.after(5000, self._schedule_apply_check)
+
+    # ---- 配置期 ----
+
+    def _show_welcome(self):
+        hours = int(config.SETUP_HOURS)
+        msg = (tr("OIT帮你把上网集中起来:联网要先申请,等过冷静期才连上,每天有额度.")
+               + "\n" + tr("另有专注计时器、整点记录和统计,帮你看清时间花在哪里.")
+               + "\n\n" + tr("接下来{h}小时是配置期:所有设置和名单的修改都立即生效,"
+                               "请趁这段时间按自己的习惯调好.").format(h=hours)
+               + "\n" + tr("配置期结束后,每次修改都要等 48 小时才生效.")
+               + "\n" + tr("调好了,可以在 设置 → 基本设置 里提前结束配置期."))
+        toast.notice(tr("👋  欢迎使用 OIT"), msg, [
+            (tr("去设置"), self._open_basic_settings, True), (tr("开始使用"), None, False)])
+
+    def _open_basic_settings(self):
+        self.show_page("settings")
+        try:
+            self.pages["settings"].show_tab("basic")
+        except Exception:
+            pass
+
+    def end_setup_period(self):
+        self.settings.end_setup()
+        self._setup_was_active = False
+        self._log_notice("SETUP period ended by user")
+        self._after_setup_change()
+        toast.info(tr("配置期已结束.之后的修改都要等 48 小时才生效."))
+
+    def _check_setup_period(self):
+        """配置期自然到期时提示一次, 并刷新界面上的标记."""
+        active = self.settings.in_setup()
+        if self._setup_was_active and not active:
+            self._setup_was_active = False
+            self._log_notice("SETUP period ended (time is up)")
+            self._after_setup_change()
+            toast.notice(tr("⏳  配置期结束了"),
+                         tr("从现在起,设置和名单的修改都要等 48 小时才生效."))
+
+    def _after_setup_change(self):
+        self.update_settings_badge()
+        for key in ("settings", "rules"):
+            if key in self.pages:
+                try:
+                    self.pages[key].refresh(force=True) if key == "rules" else \
+                        self.pages[key].refresh()
+                except Exception:
+                    pass
 
     def check_pending_settings(self):
         if self.shutting_down:
@@ -1746,27 +1802,8 @@ class BreakTimerApp:
 
         ttk.Separator(page, orient="horizontal", style="UI.TSeparator").pack(fill="x", padx=26)
 
-        cnt_fr = tk.Frame(page, bg=card, highlightbackground=COLORS["border"], highlightthickness=1)
-        cnt_fr.pack(padx=26, pady=(16, 10), fill="x")
-        cin = tk.Frame(cnt_fr, bg=card)
-        cin.pack(padx=22, pady=12, fill="x")
-        tk.Label(
-            cin, text=tr("卸载次数"), bg=card, fg=COLORS["text_dim"],
-            font=config.font("body")
-        ).pack(anchor="w")
-        self.uni_lbl_count = tk.Label(
-            cin, text="0", bg=card, fg=COLORS["text"],
-            font=config.font("big", bold=True), anchor="w"
-        )
-        self.uni_lbl_count.pack(anchor="w")
-        self.uni_lbl_last = tk.Label(
-            cin, text="", bg=card, fg=COLORS["text_dim"],
-            font=config.font("small"), anchor="w"
-        )
-        self.uni_lbl_last.pack(anchor="w")
-
         warn_fr = tk.Frame(page, bg=COLORS["danger_bg"], highlightbackground=danger, highlightthickness=1)
-        warn_fr.pack(padx=26, pady=(0, 10), fill="x")
+        warn_fr.pack(padx=26, pady=(16, 10), fill="x")
         tk.Label(
             warn_fr, text=tr("⚠  警告:这会永久删除全部数据"),
             bg=COLORS["danger_bg"], fg=danger, font=config.font("body", bold=True),
@@ -1775,13 +1812,10 @@ class BreakTimerApp:
         tk.Label(
             warn_fr, justify="left", anchor="w", bg=COLORS["danger_bg"], fg=COLORS["text"],
             font=config.font("small"),
-            text=(
-                "• Study history, calendar, hour log, network quota, request log\n"
-                "  and settings changes are deleted.\n"
-                "• Network is restored immediately (physical adapters re-enabled).\n"
-                "• An unfinished focus session is NOT recorded.\n"
-                "• Only this counter is kept. It cannot be undone."
-            )
+            text=tr("• 学习记录、日历、整点记录、统计、联网额度与日志、名单、设置等全部删除,不留任何记录.\n"
+                    "• 立即恢复网络(重新启用网卡,还原系统代理).\n"
+                    "• 进行中的专注不会被记录.\n"
+                    "• 无法撤销.下次打开时会像第一次安装一样,重新开始配置期.")
         ).pack(fill="x", padx=16, pady=(0, 10))
 
         form = tk.Frame(page, bg=bg)
@@ -1807,11 +1841,6 @@ class BreakTimerApp:
 
     def refresh_uninstall(self):
         self.var_confirm.set("")
-        self.uni_lbl_count.config(text=str(self.dm.uninstall_count))
-        self.uni_lbl_last.config(
-            text=tr("上次卸载: {when}").format(when=self.dm.uninstall_last)
-            if self.dm.uninstall_last else tr("从未卸载过.")
-        )
 
     def on_uninstall(self):
         if self.var_confirm.get().strip() != "UNINSTALL":
@@ -1828,10 +1857,6 @@ class BreakTimerApp:
         self._cancel_jobs()
         self.net.release()
 
-        self.dm.uninstall_count += 1
-        self.dm.uninstall_last = datetime.now().strftime('%Y-%m-%d %H:%M')
-        self.dm.save_uninstall_count()
-
         self.dm.erase_all_data()
 
         removed_self = False
@@ -1844,8 +1869,7 @@ class BreakTimerApp:
                 pass
 
         toast.info(
-            tr("全部数据已清除,网络已恢复.\n累计卸载次数: {n}").format(
-                n=self.dm.uninstall_count)
+            tr("全部数据已清除,网络已恢复.")
             + ("" if not self.var_del_self.get() else
                (tr("\n程序文件已删除.") if removed_self else
                 tr("\n无法删除程序文件,请手动移除.")))
