@@ -104,6 +104,10 @@ class BreakTimerApp:
         self.idle_since = None        # 休息结束、回到空闲的时刻 (提醒用)
         self._nudges = 0              # 这段空闲里已经到点的提醒次数
         self._nudge_win = None
+        self._bonus_clicks = 0        # 小按钮连点计数
+        self._bonus_first = 0.0
+        self._bonus_job = None
+        self._timer_extra = None
         self.last_t_minutes = 0.0
         self.countdown_seconds = 0
         self.update_job = None
@@ -608,7 +612,8 @@ class BreakTimerApp:
 
         self.lbl_sub = tk.Label(
             inner, text=self._idle_sub_text(),
-            bg=card, fg=COLORS["text_dim"], font=config.font("body"), anchor="w"
+            bg=card, fg=COLORS["text_dim"], font=config.font("body"), anchor="w",
+            justify="left"
         )
         self.lbl_sub.pack(anchor="w")
 
@@ -627,11 +632,23 @@ class BreakTimerApp:
 
         btn_row = tk.Frame(body, bg=bg)
         btn_row.pack(fill="x", padx=26, pady=(6, 22))
+        btns = tk.Frame(btn_row, bg=bg)
+        btns.pack()
         self.btn_action = ttk.Button(
-            btn_row, text=tr("▶  开始"), style="Accent.TButton",
+            btns, text=tr("▶  开始专注"), style="Accent.TButton",
             command=self.on_action
         )
-        self.btn_action.pack(ipadx=10)
+        self.btn_action.pack(side="left", ipadx=10)
+        self.btn_break = ttk.Button(
+            btns, text=tr("☕  开始休息"), command=self.on_break_button
+        )
+        self.btn_break.pack(side="left", ipadx=10, padx=(10, 0))
+
+        # 连点按钮: 1 分钟内连点 10 次, 换 20 分钟休息时间 (每周最多 2 小时)
+        self.lbl_bonus = ttk.Button(btns, text="", command=self._on_bonus_click)
+        self.lbl_bonus.pack(side="left", padx=(24, 0))
+        self._bonus_show(self._bonus_idle_text())
+        self._sync_timer_buttons()
 
         self._set_dot(COLORS["text_dim"])
 
@@ -643,13 +660,15 @@ class BreakTimerApp:
         self._set_dot(dot_color)
 
     def on_action(self):
+        """主按钮: 空闲 → 开始专注; 专注中 → 结束专注 (直接进入休息);
+        休息中 → 暂停休息并马上开始专注."""
         if self.state == IDLE:
             self.start_mono = time.monotonic()
             self.start_wall = datetime.now()
             self.state = RUNNING
-            self.btn_action.config(text=tr("■  结束"))
             self._status(tr("专注中…"), COLORS["accent"])
-            self.lbl_sub.config(text=tr("计时中 —— 结束时按 [结束]."))
+            self.lbl_sub.config(text=tr("计时中 —— 结束时按 [结束专注]."))
+            self._sync_timer_buttons()
             self.schedule_update()
 
         elif self.state == RUNNING:
@@ -669,7 +688,134 @@ class BreakTimerApp:
             self._start_break()
 
         elif self.state == ON_BREAK:
+            if self._break_locked():
+                toast.warn(tr("网络正在使用,不能暂停休息."))
+                return
             self.end_break_early()
+            if self.state == IDLE:
+                self.on_action()
+
+    def on_break_button(self):
+        """副按钮: 空闲 → 用积攒的休息时间直接开始休息; 休息中 → 暂停休息."""
+        if self.state == IDLE:
+            if self.break_carry <= 0:
+                toast.info(tr("还没有积攒的休息时间.先专注一轮吧."))
+                return
+            self.last_t_minutes = 0.0
+            total = int(self.break_carry)
+            self._start_break()
+            if self.state == ON_BREAK:
+                toast.success(tr("开始休息 {t}(用的是积攒的休息时间).").format(t=fmt_ms(total)))
+        elif self.state == ON_BREAK:
+            self.end_break_early()
+
+    def _sync_timer_buttons(self):
+        """按当前状态设置两个按钮的文字与可用状态."""
+        if not hasattr(self, "btn_break"):
+            return
+        locked = self._break_locked()
+        try:
+            if self.state == RUNNING:
+                self.btn_action.config(text=tr("■  结束专注"), state="!disabled")
+                self.btn_break.config(text=tr("☕  开始休息"), state="disabled")
+            elif self.state == ON_BREAK:
+                st = "disabled" if locked else "!disabled"
+                self.btn_action.config(text=tr("▶  开始专注"), state=st)
+                self.btn_break.config(text=tr("⏸  暂停休息"), state=st)
+            elif self.state == READY_BREAK:
+                self.btn_action.config(text=tr("☕  去休息"), state="!disabled")
+                self.btn_break.config(text=tr("☕  开始休息"), state="disabled")
+            else:
+                self.btn_action.config(text=tr("▶  开始专注"), state="!disabled")
+                self.btn_break.config(text=tr("☕  开始休息"),
+                                      state="!disabled" if self.break_carry > 0 else "disabled")
+        except Exception:
+            pass
+
+    # ---- 连点 10 次换休息时间 ----
+
+    def _bonus_state(self) -> dict:
+        d = load_json_file(self.timer_file, {})
+        return d if isinstance(d, dict) else {}
+
+    def _bonus_left_this_week(self, now: datetime = None) -> int:
+        """本周 (周一 0 点起) 还能领多少秒."""
+        now = now or datetime.now()
+        week = "%d-W%02d" % now.isocalendar()[:2]
+        d = self._bonus_state()
+        used = int(d.get("bonus_used", 0) or 0) if d.get("bonus_week") == week else 0
+        return max(0, int(config.BONUS_BREAK_WEEKLY) - used)
+
+    def _on_bonus_click(self):
+        now = time.monotonic()
+        window = float(config.BONUS_BREAK_WINDOW)
+        if self._bonus_clicks == 0 or now - self._bonus_first > window:
+            # 从第一次点击开始计时; 超过 1 分钟还没点满就从头再来
+            self._bonus_clicks = 0
+            self._bonus_first = now
+            if self._bonus_job:
+                try:
+                    self.root.after_cancel(self._bonus_job)
+                except Exception:
+                    pass
+            self._bonus_job = self.root.after(int(window * 1000) + 50, self._bonus_reset)
+        self._bonus_clicks += 1
+        need = int(config.BONUS_BREAK_CLICKS)
+        if self._bonus_clicks < need:
+            self._bonus_show(tr("☕  继续点 {i}/{n}").format(i=self._bonus_clicks, n=need))
+            return
+        self._bonus_reset()
+        self._grant_bonus_break()
+
+    def _bonus_reset(self):
+        self._bonus_clicks = 0
+        if self._bonus_job:
+            try:
+                self.root.after_cancel(self._bonus_job)
+            except Exception:
+                pass
+        self._bonus_job = None
+        self._bonus_show(self._bonus_idle_text())
+
+    def _bonus_idle_text(self) -> str:
+        if self._bonus_left_this_week() <= 0:
+            return tr("☕  本周的休息时间已领完")
+        return tr("☕  累了?连点 {n} 次 +{m} 分钟").format(
+            n=int(config.BONUS_BREAK_CLICKS), m=int(config.BONUS_BREAK_SECONDS) // 60)
+
+    def _bonus_show(self, text: str):
+        try:
+            self.lbl_bonus.config(text=text)
+        except Exception:
+            pass
+
+    def _grant_bonus_break(self):
+        now = datetime.now()
+        left = self._bonus_left_this_week(now)
+        if left <= 0:
+            toast.warn(tr("这一周的 {h} 已经领完了,下周一再来.").format(
+                h=fmt_hm(config.BONUS_BREAK_WEEKLY)))
+            return
+        add = min(int(config.BONUS_BREAK_SECONDS), left)
+        week = "%d-W%02d" % now.isocalendar()[:2]
+        d = self._bonus_state()
+        used = int(d.get("bonus_used", 0) or 0) if d.get("bonus_week") == week else 0
+        self._timer_extra = {"bonus_week": week, "bonus_used": used + add}
+        if self.state == ON_BREAK:
+            self.countdown_seconds += add          # 正在休息: 直接加到这次休息里
+            self._save_timer_state()
+            where = tr("已加到这次休息里.")
+        else:
+            self._set_break_carry(self.break_carry + add)
+            where = tr("已存入积攒的休息时间,可以按 [开始休息] 使用.")
+        msg = tr("获得 {t} 休息时间.").format(t=fmt_ms(add)) + where
+        msg += "\n" + tr("本周还能领 {left}.").format(left=fmt_hm(left - add))
+        msg += "\n\n" + tr("这么想休息,也许是真的累了.注意休息,别硬撑.")
+        toast.success(msg, timeout=10000)
+        if self.state == IDLE:
+            self.lbl_sub.config(text=self._idle_sub_text())
+        self._bonus_show(self._bonus_idle_text())
+        self._sync_timer_buttons()
 
     def _start_break(self, announce: bool = False):
         """开始休息倒计时 = 建议休息时长 + 之前暂停休息结转的时间."""
@@ -703,7 +849,7 @@ class BreakTimerApp:
         return max(1, total) if total > 0 else 0
 
     def _show_ready_break(self):
-        self.btn_action.config(text=tr("☕  去休息"), state="!disabled")
+        self._sync_timer_buttons()
         total = self._break_seconds()
         self.lbl_time.config(text=fmt_ms(total))
         sub = tr("已工作 {m:.2f} 分钟 → 上方是建议休息时长").format(m=self.last_t_minutes)
@@ -713,7 +859,7 @@ class BreakTimerApp:
         self._status(tr("本次专注结束"), COLORS["success"])
 
     def _show_on_break(self):
-        self.btn_action.config(text=tr("⏸  暂停休息"))
+        self._sync_timer_buttons()
         self._status(tr("休息中 ☕"), COLORS["warn"])
         self.lbl_sub.config(text=tr("休息吧,倒计时中…"))
         self._sync_break_lock()
@@ -724,7 +870,7 @@ class BreakTimerApp:
 
     def _sync_break_lock(self):
         if self.state == ON_BREAK:
-            self.btn_action.config(state="disabled" if self._break_locked() else "!disabled")
+            self._sync_timer_buttons()
 
     def end_break_early(self, silent: bool = False):
         """暂停休息(关闭程序也算):剩余时间 ×BREAK_CARRY_RATE 计入下一次休息."""
@@ -800,9 +946,10 @@ class BreakTimerApp:
         return None
 
     def _idle_sub_text(self) -> str:
-        text = tr("开始专注时按 [开始].")
+        text = tr("开始专注时按 [开始专注].")
         if self.break_carry > 0:
-            text += "\n" + tr("下次休息额外 +{c}").format(c=fmt_ms(self.break_carry))
+            text += "\n" + tr("积攒的休息时间 {c}:下次休息时自动加上,也可以按 [开始休息] 直接使用.").format(
+                c=fmt_ms(self.break_carry))
         return text
 
     def _load_break_carry(self) -> int:
@@ -814,13 +961,22 @@ class BreakTimerApp:
 
     def _set_break_carry(self, seconds: int):
         self.break_carry = max(0, int(seconds))
-        if not self.dm.uninstalling:
-            save_json_file(self.timer_file, {"break_carry": self.break_carry})
+        self._save_timer_state()
+
+    def _save_timer_state(self):
+        """timer_state.json: 积攒的休息时间 + 本周连点领取的记录."""
+        if self.dm.uninstalling:
+            return
+        d = self._bonus_state()
+        d.update(getattr(self, "_timer_extra", None) or {})
+        self._timer_extra = None
+        d["break_carry"] = self.break_carry
+        save_json_file(self.timer_file, d)
 
     def _restore_timer_view(self):
         """界面重建 (换语言 / 字号) 后按当前状态恢复计时器页."""
+        self._sync_timer_buttons()
         if self.state == RUNNING:
-            self.btn_action.config(text=tr("■  结束"))
             self._status(tr("专注中…"), COLORS["accent"])
             self.schedule_update()
         elif self.state == READY_BREAK:
@@ -876,7 +1032,7 @@ class BreakTimerApp:
         self.start_wall = None
         self.last_t_minutes = 0.0
         self.countdown_seconds = 0
-        self.btn_action.config(text=tr("▶  开始"), state="!disabled")
+        self._sync_timer_buttons()
         self.lbl_time.config(text="0.00 min")
         self.lbl_sub.config(text=self._idle_sub_text())
         self._status(tr("准备就绪"), COLORS["text_dim"])
