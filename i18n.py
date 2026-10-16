@@ -361,6 +361,16 @@ EN = {
     "专注 {s} 分 · 休息 {b} 分 · 空白 {e} 分": "Focus {s} min · Break {b} min · Idle {e} min",
     "最近 7 天计时器的专注与休息.每根条是一个小时,按比例分成专注、休息与空白;鼠标停在条上可查看分钟数.": "Focus and break time from the timer over the last 7 days. Each bar is one hour, split into focus, break and idle time; hover over a bar to see the minutes.",
     "本次专注 {m:.1f} 分钟,开始休息 {t}.": "Focused for {m:.1f} min; your {t} break starts now.",
+    # ---- 休息时间倍率 / 借贷过多的提醒 ----
+    "休息时间倍率": "Break time multiplier",
+    "计时器给出的建议休息时长乘以这个倍率;之前暂停休息结转的时间不受影响.": "The suggested break length from the timer is multiplied by this; time carried over from paused breaks is not affected.",
+    "⚡ 这一次修改免等待": "⚡ next change is instant",
+    "{label} 已立即生效(这一次免等待已用掉).": "{label} applied immediately (the one-time instant change is now used).",
+    "💳  借得有点多了": "💳  That's a lot of borrowing",
+    "明天的联网额度已经借掉了 {pct} ({used} / {limit}).": "You have already borrowed {pct} of tomorrow's network quota ({used} / {limit}).",
+    "借得这么多,也许是休息不够.不妨在 设置 → 具体设置 里调高「休息时间倍率」.": "Borrowing this much may mean you're not resting enough. Consider raising the \"Break time multiplier\" in Settings → Details.",
+    "另外,下一次修改「每日联网额度」会立即生效,不必等 48 小时.": "Also, your next change to the daily network quota will apply immediately, without the 48-hour wait.",
+    "去设置": "Open settings",
     # ---- Timer: 休息结束后的提醒 ----
     "⏱  该开始下一轮了": "⏱  Time for the next round",
     "休息结束已经 {t} 了,还没有开始下一轮专注.": "Your break ended {t} ago and the next focus round hasn't started yet.",

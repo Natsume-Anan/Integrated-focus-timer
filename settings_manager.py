@@ -71,6 +71,8 @@ SETTINGS_SCHEMA = [
          "今天借 1 分钟额度,明天要扣多少分钟."),
     _num("BREAK_COOLDOWN_RATE", "休息中冷静期倍率", "×", 1, 0, 1, False,
          "休息倒计时中提交的普通申请,若时长不超过剩余休息时间,冷静期乘以这个倍率."),
+    _num("BREAK_TIME_SCALE", "休息时间倍率", "×", 1, 0.1, 5, False,
+         "计时器给出的建议休息时长乘以这个倍率;之前暂停休息结转的时间不受影响."),
     _num("BREAK_CARRY_RATE", "暂停休息结转比例", "×", 1, 0, 1, False,
          "暂停休息(或关闭程序)时,剩余休息时间按这个比例计入下一次休息."),
     _num("FILL_WINDOW", "整点记录补填时限", "min", 60, 1, 1440, True,
@@ -194,6 +196,7 @@ class SettingsManager:
         self.pending = {}
         self.since = {}
         self.changed = {}
+        self.free_next = set()   # 下一次修改免等待的项 (紧急借贷借得太多时给每日联网额度)
         self.load()
         self.promote_due()
         self.apply_to_config()
@@ -217,6 +220,9 @@ class SettingsManager:
             self.since[k] = str(since.get(k) or DEFAULT_SINCE)
             self.changed[k] = bool(changed.get(k))
 
+        free = raw.get("free_next") if isinstance(raw.get("free_next"), list) else []
+        self.free_next = {k for k in free if k in SCHEMA_BY_KEY}
+
         for k, item in pen.items():
             if k not in SCHEMA_BY_KEY or not isinstance(item, dict):
                 continue
@@ -234,6 +240,7 @@ class SettingsManager:
             "effective": self.effective,
             "since": self.since,
             "changed": dict(self.changed),
+            "free_next": sorted(self.free_next),
             "pending": {
                 k: {
                     "value": v["value"],
@@ -372,6 +379,18 @@ class SettingsManager:
             return "nochange", tr("{label} 与当前生效值相同.", label=tr(spec['label']))
 
         now = self._now()
+        if key in self.free_next:
+            # 一次性的免等待 (紧急借贷借掉明天额度一半以上时给的), 用掉就没了
+            self.free_next.discard(key)
+            self.effective[key] = value
+            self.since[key] = f"{now:%Y-%m-%d %H:%M}"
+            self.changed[key] = True
+            self.pending.pop(key, None)
+            self.save()
+            self.apply_to_config()
+            return "instant", tr("{label} 已立即生效(这一次免等待已用掉).",
+                                 label=tr(spec['label']))
+
         if first_change:
 
             self.effective[key] = value
@@ -428,9 +447,17 @@ class SettingsManager:
             return str(text).strip()
         return self._coerce(key, x * spec["scale"])
 
+    def grant_free_change(self, key: str) -> bool:
+        """给某一项一次"下一次修改免等待". 已经有了就不重复给, 返回是否新给了."""
+        if key not in SCHEMA_BY_KEY or key in self.free_next:
+            return False
+        self.free_next.add(key)
+        self.save()
+        return True
+
     def wait_tag(self, key: str) -> str:
         """修改这一项是否需要等待: 'instant' 即时生效 / 'first' 首次修改免等待 /
-        'dev' 开发者模式下即时 / '' 需要等待."""
+        'free' 这一次免等待 / 'dev' 开发者模式下即时 / '' 需要等待."""
         spec = SCHEMA_BY_KEY.get(key) or {}
         if spec.get("apply") == APPLY_INSTANT:
             return "instant"
@@ -438,6 +465,8 @@ class SettingsManager:
             return "dev"
         if not self.ever_changed(key):
             return "first"
+        if key in self.free_next:
+            return "free"
         return ""
 
     def staged_apply_text(self, key: str) -> str:

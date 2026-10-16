@@ -29,6 +29,10 @@ QUICK_MULTIPLIER = 2.0       # 快速访问: 免冷静期, 每联网 1 秒消耗
 LOAN_RATE = 2.0              # 紧急借贷: 今日额度 +1 秒, 明天额度 -2 秒
 BREAK_COOLDOWN_RATE = 0.4    # 休息中提交的普通申请(时长不超过剩余休息): 冷静期 ×0.4
 BREAK_CARRY_RATE = 0.8       # 暂停休息(含关闭程序): 剩余休息时间 ×0.8 计入下一次休息
+BREAK_TIME_SCALE = 1.0       # 休息时间倍率: 建议休息时长 F(t) 再乘以它
+
+# 紧急借贷借掉明天额度的这个比例以上时: 提醒增加休息时间, 并让下一次修改每日联网额度免等待
+LOAN_WARN_SHARE = 0.5
 
 # 休息结束后迟迟不开始下一轮: 结束后 IDLE_NUDGE_FIRST 秒弹出提醒,
 # 之后仍是空闲就每隔 IDLE_NUDGE_EVERY 秒再试一次 (提醒窗还开着就不重复弹)
@@ -174,6 +178,7 @@ DEFAULT_SETTINGS = {
     "LOAN_RATE": LOAN_RATE,
     "BREAK_COOLDOWN_RATE": BREAK_COOLDOWN_RATE,
     "BREAK_CARRY_RATE": BREAK_CARRY_RATE,
+    "BREAK_TIME_SCALE": BREAK_TIME_SCALE,
     "QUOTA_MULT_MON": QUOTA_MULT_MON,
     "QUOTA_MULT_TUE": QUOTA_MULT_TUE,
     "QUOTA_MULT_WED": QUOTA_MULT_WED,

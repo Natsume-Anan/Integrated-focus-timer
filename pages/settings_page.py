@@ -158,6 +158,8 @@ class SettingsPage(tk.Frame):
             return tr("⚡ 即时生效"), COLORS["success"]
         if tag == "first":
             return tr("⚡ 首次修改免等待"), COLORS["success"]
+        if tag == "free":
+            return tr("⚡ 这一次修改免等待"), COLORS["success"]
         if tag == "dev":
             return tr("⚡ 开发者模式: 即时"), COLORS["warn"]
         return "", COLORS["text_dim"]

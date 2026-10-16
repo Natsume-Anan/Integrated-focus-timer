@@ -697,7 +697,7 @@ class BreakTimerApp:
 
     def _break_seconds(self) -> int:
         """本次休息总秒数 = 建议休息时长 + 结余."""
-        fval = max(0.0, compute_F(self.last_t_minutes))
+        fval = max(0.0, compute_F(self.last_t_minutes)) * float(config.BREAK_TIME_SCALE)
         base = int(round(fval * 60.0))
         total = base + int(self.break_carry)
         return max(1, total) if total > 0 else 0
@@ -843,7 +843,7 @@ class BreakTimerApp:
             elapsed = time.monotonic() - self.start_mono
             cur_m = elapsed / 60.0
             self.lbl_time.config(text=f"{cur_m:.2f} min")
-            rem = compute_F(cur_m)
+            rem = compute_F(cur_m) * float(config.BREAK_TIME_SCALE)
             if rem > 0:
                 self.lbl_sub.config(text=tr("预计停止时的休息时长:  {m:.2f} 分钟").format(m=rem))
             else:
@@ -1287,6 +1287,7 @@ class BreakTimerApp:
             title=tr("紧急借贷"), danger=True
         ):
             return
+        before = self.net.tomorrow_used
         ok, msg = self.net.borrow(minutes, reason)
         if not ok:
             toast.warn(tr(msg))
@@ -1294,6 +1295,38 @@ class BreakTimerApp:
         self.var_reason.set("")
         toast.success(tr("今天额度 +{add}.").format(add=fmt_hm(minutes * 60)))
         self.refresh_net(force=True)
+        self._check_heavy_loan(before)
+
+    def _check_heavy_loan(self, before: float):
+        """借贷借掉明天额度的 LOAN_WARN_SHARE (默认一半) 以上: 提醒增加休息时间,
+        并让下一次修改「每日联网额度」立即生效. 每天只在刚越过这条线时触发一次."""
+        limit = self.net.tomorrow_limit
+        if limit <= 0:
+            return
+        line = limit * float(config.LOAN_WARN_SHARE)
+        after = self.net.tomorrow_used
+        if not (before < line <= after):
+            return
+        granted = self.settings.grant_free_change("DAILY_LIMIT")
+        if granted:
+            self._log_notice("DAILY_LIMIT next change free — loan took "
+                             f"{after / limit:.0%} of tomorrow's quota")
+            self.update_settings_badge()
+            if "settings" in self.pages:
+                self.pages["settings"].refresh()
+        msg = tr("明天的联网额度已经借掉了 {pct} ({used} / {limit}).").format(
+            pct=f"{after / limit:.0%}", used=fmt_hm(after), limit=fmt_hm(limit))
+        msg += "\n\n" + tr("借得这么多,也许是休息不够.不妨在 设置 → 具体设置 里调高「休息时间倍率」.")
+        msg += "\n\n" + tr("另外,下一次修改「每日联网额度」会立即生效,不必等 48 小时.")
+        toast.notice(tr("💳  借得有点多了"), msg, [
+            (tr("去设置"), self._open_detail_settings, True), (tr("知道了"), None, False)])
+
+    def _open_detail_settings(self):
+        self.show_page("settings")
+        try:
+            self.pages["settings"].show_tab("detail")
+        except Exception:
+            pass
 
     def _read_net_form(self):
         try:
