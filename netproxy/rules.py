@@ -7,10 +7,8 @@
     白名单模式   默认拦截,离线时只放行白名单;联网会话中全部放行(联网申请就是为了解除限制)
 
 名单改动的等待规则(黑 / 白名单相同):
-    某个网站 / 应用第一次加入某张名单 → 立即生效;
-    其余改动 —— 曾经在这张名单里、删掉后再次加入,以及任何删除 —— 都要等
-    CHANGE_DELAY_HOURS 小时才生效.
-「曾经加入过」记在 history 里,删除后也不会忘.开发者模式下一切改动立即生效.
+    任何加入和删除都要等 CHANGE_DELAY_HOURS 小时才生效.
+    dev_getter() 为真时(开发者模式 / 配置期)一切改动立即生效.
 
 本模块不依赖 tkinter / config,可以单独测试.
 """
@@ -106,10 +104,9 @@ class RuleStore:
         self.template = template
         self.delay = timedelta(hours=delay_hours)
         self._now = now or datetime.now
-        self.dev_getter = lambda: False          # 开发者模式:改动不用等
+        self.dev_getter = lambda: False          # 开发者模式 / 配置期:改动不用等
         self._lock = threading.RLock()
         self.lists = {k: [] for k in LIST_KEYS}
-        self.history = {k: set() for k in LIST_KEYS}   # 每张名单里出现过的条目
         self.pending = []
         self.created = None
         self.version = 0
@@ -148,13 +145,6 @@ class RuleStore:
                 continue
             if op in ("add", "remove") and key in LIST_KEYS and item:
                 self.pending.append({"op": op, "list": key, "item": item, "apply_at": at})
-        hist = raw.get("history") if isinstance(raw.get("history"), dict) else {}
-        for k in LIST_KEYS:
-            seen = {normalize(k, x) for x in (hist.get(k) or [])}
-            seen.update(self.lists[k])
-            seen.update(p["item"] for p in self.pending if p["list"] == k)
-            seen.discard("")
-            self.history[k] = seen
         try:
             self.created = datetime.fromisoformat(raw["created"])
         except Exception:
@@ -178,7 +168,6 @@ class RuleStore:
             "created": (self.created.isoformat(timespec="seconds")
                         if self.created else None),
             "lists": self.lists,
-            "history": {k: sorted(v) for k, v in self.history.items()},
             "pending": [
                 {"op": p["op"], "list": p["list"], "item": p["item"],
                  "apply_at": p["apply_at"].isoformat(timespec="seconds")}
@@ -204,11 +193,6 @@ class RuleStore:
 
     def items(self, key: str) -> list:
         return list(self._snap[key])
-
-    def is_new(self, key: str, raw) -> bool:
-        """这一项从没进过这张名单 → 加入时立即生效."""
-        item = normalize(key, raw)
-        return bool(item) and item not in self.history[key]
 
     def _find_pending(self, op, key, item):
         for i, p in enumerate(self.pending):
@@ -237,7 +221,8 @@ class RuleStore:
 
     def add(self, key: str, raw):
         """返回 (status, item).
-        status: applied 立即生效 / staged 进入等待 / cancelled 取消了排队中的删除 /
+        status: applied 立即生效(仅开发者模式 / 配置期) / staged 进入等待 /
+                cancelled 取消了排队中的删除 /
                 exists 已在名单里 / invalid 格式不对"""
         item = normalize(key, raw)
         if not item:
@@ -252,18 +237,17 @@ class RuleStore:
                 return "exists", item
             if self._find_pending("add", key, item) >= 0:
                 return "staged", item
-            if item in self.history[key] and not self.dev_getter():
+            if not self.dev_getter():
                 self._stage("add", key, item)
                 return "staged", item
             self.lists[key].append(item)
-            self.history[key].add(item)
             self._save()
             self._rebuild()
             return "applied", item
 
     def remove(self, key: str, raw):
         """返回 (status, item).
-        status: applied 立即生效(仅开发者模式) / staged 进入等待 /
+        status: applied 立即生效(仅开发者模式 / 配置期) / staged 进入等待 /
                 cancelled 取消了排队中的加入 / missing 名单里没有 / invalid"""
         item = normalize(key, raw)
         if not item:
@@ -306,7 +290,6 @@ class RuleStore:
                 lst = self.lists[p["list"]]
                 if p["op"] == "add" and p["item"] not in lst:
                     lst.append(p["item"])
-                    self.history[p["list"]].add(p["item"])
                 elif p["op"] == "remove" and p["item"] in lst:
                     lst.remove(p["item"])
             self._save()
@@ -354,8 +337,10 @@ def _selftest():
     clock = [datetime(2026, 1, 1, 12, 0)]
     path = os.path.join(tempfile.mkdtemp(), "r.json")
     rs = RuleStore(path, now=lambda: clock[0])
+    instant = [True]
+    rs.dev_getter = lambda: instant[0]
 
-    # 第一次加入: 黑白名单都立即生效
+    # 配置期内: 加入立即生效
     assert rs.add(WHITE_DOMAINS, "school.edu.cn")[0] == "applied"
     assert rs.add(WHITE_DOMAINS, "school.edu.cn")[0] == "exists"
     assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "applied"
@@ -363,6 +348,7 @@ def _selftest():
     assert rs.add(WHITE_APPS, "code.exe")[0] == "applied"
     assert rs.add(WHITE_DOMAINS, "???")[0] == "invalid"
     assert not rs.pending
+    instant[0] = False
 
     def d(host, exe, online):                       # 黑名单模式
         return rs.decide(host, exe, online, MODE_BLACKLIST)
@@ -403,47 +389,50 @@ def _selftest():
     # 等待中再加回 = 取消排队中的删除
     assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "cancelled"
     assert len(rs.pending) == 1
-    # 删掉之后再次加入: 要等
+    # 加入也一律要等, 包括从没加入过的新条目
+    assert rs.add(BLACK_APPS, "qq.exe")[0] == "staged", "新条目加入也要等"
+    assert "qq.exe" not in rs.items(BLACK_APPS)
+    assert rs.add(BLACK_APPS, "qq.exe")[0] == "staged", "重复加入不重复排队"
+    assert len(rs.pending) == 2
+    assert rs.remove(BLACK_APPS, "qq.exe")[0] == "cancelled", "删掉排队中的加入 = 取消"
+    assert len(rs.pending) == 1
     clock[0] += timedelta(hours=49)
     assert len(rs.promote_due()) == 1 and "code.exe" not in rs.items(WHITE_APPS)
-    assert not rs.is_new(WHITE_APPS, "code") and rs.is_new(WHITE_APPS, "new.exe")
-    assert rs.add(WHITE_APPS, "code.exe")[0] == "staged", "曾经加入过的再次加入要等"
     assert rs.add(WHITE_APPS, "code.exe")[0] == "staged"
-    assert rs.remove(WHITE_APPS, "code.exe")[0] == "cancelled", "删掉排队中的加入 = 取消"
+    assert rs.remove(WHITE_APPS, "code.exe")[0] == "cancelled"
     assert not rs.pending
-    assert rs.add(BLACK_APPS, "qq.exe")[0] == "applied", "新条目立即生效(包括收紧)"
     assert rs.remove(WHITE_DOMAINS, "nothere.com")[0] == "missing"
 
-    # history 写进文件, 重新读取后仍然记得
-    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "applied"
-    assert rs.remove(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
+    # 排队写进文件, 重新读取后照样按时生效
+    assert rs.add(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
     rs2 = RuleStore(path, now=lambda: clock[0])
-    assert len(rs2.pending) == 1 and rs2.items(BLACK_APPS) == ["steam.exe", "qq.exe"]
+    assert len(rs2.pending) == 1 and "wikipedia.org" not in rs2.items(WHITE_DOMAINS)
     clock[0] += timedelta(hours=47)
     assert rs2.promote_due() == []
     clock[0] += timedelta(hours=2)
-    assert len(rs2.promote_due()) == 1
+    assert len(rs2.promote_due()) == 1 and "wikipedia.org" in rs2.items(WHITE_DOMAINS)
     rs3 = RuleStore(path, now=lambda: clock[0])
-    assert rs3.add(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
+    assert rs3.remove(WHITE_DOMAINS, "wikipedia.org")[0] == "staged"
     assert rs3.cancel_pending(0) and not rs3.pending
 
-    # 旧格式文件(没有 history): 当前名单里的条目算作已加入过
+    # 旧格式文件里的 history 直接忽略, 不影响读取
     old = os.path.join(tempfile.mkdtemp(), "old.json")
     with open(old, "w", encoding="utf-8") as f:
-        json.dump({"lists": {BLACK_DOMAINS: ["a.com"]}, "pending": []}, f)
+        json.dump({"lists": {BLACK_DOMAINS: ["a.com"]}, "pending": [],
+                   "history": {BLACK_DOMAINS: ["a.com", "b.com"]}}, f)
     rs4 = RuleStore(old, now=lambda: clock[0])
-    assert not rs4.is_new(BLACK_DOMAINS, "a.com") and rs4.is_new(BLACK_DOMAINS, "b.com")
+    assert rs4.items(BLACK_DOMAINS) == ["a.com"]
+    assert rs4.add(BLACK_DOMAINS, "c.com")[0] == "staged"
 
-    # 开发者模式: 一切改动立即生效, 排队中的也立即生效
+    # 开发者模式 / 配置期: 一切改动立即生效, 排队中的也立即生效
     dev = [False]
     rs5 = RuleStore(os.path.join(tempfile.mkdtemp(), "d.json"), now=lambda: clock[0])
     rs5.dev_getter = lambda: dev[0]
-    rs5.add(BLACK_DOMAINS, "x.com")
-    assert rs5.remove(BLACK_DOMAINS, "x.com")[0] == "staged"
+    assert rs5.add(BLACK_DOMAINS, "x.com")[0] == "staged"
     dev[0] = True
-    assert rs5.promote_due() and not rs5.pending
-    assert rs5.add(BLACK_DOMAINS, "x.com")[0] == "applied"
+    assert rs5.promote_due() and not rs5.pending and rs5.items(BLACK_DOMAINS) == ["x.com"]
     assert rs5.remove(BLACK_DOMAINS, "x.com")[0] == "applied"
+    assert rs5.add(BLACK_DOMAINS, "y.com")[0] == "applied"
     return "netproxy.rules selftest OK"
 
 

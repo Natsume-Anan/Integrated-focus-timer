@@ -388,7 +388,7 @@ class RulesPage(tk.Frame):
             cfg(self.lbl_setup, text=tr("开发者模式:名单改动立即生效."))
         else:
             cfg(self.lbl_setup, text=tr(
-                "第一次加入名单的网站 / 应用立即生效;删除,以及删掉后再次加入,都要等 48 小时."))
+                "名单的所有改动 (加入和删除) 都要等 48 小时才生效."))
 
         seq = (c.event_seq, sum(e["count"] for e in c.events))
         if force or self._shown.get("_events") != seq:

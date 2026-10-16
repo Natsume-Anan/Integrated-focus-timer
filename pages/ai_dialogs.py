@@ -338,7 +338,8 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
                     line += "   " + tr("(推荐,不在本机记录中)")
             lb.insert("end", line)
         lb.select_set(0, "end")
-        hint = tr("第一次加入名单的条目立即生效;曾经加入过又删掉的,再次加入要等冷静期.")
+        hint = (tr("配置期内:名单的所有改动立即生效.") if config.changes_instant()
+                else tr("加入名单要等 48 小时的冷静期才生效."))
         _label(fr, hint, dim=True, small=True).pack(fill="x")
 
         def adopt():
@@ -348,7 +349,7 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
                 return
             statuses = [rules.add(items[i][0], items[i][1]["item"])[0] for i in picked]
             if "staged" in statuses:
-                toast.info(tr("已提交;其中曾经加入过的条目要等冷静期后生效."))
+                toast.info(tr("已提交,要等 48 小时的冷静期后生效."))
             elif "applied" in statuses:
                 toast.success(tr("已加入名单."))
             else:

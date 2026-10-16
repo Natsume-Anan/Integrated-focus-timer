@@ -108,6 +108,7 @@ def run():
     echo, echo_port = _serve_once(_echo)
 
     rules = RuleStore(os.path.join(tempfile.mkdtemp(), "r.json"))
+    rules.dev_getter = lambda: True                    # 测试里名单改动立即生效
     rules.add(WHITE_DOMAINS, "school.example")
     rules.add(BLACK_DOMAINS, "bad.example")
     state = {"online": False, "mode": "whitelist"}
