@@ -645,8 +645,9 @@ class BreakTimerApp:
         self.btn_break.pack(side="left", ipadx=10, padx=(10, 0))
 
         # 连点按钮: 1 分钟内连点 10 次, 换 20 分钟休息时间 (每周最多 2 小时)
-        self.lbl_bonus = ttk.Button(btns, text="", command=self._on_bonus_click)
-        self.lbl_bonus.pack(side="left", padx=(24, 0))
+        self.lbl_bonus = ttk.Button(btns, text="", style="Danger.TButton",
+                                    command=self._on_bonus_click)
+        self.lbl_bonus.pack(side="left", ipadx=10, padx=(24, 0))
         self._bonus_show(self._bonus_idle_text())
         self._sync_timer_buttons()
 
@@ -762,7 +763,7 @@ class BreakTimerApp:
         self._bonus_clicks += 1
         need = int(config.BONUS_BREAK_CLICKS)
         if self._bonus_clicks < need:
-            self._bonus_show(tr("☕  继续点 {i}/{n}").format(i=self._bonus_clicks, n=need))
+            self._bonus_show(tr("☕  我累了") + f"  ({self._bonus_clicks})")
             return
         self._bonus_reset()
         self._grant_bonus_break()
@@ -779,9 +780,8 @@ class BreakTimerApp:
 
     def _bonus_idle_text(self) -> str:
         if self._bonus_left_this_week() <= 0:
-            return tr("☕  本周的休息时间已领完")
-        return tr("☕  累了?连点 {n} 次 +{m} 分钟").format(
-            n=int(config.BONUS_BREAK_CLICKS), m=int(config.BONUS_BREAK_SECONDS) // 60)
+            return tr("☕  本周已领完")
+        return tr("☕  我累了")
 
     def _bonus_show(self, text: str):
         try:
