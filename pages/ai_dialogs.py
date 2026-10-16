@@ -101,7 +101,7 @@ def open_model_settings(parent, cfg: "ai_assist.AIConfig") -> bool:
                           if k == "custom"
                           else tr("已自动填入 {name} 的 Base URL,型号可自行修改.")
                           ).format(name=_provider_label(k)) + "\n" +
-                 tr("API Key 以明文保存在本机应用数据目录,不会随名单或日志输出."))
+                 tr("API Key 加密后保存在本机,只有当前 Windows 账户能解开;只经 https 发往所选服务商,不会随名单或日志输出."))
         state["cur"] = k
 
     def on_provider(_e=None):

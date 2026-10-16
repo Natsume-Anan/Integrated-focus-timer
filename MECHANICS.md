@@ -229,7 +229,13 @@
 - 采集内容: 已安装的应用 (开始菜单和注册表, 最多 120 个), 以及浏览器访问记录中的**域名和访问次数** (不读具体网址, 页面标题或搜索词).
   支持 Chrome / Edge / Firefox / Brave. 回看天数可选 30 / 90 / 365 天, 默认 90 天. 每个浏览器最多取 25 个域名, 合计最多 50 个.
 - 采集到的内容只在内存里, 不写文件.
-- 可选服务商: Claude / ChatGPT / DeepSeek / 自定义, 默认 DeepSeek. API Key 需要自己填写, 以明文保存在数据目录的 `ai_config.json`.
+- 可选服务商: Claude / ChatGPT / DeepSeek / 自定义, 默认 DeepSeek. API Key 需要自己填写, 保存在数据目录的 `ai_config.json`.
+- **API Key 的保护**:
+  - 存盘前用 Windows 自带的 DPAPI 加密, 只有当前 Windows 账户能解开; 文件被拷到别的电脑或别的账户下也读不出 (那时 Key 显示为空, 需要重新填).
+  - 旧版本以明文保存的 Key, 程序下次打开 AI 设置时自动改存为加密.
+  - 预设服务商 (Claude / ChatGPT / DeepSeek) 的 Key 只会发往它们的官方地址 (`api.anthropic.com` / `api.openai.com` / `api.deepseek.com`). 要用中转等其他地址, 请选"自定义供应商".
+  - 只走 https (本机模型可用 http://localhost). 服务商要求跳转时一律拒绝, 不把 Key 带到别的地址.
+  - 服务商的报错里如果回显了 Key, 显示前会抹成 `***`. Key 不写进任何日志.
 - 每次请求最多返回 1500 tokens, 超时 90 秒. 每类建议最多 30 条; 白名单模式下, 记录以外的推荐网站最多 12 个.
 - 黑名单模式下, 模型不给理由, 只给条目.
 - AI 请求同样走系统代理. 过滤代理正在拦截时, 服务商的域名不在白名单里, 请求就会被拦下. 这是有意的设计.
@@ -365,7 +371,7 @@ Timer 页有两个按钮, 文字随状态变化:
 | `hour_log.json` | 整点记录内容 | 本月 + 上月 |
 | `focus_log.json` | 每一段专注 / 休息的起止时刻 | 最近 7 天 |
 | `timer_state.json` | 积攒的休息时间, 本周连点领取了多少 | 永久 |
-| `ai_config.json` | AI 服务商配置 (含 API Key, 明文) | 永久 |
+| `ai_config.json` | AI 服务商配置 (API Key 用 DPAPI 加密保存) | 永久 |
 | `sysproxy_backup.json` | 启用 Proxy 前的系统代理设置 | 还原后删除 |
 | `chime.wav` | 内置提示音 (自动生成) | 永久 |
 | `net_requests.log` | 联网申请 / 开始 / 结束 / 借贷的流水 | 只追加, 不清理 |

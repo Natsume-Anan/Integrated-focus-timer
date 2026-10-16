@@ -8,7 +8,10 @@ AI 名单建议:接入模型 + 黑 / 白名单两套提示词
 
 隐私 / 行为约定(改这个文件前请先读):
   · 本模块只在被调用时联网,且只向用户选定的那一个服务商发一次请求;不写日志,不缓存上下文;
-  · 只持久化「服务商配置」(含 API Key,明文存在应用数据目录,和其它设置同级),不存采集内容;
+  · 只持久化「服务商配置」,不存采集内容. API Key 的保护 (见下方「API Key 保护」):
+      - 存盘前用 Windows DPAPI 加密, 只有当前 Windows 账户能解开, 文件被拷走也读不出;
+      - 预设服务商的 Key 只发往它自己的官方域名; 只走 https (本机模型除外);
+      - 不跟随重定向 (重定向会把 Key 带到别的地址); 错误信息里出现 Key 时抹掉;
   · 黑名单模式:模型**不解释理由**.这一点在两层保证 —— 提示词要求不写,
     解析器也只保留条目本身,丢弃模型返回的所有说明文字;界面因此无从展示评价;
   · 模型的输出永远只是「候选」,从不自动写入名单;写入走 RuleStore,照样遵守名单的等待规则;
@@ -16,9 +19,11 @@ AI 名单建议:接入模型 + 黑 / 白名单两套提示词
     这是预期行为(不会因为 AI 功能给自己开后门),错误提示里会说明.
 """
 
+import base64
 import json
 import os
 import re
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -80,6 +85,86 @@ class AIError(Exception):
         self.message = message
 
 
+# ══════════════ API Key 保护 ══════════════
+# 存盘: Windows DPAPI (CryptProtectData), 绑定当前 Windows 账户. 只用标准库 ctypes.
+_DPAPI_ENTROPY = b"OIT ai_config api_key"
+_ENC_PREFIX = "dpapi:"
+
+
+def _dpapi(data: bytes, protect: bool) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    class _Blob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    def blob(b: bytes):
+        buf = ctypes.create_string_buffer(b, len(b))
+        return _Blob(len(b), ctypes.cast(buf, ctypes.POINTER(ctypes.c_char))), buf
+
+    src, _keep1 = blob(data)
+    ent, _keep2 = blob(_DPAPI_ENTROPY)
+    out = _Blob()
+    crypt32 = ctypes.windll.crypt32
+    fn = crypt32.CryptProtectData if protect else crypt32.CryptUnprotectData
+    # CRYPTPROTECT_UI_FORBIDDEN = 0x1
+    if not fn(ctypes.byref(src), None, ctypes.byref(ent), None, None, 0x1, ctypes.byref(out)):
+        raise OSError("DPAPI failed")
+    try:
+        return ctypes.string_at(out.pbData, out.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(ctypes.cast(out.pbData, ctypes.c_void_p))
+
+
+def can_encrypt() -> bool:
+    return sys.platform == "win32"
+
+
+def encrypt_key(key: str) -> str:
+    """明文 Key → 'dpapi:...' ; 空 Key 原样返回 ''. 不能加密时抛 OSError."""
+    if not key:
+        return ""
+    if not can_encrypt():
+        raise OSError("DPAPI not available")
+    return _ENC_PREFIX + base64.b64encode(_dpapi(key.encode("utf-8"), True)).decode("ascii")
+
+
+def decrypt_key(text: str) -> str:
+    """'dpapi:...' → 明文 Key. 解不开 (换了电脑 / 换了账户) 时返回 ''."""
+    if not text or not text.startswith(_ENC_PREFIX):
+        return ""
+    try:
+        raw = base64.b64decode(text[len(_ENC_PREFIX):])
+        return _dpapi(raw, False).decode("utf-8")
+    except Exception:
+        return ""
+
+
+def official_host(provider: str) -> str:
+    """预设服务商的官方域名; custom 返回 ''."""
+    url = (PROVIDERS.get(provider) or {}).get("base_url") or ""
+    return (urllib.parse.urlsplit(url).hostname or "").lower()
+
+
+def redact(text: str, key: str) -> str:
+    """把错误信息里出现的 Key 抹掉 (有的服务商会在报错里回显 Key)."""
+    key = (key or "").strip()
+    if key and len(key) >= 6 and text:
+        text = text.replace(key, "***")
+    return text
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不跟随重定向: urllib 默认会把 Authorization / x-api-key 一起带到新地址."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code,
+                                     "redirect blocked to protect the API key", headers, fp)
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
 # ══════════════ 配置 ══════════════
 def default_profile(provider: str) -> dict:
     p = PROVIDERS.get(provider, PROVIDERS["custom"])
@@ -99,7 +184,10 @@ class AIConfig:
         self.template = template
         self.provider = "claude"
         self.profiles = {k: default_profile(k) for k in PROVIDER_ORDER}
+        self.needs_migration = False
         self.load()
+        if self.needs_migration and can_encrypt():
+            self.save()                           # 把旧版明文 Key 改存为加密
 
     def load(self):
         from_template = False
@@ -122,6 +210,11 @@ class AIConfig:
                     for field in ("base_url", "model", "protocol", "api_key"):
                         if isinstance(prof.get(field), str):
                             self.profiles[k][field] = prof[field]
+                    enc = prof.get("api_key_enc")
+                    if isinstance(enc, str) and enc:
+                        self.profiles[k]["api_key"] = decrypt_key(enc)
+                    elif self.profiles[k]["api_key"] and not from_template:
+                        self.needs_migration = True   # 旧版明文 Key: 下次保存时加密
                     if self.profiles[k]["protocol"] not in PROTOCOLS:
                         self.profiles[k]["protocol"] = PROVIDERS[k]["protocol"]
                     if from_template:
@@ -142,8 +235,19 @@ class AIConfig:
             d = os.path.dirname(self.path)
             if d:
                 os.makedirs(d, exist_ok=True)
+            profiles = {}
+            for k, prof in self.profiles.items():
+                out = dict(prof)
+                key = out.get("api_key") or ""
+                if key and can_encrypt():
+                    try:
+                        out["api_key_enc"] = encrypt_key(key)
+                        out["api_key"] = ""          # 文件里不留明文
+                    except OSError:
+                        pass                          # 加密失败: 退回明文, 至少不丢 Key
+                profiles[k] = out
             with open(tmp, "w", encoding="utf-8") as f:
-                json.dump({"provider": self.provider, "profiles": self.profiles},
+                json.dump({"provider": self.provider, "profiles": profiles},
                           f, ensure_ascii=False, indent=1)
             try:
                 os.chmod(tmp, 0o600)
@@ -159,7 +263,8 @@ class AIConfig:
             return False
 
     def profile(self, provider: str = None) -> dict:
-        return dict(self.profiles[provider or self.provider])
+        name = provider or self.provider
+        return dict(self.profiles[name], provider=name)
 
     def set_profile(self, provider: str, **fields):
         prof = self.profiles[provider]
@@ -188,6 +293,10 @@ def check_profile(profile: dict):
         pass
     else:
         raise AIError("config", "Base URL 必须是 https:// 开头(本机模型可用 http://localhost)")
+    pinned = official_host(profile.get("provider") or "")
+    if pinned and host != pinned:
+        raise AIError("config", "为防止 Key 泄露,预设服务商的 Key 只会发往它的官方地址 {host}."
+                                "要用其他地址(如中转),请选择「自定义供应商」.".replace("{host}", pinned))
     if not (profile.get("model") or "").strip():
         raise AIError("config", "模型名为空")
     if not (profile.get("api_key") or "").strip() and host not in ("localhost", "127.0.0.1", "::1"):
@@ -235,20 +344,23 @@ def chat(profile: dict, system: str, user: str, timeout: float = 90.0, opener=No
                                  data=json.dumps(body).encode("utf-8"),
                                  headers=headers, method="POST")
     try:
-        with (opener or urllib.request.urlopen)(req, timeout=timeout) as resp:
+        with (opener or _OPENER.open)(req, timeout=timeout) as resp:
             raw = resp.read(2_000_000)
     except urllib.error.HTTPError as e:
         try:
-            payload = e.read(4000)
+            payload = e.read(4000) if e.fp is not None else b""
         except Exception:
             payload = b""
         if e.code == 403 and e.headers and e.headers.get("X-OIT-Reason"):
             raise AIError("blocked", "请求被本程序的过滤代理拦截(该服务商的域名不在白名单中)")
+        if 300 <= e.code < 400:
+            raise AIError("http", f"服务商要求跳转到别的地址({e.code}),为保护 API Key 已拒绝."
+                                  "请检查 Base URL 是否填对.")
         if e.code in (401, 403):
-            raise AIError("auth", "API Key 无效或没有权限:" + _error_text(payload))
-        raise AIError("http", f"服务商返回 {e.code}:" + _error_text(payload))
+            raise AIError("auth", "API Key 无效或没有权限:" + redact(_error_text(payload), key))
+        raise AIError("http", f"服务商返回 {e.code}:" + redact(_error_text(payload), key))
     except (urllib.error.URLError, OSError, TimeoutError) as e:
-        raise AIError("network", f"连接失败:{getattr(e, 'reason', e)}")
+        raise AIError("network", redact(f"连接失败:{getattr(e, 'reason', e)}", key))
 
     try:
         data = json.loads(raw.decode("utf-8", "replace"))
@@ -548,6 +660,17 @@ def _selftest():
             answer = '{"domains":["bilibili.com"],"apps":["steam.exe"]}'
             if self.path.endswith("/messages"):
                 out = {"content": [{"type": "text", "text": answer}]}
+            elif self.path.startswith("/redir"):
+                self.send_response(302)
+                self.send_header("Location", "http://evil.example/steal")
+                self.end_headers()
+                return
+            elif self.path.startswith("/echo"):
+                self.send_response(401)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": {"message": "Incorrect key: " +
+                                 self.headers.get("Authorization", "")}}).encode())
+                return
             elif self.path.startswith("/deny"):
                 self.send_response(401)
                 self.end_headers()
@@ -583,8 +706,55 @@ def _selftest():
             raise AssertionError
         except AIError as e:
             assert e.kind == "auth" and "bad key" in e.message
+        # 重定向: 拒绝, 不把 Key 带到新地址
+        n_before = len(seen)
+        try:
+            chat(dict(p, base_url=base + "/redir"), "s", "u")
+            raise AssertionError
+        except AIError as e:
+            assert e.kind == "http" and "跳转" in e.message, e.message
+        assert len(seen) == n_before + 1, "只应有原请求, 不能跟随重定向"
+        # 报错里回显的 Key 要抹掉
+        try:
+            chat(dict(p, base_url=base + "/echo", api_key="sk-secret-123"), "s", "u")
+            raise AssertionError
+        except AIError as e:
+            assert "sk-secret-123" not in e.message and "***" in e.message, e.message
     finally:
         srv.shutdown()
+
+    # 预设服务商的 Key 只发往官方域名
+    for prov, url in (("deepseek", "https://evil.example/v1"),
+                      ("claude", "https://api.anthropic.com.evil.example")):
+        try:
+            check_profile({"provider": prov, "base_url": url, "model": "m", "api_key": "k"})
+            raise AssertionError
+        except AIError as e:
+            assert e.kind == "config"
+    check_profile({"provider": "deepseek", "base_url": "https://api.deepseek.com/v1",
+                   "model": "m", "api_key": "k"})
+    check_profile({"provider": "custom", "base_url": "https://relay.example/v1",
+                   "model": "m", "api_key": "k"})
+
+    # 存盘加密: 用可逆的假 DPAPI 验证文件里不留明文, 读回来能还原, 旧明文会被迁移
+    global _dpapi, can_encrypt
+    real_dpapi, real_can = _dpapi, can_encrypt
+    _dpapi = lambda data, protect: bytes(b ^ 0x5A for b in data)
+    can_encrypt = lambda: True
+    try:
+        path = os.path.join(tempfile.mkdtemp(), "ai.json")
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump({"provider": "deepseek", "profiles": {"deepseek": {
+                "base_url": "https://api.deepseek.com", "model": "m", "protocol": "openai",
+                "api_key": "sk-plain-777"}}}, f)
+        m = AIConfig(path)
+        assert m.profile("deepseek")["api_key"] == "sk-plain-777"
+        txt = open(path, encoding="utf-8").read()
+        assert "sk-plain-777" not in txt and "dpapi:" in txt, "旧明文 Key 应被加密改存"
+        assert AIConfig(path).profile("deepseek")["api_key"] == "sk-plain-777"
+        assert decrypt_key("dpapi:!!notbase64") == ""
+    finally:
+        _dpapi, can_encrypt = real_dpapi, real_can
     return "ai_assist selftest OK"
 
 
