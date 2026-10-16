@@ -39,6 +39,18 @@ LOAN_WARN_SHARE = 0.5
 IDLE_NUDGE_FIRST = 5 * 60
 IDLE_NUDGE_EVERY = 60 * 60
 
+# 专注中每满 FOCUS_CHECK_EVERY 秒弹出一个"还在吗"的提醒窗; 提醒窗 FOCUS_CHECK_GRACE 秒内
+# 没有被手动关掉, 就自动结束专注: 从最后一次确认 (关掉提醒窗) 到自动结束的这一段
+# 只按 FOCUS_CHECK_PENALTY 计 (统计里只算这一段的前这一部分), 之前确认过的部分照常计
+FOCUS_CHECK_EVERY = 90 * 60
+FOCUS_CHECK_GRACE = 30 * 60
+FOCUS_CHECK_PENALTY = 0.3
+
+# 专注状态每 FOCUS_SAVE_EVERY 秒写进 timer_state.json, 程序异常退出也不会丢 (最多丢这么久).
+# 下次打开时: 距最后一次保存不超过 FOCUS_RESUME_GAP 秒就接着计时, 否则记到最后一次保存为止
+FOCUS_SAVE_EVERY = 4 * 60
+FOCUS_RESUME_GAP = 5 * 60
+
 # Timer 页的小按钮: BONUS_BREAK_WINDOW 秒内连点 BONUS_BREAK_CLICKS 次,
 # 获得 BONUS_BREAK_SECONDS 秒休息时间; 每周 (周一 0 点起) 最多 BONUS_BREAK_WEEKLY 秒
 BONUS_BREAK_CLICKS = 10

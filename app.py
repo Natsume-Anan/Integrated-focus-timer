@@ -3,6 +3,7 @@
 import sys
 import os
 import time
+import atexit
 import threading
 import tkinter as tk
 from tkinter import font as tkfont, ttk
@@ -109,6 +110,10 @@ class BreakTimerApp:
         self._bonus_job = None
         self._timer_extra = None
         self._bonus_break_active = False   # 这一次休息含领到的时间: 可在联网中暂停, 暂停不打折
+        self._focus_checks = 0        # 这一段专注里已经被手动关掉的"还在吗"提醒数
+        self._focus_ok = 0.0          # 最后一次确认 (关掉提醒窗) 时已专注的秒数
+        self._check_win = None        # 当前开着的"还在吗"提醒窗
+        self._focus_saved = 0.0       # 上一次把专注状态写进文件的时刻 (monotonic)
         self.last_t_minutes = 0.0
         self.countdown_seconds = 0
         self.update_job = None
@@ -164,7 +169,11 @@ class BreakTimerApp:
 
         self.root.bind("<Map>", self._on_window_map)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
+        # 关机 / 注销时 Windows 会先通知窗口; 程序因异常退出时 atexit 也会跑. 都先存下专注状态
+        self.root.protocol("WM_SAVE_YOURSELF", self._save_focus_now)
+        atexit.register(self._save_focus_now)
         self.var_confirm.trace_add("write", self._on_confirm_change)
+        self._recover_focus()
         if self._first_run:
             self.root.after(600, self._show_welcome)
 
@@ -672,13 +681,7 @@ class BreakTimerApp:
         """主按钮: 空闲 → 开始专注; 专注中 → 结束专注 (直接进入休息);
         休息中 → 暂停休息并马上开始专注."""
         if self.state == IDLE:
-            self.start_mono = time.monotonic()
-            self.start_wall = datetime.now()
-            self.state = RUNNING
-            self._status(tr("专注中…"), COLORS["accent"])
-            self.lbl_sub.config(text=tr("计时中 —— 结束时按 [结束专注]."))
-            self._sync_timer_buttons()
-            self.schedule_update()
+            self._enter_focus(datetime.now(), time.monotonic())
 
         elif self.state == RUNNING:
             end_wall = datetime.now()
@@ -686,6 +689,9 @@ class BreakTimerApp:
             self.last_t_minutes = elapsed_minutes
             self.dm.add_study_session(self.start_wall, end_wall, elapsed_minutes)
             self.dm.add_focus_session("study", self.start_wall, end_wall)
+            self._close_check_win()
+            self.state = READY_BREAK          # 专注已记下: 先清掉文件里的专注状态
+            self._save_timer_state()
             self.refresh_display()
 
             self.cancel_update()
@@ -993,14 +999,177 @@ class BreakTimerApp:
         self._save_timer_state()
 
     def _save_timer_state(self):
-        """timer_state.json: 积攒的休息时间 + 本周连点领取的记录."""
+        """timer_state.json: 积攒的休息时间 + 本周连点领取的记录 + 进行中的专注."""
         if self.dm.uninstalling:
             return
         d = self._bonus_state()
         d.update(getattr(self, "_timer_extra", None) or {})
         self._timer_extra = None
         d["break_carry"] = self.break_carry
+        d["focus"] = self._focus_record()
+        self._focus_saved = time.monotonic()
         save_json_file(self.timer_file, d)
+
+    # ---- 专注状态: 随时写进文件, 程序异常退出也不丢 ----
+
+    def _focus_record(self):
+        """进行中的专注: 开始时刻, 最后一次保存的时刻, 已关掉的提醒数, 最后一次确认时已专注的秒数."""
+        if self.state != RUNNING or self.start_wall is None:
+            return None
+        return {"start": self.start_wall.isoformat(timespec="seconds"),
+                "alive": datetime.now().isoformat(timespec="seconds"),
+                "checks": int(self._focus_checks),
+                "ok": int(self._focus_ok)}
+
+    def _save_focus_now(self):
+        if self.state == RUNNING and not self.dm.uninstalling:
+            try:
+                self._save_timer_state()
+            except Exception:
+                pass
+
+    def _enter_focus(self, start_wall: datetime, start_mono: float, checks: int = 0,
+                     ok: float = 0.0):
+        self.start_wall = start_wall
+        self.start_mono = start_mono
+        self._focus_checks = checks
+        self._focus_ok = ok
+        self._close_check_win()
+        self.state = RUNNING
+        self._status(tr("专注中…"), COLORS["accent"])
+        self.lbl_sub.config(text=tr("计时中 —— 结束时按 [结束专注]."))
+        self._sync_timer_buttons()
+        self._save_timer_state()
+        self.schedule_update()
+
+    def _recover_focus(self):
+        """启动时: 上次退出时还在专注 → 不久前退出就接着计时, 否则记到最后一次保存为止."""
+        rec = self._bonus_state().get("focus")
+        if not rec:
+            return
+        try:
+            start = datetime.fromisoformat(rec["start"])
+            alive = datetime.fromisoformat(rec["alive"])
+            checks = max(0, int(rec.get("checks", 0)))
+            ok = max(0.0, float(rec.get("ok", 0)))
+        except Exception:
+            self._save_timer_state()          # 记录坏了: 丢掉
+            return
+        now = datetime.now()
+        if start > now:                        # 系统时间被往回调过: 无法判断, 丢掉
+            self._save_timer_state()
+            return
+        alive = min(max(alive, start), now)
+        if (now - alive).total_seconds() <= float(config.FOCUS_RESUME_GAP):
+            self._enter_focus(start, time.monotonic() - (now - start).total_seconds(), checks, ok)
+            toast.info(tr("上次专注时程序退出了.已接着计时(从 {at} 开始).").format(
+                at=f"{start:%H:%M}"), timeout=8000)
+            return
+        # 退出很久了: 专注记到最后一次保存为止, 对应的休息时间存进积攒的休息时间
+        sec = (alive - start).total_seconds()
+        limit = float(config.FOCUS_CHECK_EVERY) * (checks + 1) + float(config.FOCUS_CHECK_GRACE)
+        penalized = sec >= limit
+        if penalized:
+            sec = limit
+        minutes, brk = self._book_focus(start, sec, ok if penalized else None)
+        self._set_break_carry(self.break_carry + brk)   # 同时清掉文件里的专注状态
+        self.refresh_display()
+        if minutes <= 0:
+            return
+        if penalized:
+            ok = min(ok, sec)
+            msg = tr("上次专注时程序退出了,当时\"还在吗\"提醒已经过了期限,专注按{at}自动结束计算.").format(
+                at=f"{start + timedelta(seconds=sec):%m-%d %H:%M}")
+            msg += "\n" + tr("从{since}起没有确认的{seg}只按×{p:g}计入,这次专注共计入{m:.1f}分钟.").format(
+                since=f"{start + timedelta(seconds=ok):%H:%M}", seg=fmt_hm(sec - ok),
+                p=float(config.FOCUS_CHECK_PENALTY), m=minutes)
+        else:
+            msg = tr("上次专注时程序退出了,专注记到 {at} 为止: 计入 {m:.1f} 分钟.").format(
+                at=f"{alive:%m-%d %H:%M}", m=minutes)
+        if brk > 0:
+            msg += "\n" + tr("对应的休息时间 {t} 已存入积攒的休息时间.").format(t=fmt_ms(brk))
+        toast.notice(tr("⏱  上次的专注已记录"), msg)
+
+    def _book_focus(self, start: datetime, seconds: float, ok=None):
+        """记下一段专注, 返回 (计入的分钟数, 对应的休息秒数).
+        ok: 没回应"还在吗"被自动结束时, 最后一次确认时已专注的秒数 —— 它之前的照常计,
+            之后没有确认的那一段只把前 FOCUS_CHECK_PENALTY 记作专注. 计入的部分在时间上是连续的."""
+        seconds = max(0.0, float(seconds))
+        if ok is not None:
+            ok = min(max(0.0, float(ok)), seconds)
+            seconds = ok + (seconds - ok) * float(config.FOCUS_CHECK_PENALTY)
+        end = start + timedelta(seconds=seconds)
+        minutes = seconds / 60.0
+        self.dm.add_study_session(start, end, minutes)
+        self.dm.add_focus_session("study", start, end)
+        brk = int(round(max(0.0, compute_F(minutes)) * float(config.BREAK_TIME_SCALE) * 60.0))
+        return minutes, brk
+
+    # ---- 专注中每 1.5 小时: 还在吗 ----
+
+    def _close_check_win(self):
+        w, self._check_win = self._check_win, None
+        if w is not None:
+            try:
+                w.close()
+            except Exception:
+                pass
+
+    def _check_focus(self):
+        """每 5 秒检查一次: 弹出 / 判定"还在吗"提醒, 并定时保存专注状态."""
+        if self.state != RUNNING or self.start_mono is None:
+            self._close_check_win()
+            return
+        if self._check_win is not None and not self._check_win.alive():
+            self._check_win = None             # 被手动关掉了 = 人还在
+            self._focus_checks += 1
+            self._focus_ok = time.monotonic() - self.start_mono
+            self._save_timer_state()
+        every = float(config.FOCUS_CHECK_EVERY)
+        grace = float(config.FOCUS_CHECK_GRACE)
+        elapsed = time.monotonic() - self.start_mono
+        mark = every * (self._focus_checks + 1)
+        if elapsed >= mark + grace:
+            self._auto_end_focus(mark + grace)
+            return
+        if elapsed >= mark and self._check_win is None:
+            due = datetime.now() + timedelta(seconds=mark + grace - elapsed)
+            self._check_win = toast.notice(
+                tr("⏱  还在专注吗?"),
+                tr("已经专注 {t} 了.").format(t=fmt_hm(mark)) + "\n"
+                + tr("请在{at}之前关掉这个窗口.否则专注会自动结束,没有确认的这一段只按×{p:g}计入.").format(
+                    at=f"{due:%H:%M}", p=float(config.FOCUS_CHECK_PENALTY)),
+                [(tr("还在,继续专注"), None, True), (tr("■  结束专注"), self._end_from_check, False)])
+        if time.monotonic() - self._focus_saved >= float(config.FOCUS_SAVE_EVERY):
+            self._save_timer_state()
+
+    def _end_from_check(self):
+        if self.state == RUNNING:
+            self.show_page("timer")
+            self.on_action()
+
+    def _auto_end_focus(self, seconds: float):
+        """提醒窗没人关: 自动结束专注. 不开始休息倒计时 (人不在), 休息时间存进积攒的休息时间."""
+        start = self.start_wall
+        ok = min(self._focus_ok, seconds)
+        self._close_check_win()
+        self.cancel_update()
+        minutes, brk = self._book_focus(start, seconds, ok)
+        self.reset_to_idle()
+        self._set_break_carry(self.break_carry + brk)   # 同时清掉文件里的专注状态
+        self.lbl_sub.config(text=self._idle_sub_text())
+        self._sync_timer_buttons()
+        self.refresh_display()
+        self._refresh_if_visible("stats", "cal")
+        msg = tr("提醒窗{n}分钟内没有被关掉,专注已在{at}自动结束.").format(
+            n=int(round(float(config.FOCUS_CHECK_GRACE) / 60)),
+            at=f"{start + timedelta(seconds=seconds):%H:%M}")
+        msg += "\n" + tr("从{since}起没有确认的{seg}只按×{p:g}计入,这次专注共计入{m:.1f}分钟.").format(
+            since=f"{start + timedelta(seconds=ok):%H:%M}", seg=fmt_hm(seconds - ok),
+            p=float(config.FOCUS_CHECK_PENALTY), m=minutes)
+        if brk > 0:
+            msg += "\n" + tr("对应的休息时间 {t} 已存入积攒的休息时间.").format(t=fmt_ms(brk))
+        toast.notice(tr("⏹  专注已自动结束"), msg)
 
     def _restore_timer_view(self):
         """界面重建 (换语言 / 字号) 后按当前状态恢复计时器页."""
@@ -1181,6 +1350,7 @@ class BreakTimerApp:
         if self.shutting_down:
             return
         self.check_pending_settings()
+        self._check_focus()
         self._check_idle_nudge()
         self._check_setup_period()
         self.apply_job = self.root.after(5000, self._schedule_apply_check)
@@ -1275,6 +1445,7 @@ class BreakTimerApp:
 
 
     def on_close(self):
+        self._save_focus_now()      # 专注中关闭: 状态留在文件里, 下次打开时接着算 (见 _recover_focus)
         self.end_break_early(silent=True)
         self._cancel_jobs()
         self.net.shutdown()

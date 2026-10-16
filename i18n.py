@@ -415,6 +415,19 @@ EN = {
     # ---- Timer: 休息结束后的提醒 ----
     "⏱  该开始下一轮了": "⏱  Time for the next round",
     "休息结束已经 {t} 了,还没有开始下一轮专注.": "Your break ended {t} ago and the next focus round hasn't started yet.",
+    # ---- 专注中: 还在吗 / 异常退出后恢复 ----
+    "⏱  还在专注吗?": "⏱  Still focusing?",
+    "已经专注 {t} 了.": "You've been focusing for {t}.",
+    "请在{at}之前关掉这个窗口.否则专注会自动结束,没有确认的这一段只按×{p:g}计入.": "Close this window before {at}. Otherwise focus ends automatically and the unconfirmed stretch only counts at ×{p:g}.",
+    "还在,继续专注": "Still here, keep going",
+    "⏹  专注已自动结束": "⏹  Focus ended automatically",
+    "提醒窗{n}分钟内没有被关掉,专注已在{at}自动结束.": "The reminder wasn't closed within {n} minutes, so focus ended automatically at {at}.",
+    "从{since}起没有确认的{seg}只按×{p:g}计入,这次专注共计入{m:.1f}分钟.": "The unconfirmed {seg} since {since} only counts at ×{p:g}; this session counts {m:.1f} minutes in total.",
+    "对应的休息时间 {t} 已存入积攒的休息时间.": "The matching break time {t} has been added to your saved break time.",
+    "上次专注时程序退出了.已接着计时(从 {at} 开始).": "OIT closed during your last focus session. The timer has resumed (started at {at}).",
+    "上次专注时程序退出了,专注记到 {at} 为止: 计入 {m:.1f} 分钟.": "OIT closed during your last focus session. It was recorded up to {at}: {m:.1f} minutes.",
+    "上次专注时程序退出了,当时\"还在吗\"提醒已经过了期限,专注按{at}自动结束计算.": "OIT closed during your last focus session after the \"still focusing?\" deadline had passed, so it counts as ending automatically at {at}.",
+    "⏱  上次的专注已记录": "⏱  Last focus session recorded",
     "▶  开始专注": "▶  Start focusing",
     "知道了": "Got it",
     # ---- Settings: 星期倍率 ----
