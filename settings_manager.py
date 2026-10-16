@@ -170,7 +170,7 @@ SETTINGS_SCHEMA = [
         ],
         "fmt": lambda v: "内置三音提示音" if str(v).strip() in ("", "__builtin__") else (
             "Windows 蜂鸣声" if str(v) == "__beep__" else str(v)),
-        "desc": "即时生效.可粘贴本地 .wav 的完整路径.",
+        "desc": "即时生效.可粘贴本地 .wav / .mp3 的完整路径.",
     },
 ]
 

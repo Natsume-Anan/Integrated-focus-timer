@@ -30,6 +30,11 @@ LOAN_RATE = 2.0              # 紧急借贷: 今日额度 +1 秒, 明天额度 -
 BREAK_COOLDOWN_RATE = 0.4    # 休息中提交的普通申请(时长不超过剩余休息): 冷静期 ×0.4
 BREAK_CARRY_RATE = 0.8       # 暂停休息(含关闭程序): 剩余休息时间 ×0.8 计入下一次休息
 
+# 休息结束后迟迟不开始下一轮: 结束后 IDLE_NUDGE_FIRST 秒弹出提醒,
+# 之后仍是空闲就每隔 IDLE_NUDGE_EVERY 秒再试一次 (提醒窗还开着就不重复弹)
+IDLE_NUDGE_FIRST = 5 * 60
+IDLE_NUDGE_EVERY = 60 * 60
+
 # 按星期调整每日联网额度: 当天额度 = DAILY_LIMIT × 当天的倍率 (周一 ~ 周日)
 WEEKDAY_KEYS = ("QUOTA_MULT_MON", "QUOTA_MULT_TUE", "QUOTA_MULT_WED", "QUOTA_MULT_THU",
                 "QUOTA_MULT_FRI", "QUOTA_MULT_SAT", "QUOTA_MULT_SUN")

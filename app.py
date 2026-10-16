@@ -49,6 +49,37 @@ def _enable_per_monitor_dpi():
         pass
 
 
+def _play_audio_file(path: str) -> bool:
+    """播放一个本地音频文件, 播完才返回 (在后台线程里调用). 只用标准库.
+
+    .wav 用 winsound; 其他格式 (.mp3 等) 用 Windows 自带的 MCI (winmm.dll).
+    播放失败返回 False, 由调用方退回内置提示音."""
+    if sys.platform != "win32" or not path or not os.path.exists(path):
+        return False
+    path = os.path.normpath(os.path.abspath(path))
+    if path.lower().endswith(".wav"):
+        try:
+            import winsound
+            winsound.PlaySound(path, winsound.SND_FILENAME)
+            return True
+        except Exception:
+            return False
+    try:
+        import ctypes
+        import uuid
+        mci = ctypes.windll.winmm.mciSendStringW
+        buf = ctypes.create_unicode_buffer(256)
+        alias = "oit_chime_" + uuid.uuid4().hex[:8]
+        if mci(f'open "{path}" type mpegvideo alias {alias}', buf, 255, 0) != 0:
+            return False
+        try:
+            return mci(f"play {alias} wait", buf, 255, 0) == 0
+        finally:
+            mci(f"close {alias}", buf, 255, 0)
+    except Exception:
+        return False
+
+
 class BreakTimerApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -70,6 +101,9 @@ class BreakTimerApp:
         self.start_mono = None
         self.start_wall = None
         self.break_start_wall = None
+        self.idle_since = None        # 休息结束、回到空闲的时刻 (提醒用)
+        self._nudges = 0              # 这段空闲里已经到点的提醒次数
+        self._nudge_win = None
         self.last_t_minutes = 0.0
         self.countdown_seconds = 0
         self.update_job = None
@@ -626,26 +660,38 @@ class BreakTimerApp:
             self.dm.add_focus_session("study", self.start_wall, end_wall)
             self.refresh_display()
 
-            self.state = READY_BREAK
             self.cancel_update()
-            self._show_ready_break()
+            # 结束专注后直接进入休息, 不再停在"去休息"这一步
+            self._start_break(announce=True)
 
         elif self.state == READY_BREAK:
-            total = self._break_seconds()
-            if total <= 0:
-                toast.info(tr("剩余时间为 0,已重置."))
-                self.reset_to_idle()
-                return
-            if self.break_carry > 0:
-                self._set_break_carry(0)
-            self.countdown_seconds = total
-            self.state = ON_BREAK
-            self.break_start_wall = datetime.now()
-            self._show_on_break()
-            self.schedule_update()
+            # 旧流程留下的状态 (正常不会再进入): 按一下照样开始休息
+            self._start_break()
 
         elif self.state == ON_BREAK:
             self.end_break_early()
+
+    def _start_break(self, announce: bool = False):
+        """开始休息倒计时 = 建议休息时长 + 之前暂停休息结转的时间."""
+        total = self._break_seconds()
+        if total <= 0:
+            toast.info(tr("剩余时间为 0,已重置."))
+            self.reset_to_idle()
+            return
+        carry = int(self.break_carry)
+        if carry > 0:
+            self._set_break_carry(0)
+        self.countdown_seconds = total
+        self.state = ON_BREAK
+        self.break_start_wall = datetime.now()
+        self._show_on_break()
+        self.schedule_update()
+        if announce:
+            msg = tr("本次专注 {m:.1f} 分钟,开始休息 {t}.").format(
+                m=self.last_t_minutes, t=fmt_ms(total))
+            if carry > 0:
+                msg += "\n" + tr("(含之前暂停休息结转的 {c})").format(c=fmt_ms(carry))
+            toast.success(msg)
 
     # ---- 休息: 建议时长 + 之前暂停休息结转的时间 ----
 
@@ -700,12 +746,50 @@ class BreakTimerApp:
             self.countdown_seconds = 0
         else:
             self.reset_to_idle()
+            self._arm_idle_nudge()
 
     def _record_break_end(self):
         """一段休息结束 (自然结束 / 暂停 / 关闭程序): 记入专注计时统计."""
         if self.break_start_wall is not None:
             self.dm.add_focus_session("break", self.break_start_wall, datetime.now())
             self.break_start_wall = None
+
+    # ---- 休息结束后迟迟不开始: 提醒 ----
+
+    def _arm_idle_nudge(self):
+        """休息结束 (自然结束或暂停) 回到空闲时调用, 从此刻开始计时."""
+        self.idle_since = datetime.now()
+        self._nudges = 0
+
+    def _check_idle_nudge(self):
+        """每 5 秒检查一次. 第一次在空闲 IDLE_NUDGE_FIRST 秒后, 之后每 IDLE_NUDGE_EVERY 秒一次;
+        按墙上时间算, 电脑睡眠醒来后错过的几次只补弹一次."""
+        if self.idle_since is None:
+            return
+        if self.state != IDLE:
+            self.idle_since = None          # 已经开始下一轮 (或别的状态), 不再提醒
+            return
+        now = datetime.now()
+        first = timedelta(seconds=max(1, int(config.IDLE_NUDGE_FIRST)))
+        every = timedelta(seconds=max(60, int(config.IDLE_NUDGE_EVERY)))
+        due = self.idle_since + first + every * self._nudges
+        if now < due:
+            return
+        while due <= now:
+            self._nudges += 1
+            due += every
+        if self._nudge_win is not None and self._nudge_win.alive():
+            return                          # 上一个提醒还开着, 不重复弹
+        idle = fmt_hm((now - self.idle_since).total_seconds())
+        self._nudge_win = toast.notice(
+            tr("⏱  该开始下一轮了"),
+            tr("休息结束已经 {t} 了,还没有开始下一轮专注.").format(t=idle),
+            [(tr("▶  开始专注"), self._start_from_nudge, True), (tr("知道了"), None, False)])
+
+    def _start_from_nudge(self):
+        if self.state == IDLE:
+            self.show_page("timer")
+            self.on_action()
 
     def _focus_live(self):
         """正在进行的一段, 供 Statistics 页画到此刻: (kind, 开始时刻) 或 None."""
@@ -781,6 +865,7 @@ class BreakTimerApp:
                 self._record_break_end()
                 toast.success(tr("休息结束,可以开始下一轮了!"))
                 self.reset_to_idle()
+                self._arm_idle_nudge()
         else:
             self.cancel_update()
 
@@ -861,18 +946,20 @@ class BreakTimerApp:
         path = self.settings.value("CHIME_WAV") or ""
         if path and not os.path.exists(path):
             path = ""
+        builtin = os.path.join(self.dm.data_dir, "chime.wav")
         if not path or path == "__builtin__":
-            builtin = os.path.join(self.dm.data_dir, "chime.wav")
             path = ensure_builtin_chime(builtin) or ""
 
         def run():
+            # 自选文件 (.wav / .mp3) 放不出来时, 退回内置提示音, 再不行就蜂鸣
+            if _play_audio_file(path):
+                return
+            if path != builtin and _play_audio_file(ensure_builtin_chime(builtin) or ""):
+                return
             try:
                 import winsound
-                if path and os.path.exists(path):
-                    winsound.PlaySound(path, winsound.SND_FILENAME)
-                else:
-                    for freq, ms in ((784, 200), (988, 200), (1319, 450)):
-                        winsound.Beep(freq, ms)
+                for freq, ms in ((784, 200), (988, 200), (1319, 450)):
+                    winsound.Beep(freq, ms)
             except Exception:
                 pass
         t = threading.Thread(target=run, daemon=True)
@@ -882,9 +969,10 @@ class BreakTimerApp:
     def play_chime(self):
         self._play_chime()
 
-    def _wait_chime(self, t, slot):
-        if t is not None and t.is_alive():
-            self.root.after(200, lambda: self._wait_chime(t, slot))
+    def _wait_chime(self, t, slot, waited: int = 0):
+        # 等提示音放完再提示填写; 自选的音频可能很长, 最多等 10 秒
+        if t is not None and t.is_alive() and waited < 10000:
+            self.root.after(200, lambda: self._wait_chime(t, slot, waited + 200))
             return
         if not self.dm.hour_enabled:
             return
@@ -907,6 +995,7 @@ class BreakTimerApp:
         if self.shutting_down:
             return
         self.check_pending_settings()
+        self._check_idle_nudge()
         self.apply_job = self.root.after(5000, self._schedule_apply_check)
 
     def check_pending_settings(self):

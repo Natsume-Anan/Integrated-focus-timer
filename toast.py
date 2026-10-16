@@ -248,6 +248,83 @@ def ask(message, title: str = None, ok_text: str = None,
 
 
 
+class Notice(tk.Toplevel):
+    """只能手动关闭的提醒窗: 不会自动消失, 点窗口本身也不会关, 只能点按钮或右上角 ✕.
+
+    置顶但不抢占输入 (不 grab), 不妨碍继续操作主窗口.
+    buttons: [(文字, 回调或 None, 是否强调)], 点任何一个按钮都会先关闭窗口再执行回调."""
+
+    def __init__(self, master, title: str, message: str, buttons=None):
+        super().__init__(master, bg=config.COLORS["bg"],
+                         highlightbackground=config.COLORS["accent"], highlightthickness=2)
+        self._alive = True
+        self.title(title)
+        self.resizable(False, False)
+        self.attributes("-topmost", True)
+        self.protocol("WM_DELETE_WINDOW", self.close)
+
+        body = tk.Frame(self, bg=config.COLORS["bg"])
+        body.pack(fill="both", expand=True, padx=config.scaled(22), pady=config.scaled(18))
+        tk.Label(
+            body, text=title, bg=config.COLORS["bg"], fg=config.COLORS["text"],
+            font=font_of("h2", bold=True), anchor="w"
+        ).pack(anchor="w", pady=(0, config.scaled(8)))
+        self.lbl = tk.Label(
+            body, text=message, bg=config.COLORS["bg"], fg=config.COLORS["text"],
+            font=font_of("body"), justify="left", anchor="w",
+            wraplength=config.scaled(440)
+        )
+        self.lbl.pack(anchor="w", fill="x")
+
+        btns = tk.Frame(self, bg=config.COLORS["bg"])
+        btns.pack(fill="x", padx=config.scaled(22), pady=(0, config.scaled(18)))
+        for text, cb, accent in reversed(buttons or [(tr("知道了"), None, True)]):
+            ttk.Button(btns, text=text, style="Accent.TButton" if accent else "TButton",
+                       command=lambda c=cb: self._press(c)).pack(
+                side="right", padx=(config.scaled(8), 0))
+        self._place(master)
+
+    def _place(self, master):
+        self.update_idletasks()
+        w, h = self.winfo_reqwidth(), self.winfo_reqheight()
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
+
+    def _press(self, cb):
+        self.close()
+        if cb:
+            cb()
+
+    def alive(self) -> bool:
+        try:
+            return self._alive and bool(self.winfo_exists())
+        except Exception:
+            return False
+
+    def close(self):
+        if not self._alive:
+            return
+        self._alive = False
+        try:
+            self.destroy()
+        except Exception:
+            pass
+
+
+def notice(title: str, message: str, buttons=None):
+    """弹出一个只能手动关闭的提醒窗, 返回窗口对象 (没有主窗口时返回 None)."""
+    root = _root()
+    _record(f"[notice] {title}: {message}", "notice")
+    if root is None:
+        return None
+    try:
+        if not root.winfo_exists():
+            return None
+        return Notice(root, title, message, buttons)
+    except Exception:
+        return None
+
+
 def start_recording():
     _RUNTIME["recording"] = []
     return _RUNTIME["recording"]

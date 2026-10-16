@@ -342,9 +342,9 @@ class SettingsPage(tk.Frame):
                                      command=lambda k=key: self._stage(k)), "提交修改")
         btn.pack(side="left", padx=(8, 0))
         if key == "CHIME_WAV":
-            self._track(ttk.Button(ctrl, text=tr("选择 .wav…"),
+            self._track(ttk.Button(ctrl, text=tr("选择音频…"),
                                    command=lambda: self._pick_wav(widget, custom_var)),
-                        "选择 .wav…").pack(side="left", padx=(8, 0))
+                        "选择音频…").pack(side="left", padx=(8, 0))
             self._track(ttk.Button(ctrl, text=tr("▶ 试听"),
                                    command=lambda: (self.on_sound and self.on_sound())),
                         "▶ 试听").pack(side="left", padx=(8, 0))
@@ -525,7 +525,8 @@ class SettingsPage(tk.Frame):
     def _pick_wav(self, widget, custom_var=None):
         path = filedialog.askopenfilename(
             title=tr("选择提示音"),
-            filetypes=[(tr("WAV 音频"), "*.wav"), (tr("所有文件"), "*.*")],
+            filetypes=[(tr("音频文件"), "*.wav *.mp3"), (tr("WAV 音频"), "*.wav"),
+                       (tr("MP3 音频"), "*.mp3"), (tr("所有文件"), "*.*")],
             parent=self.winfo_toplevel()
         )
         if not path:
