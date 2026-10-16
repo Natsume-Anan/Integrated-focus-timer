@@ -153,6 +153,20 @@ def wrap_label(widget, pad: int = 16):
     return widget
 
 
+def flavor(parent, text: str, bg: str = None, pad: int = 24):
+    """作者写的风味文本 (来自 MECHANICS.md): 左边一道细竖线, 暗色小字, 和说明文字区分开.
+    返回外框; 文字标签是 .label."""
+    bg = bg or COLORS["bg"]
+    fr = tk.Frame(parent, bg=bg)
+    tk.Frame(fr, bg=COLORS["accent"], width=max(2, config.scaled(3))).pack(side="left", fill="y")
+    lbl = tk.Label(fr, text=text, bg=bg, fg=COLORS["text_dim"], font=config.font("small"),
+                   anchor="w", justify="left")
+    lbl.pack(side="left", fill="x", expand=True, padx=(config.scaled(10), 0), pady=2)
+    wrap_label(lbl, pad + config.scaled(14))
+    fr.label = lbl
+    return fr
+
+
 def section_title(parent, text: str, bg: str = None, sub: str = None):
     bg = bg or COLORS["bg"]
     wrap = tk.Frame(parent, bg=bg)

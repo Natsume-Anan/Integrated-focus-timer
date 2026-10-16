@@ -415,6 +415,16 @@ EN = {
     # ---- Timer: 休息结束后的提醒 ----
     "⏱  该开始下一轮了": "⏱  Time for the next round",
     "休息结束已经 {t} 了,还没有开始下一轮专注.": "Your break ended {t} ago and the next focus round hasn't started yet.",
+    # ---- 作者的话 (MECHANICS.md 里的风味文本) ----
+    "在设计预期上 只要不是有绝对的正当理由 应该很少有改变能坚持过48h的等待期.\n这是一个理智与本能的抗争的常见结果.\n这个软件的一个理念就是放大理智优势,保留本能空间.":
+        "By design, unless there's a truly good reason, few changes should survive a 48-hour wait.\nThat's the usual outcome when reason wrestles with impulse.\nOne idea behind this app: amplify reason's advantage, and leave room for impulse.",
+    "'放松'方向的改变会被限制,是在希望未来的某一刻,理智只需要占据短暂的上风,就能阻止这个进程.\n为什么'收紧'也需要限制?作者希望用户不要竭泽而渔.你可能想到多的一个小时学习时间有多有价值 但是可能想不到少的一个小时休息时间会对心理健康有多大的压力.所以请在这一段时间好好考虑少的时间/禁用某些关键网站会对你的生活有什么影响.":
+        "Loosening changes are held back in the hope that, at some future moment, reason only needs to win for a short while to stop the process.\nWhy hold back tightening too? The author hopes you won't drain the pond to catch the fish. You may see how valuable one more hour of study is, but not how much pressure one less hour of rest puts on your mental health. So use this time to think about how less time, or blocking certain key sites, would affect your life.",
+    "你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n不过作者更喜欢用Adapter模式.":
+        "Your thoughtful author has already considered withdrawal symptoms and the need to look things up while configuring, so everything is allowed by default.\nThe limits on changing settings only take effect after the initial setup.\nThat said, the author prefers Adapter mode.",
+    "学的时间越长得到的休息时间越长.请尽量长时间地专注.": "The longer you study, the more break time you earn. Try to stay focused as long as you can.",
+    "不要勉强.": "Don't push yourself.",
+    "就这样回到一切之初,修正错误的抉择.": "And so, back to the very beginning, to correct the wrong choice.",
     # ---- 专注中: 还在吗 / 异常退出后恢复 ----
     "⏱  还在专注吗?": "⏱  Still focusing?",
     "已经专注 {t} 了.": "You've been focusing for {t}.",

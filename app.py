@@ -22,7 +22,7 @@ from net_guard import NetGuard
 from data_manager import DataManager
 from settings_manager import SettingsManager
 from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage, StatsPage
-from pages.widgets import (wrap_label, frozen, LoadingCover, cfg,
+from pages.widgets import (wrap_label, frozen, LoadingCover, cfg, flavor,
                            show_pack, hide_pack)
 
 
@@ -666,6 +666,9 @@ class BreakTimerApp:
         self.lbl_bonus = ttk.Button(btns, text="", command=self._on_bonus_click)
         self.lbl_bonus.pack(side="left", padx=(24, 0))
         self._bonus_show(self._bonus_idle_text())
+
+        # 作者的话 (MECHANICS.md 6.2): 只在专注 15 ~ 150 分钟 (休息越学越多的那一段) 时显示
+        self.fv_focus = flavor(body, tr("学的时间越长得到的休息时间越长.请尽量长时间地专注."), bg=bg)
         self._sync_timer_buttons()
 
         self._set_dot(COLORS["text_dim"])
@@ -831,6 +834,7 @@ class BreakTimerApp:
         msg = tr("获得 {t} 休息时间.").format(t=fmt_ms(add)) + where
         msg += "\n" + tr("本周还能领 {left}.").format(left=fmt_hm(left - add))
         msg += "\n\n" + tr("这么想休息,也许是真的累了.休息不需要理由.")
+        msg += "\n" + tr("不要勉强.")
         toast.success(msg, timeout=10000)
         if self.state == IDLE:
             self.lbl_sub.config(text=self._idle_sub_text())
@@ -1193,11 +1197,14 @@ class BreakTimerApp:
             self.update_job = None
 
     def update(self):
+        if self.state != RUNNING:
+            self._sync_focus_flavor()
         if self.state == RUNNING:
             elapsed = time.monotonic() - self.start_mono
             cur_m = elapsed / 60.0
             self.lbl_time.config(text=f"{cur_m:.2f} min")
             rem = compute_F(cur_m) * float(config.BREAK_TIME_SCALE)
+            self._sync_focus_flavor(cur_m)
             if rem > 0:
                 self.lbl_sub.config(text=tr("预计停止时的休息时长:  {m:.2f} 分钟").format(m=rem))
             else:
@@ -1224,8 +1231,21 @@ class BreakTimerApp:
         else:
             self.cancel_update()
 
+    def _sync_focus_flavor(self, minutes: float = None):
+        w = getattr(self, "fv_focus", None)
+        if w is None:
+            return
+        try:
+            if minutes is not None and 15.0 <= minutes < 150.0:
+                show_pack(w, fill="x", padx=26, pady=(0, 16))
+            else:
+                hide_pack(w)
+        except tk.TclError:
+            pass
+
     def reset_to_idle(self):
         self.cancel_update()
+        self._sync_focus_flavor()
         self.state = IDLE
         self.start_mono = None
         self.start_wall = None
@@ -2005,6 +2025,8 @@ class BreakTimerApp:
         )
         self.btn_uninstall.pack(anchor="w", ipadx=10)
         self.btn_uninstall.state(["disabled"])
+
+        flavor(page, tr("就这样回到一切之初,修正错误的抉择."), bg=bg).pack(fill="x", padx=26, pady=(4, 16))
 
     def _on_confirm_change(self, *_):
         ok = self.var_confirm.get().strip() == "UNINSTALL"

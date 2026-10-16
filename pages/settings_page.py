@@ -10,7 +10,7 @@ from config import COLORS
 from i18n import tr
 from settings_manager import (APPLY_INSTANT, SCHEMA_BY_KEY, BASIC_SPECS, DETAIL_SPECS,
                               WEEKDAY_SPECS)
-from .widgets import (ScrollArea, Switch, wrap_label, frozen, smooth, cfg, set_var,
+from .widgets import (ScrollArea, Switch, wrap_label, frozen, smooth, cfg, set_var, flavor,
                       show_pack, hide_pack, show_grid, hide_grid)
 
 
@@ -93,6 +93,13 @@ class SettingsPage(tk.Frame):
         self._build_dev_mode(body)
         for spec in BASIC_SPECS:
             self._build_row(body, spec)
+        # 作者的话: 为什么设置要等 48 小时 (MECHANICS.md 1.1)
+        for i, zh in enumerate((
+                "在设计预期上 只要不是有绝对的正当理由 应该很少有改变能坚持过48h的等待期.\n这是一个理智与本能的抗争的常见结果.\n这个软件的一个理念就是放大理智优势,保留本能空间.",
+                "'放松'方向的改变会被限制,是在希望未来的某一刻,理智只需要占据短暂的上风,就能阻止这个进程.\n为什么'收紧'也需要限制?作者希望用户不要竭泽而渔.你可能想到多的一个小时学习时间有多有价值 但是可能想不到少的一个小时休息时间会对心理健康有多大的压力.所以请在这一段时间好好考虑少的时间/禁用某些关键网站会对你的生活有什么影响.")):
+            fv = flavor(body, tr(zh), bg=bg, pad=12)
+            self._track(fv.label, zh)
+            fv.pack(fill="x", pady=(14 if i == 0 else 8, 6 if i else 0))
 
         # ---- 具体设置 ----
         self.area_num = ScrollArea(self.stack, height=420, bg=bg)

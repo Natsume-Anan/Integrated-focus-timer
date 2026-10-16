@@ -13,7 +13,7 @@ from netproxy import (
     WHITE_DOMAINS, WHITE_APPS, BLACK_DOMAINS, BLACK_APPS,
 )
 from netproxy.rules import MODE_BLACKLIST, MODE_WHITELIST, keys_for_mode
-from .widgets import (Modal, ScrollArea, wrap_label, smooth, cfg,
+from .widgets import (Modal, ScrollArea, wrap_label, smooth, cfg, flavor,
                       show_pack, hide_pack, show_grid, hide_grid)
 from . import ai_dialogs
 
@@ -109,6 +109,10 @@ class RulesPage(tk.Frame):
                                          justify="left")
         self.lbl_pending_mode.pack(fill="x", pady=(4, 0))
         wrap_label(self.lbl_pending_mode, 30)
+
+        # 作者的话: 为什么默认放行 (MECHANICS.md 4.1)
+        flavor(body, tr(
+            "你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n不过作者更喜欢用Adapter模式."), bg=bg).pack(fill="x", pady=(0, 10))
 
         grid = tk.Frame(body, bg=bg)
         grid.pack(fill="x")
