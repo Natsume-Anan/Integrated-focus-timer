@@ -450,6 +450,24 @@ def elevate():
 
 
 
+def relaunch():
+    """重置后重新打开程序. 当前进程已是管理员, 新进程直接继承权限."""
+    import subprocess
+    if getattr(sys, "frozen", False):
+        args = [sys.executable] + sys.argv[1:]
+    else:
+        exe = sys.executable
+        pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+        if sys.platform == "win32" and os.path.exists(pyw):
+            exe = pyw
+        args = [exe, os.path.abspath(sys.argv[0])] + sys.argv[1:]
+    try:
+        subprocess.Popen(args, cwd=os.getcwd(), close_fds=True)
+        return True
+    except OSError:
+        return False
+
+
 def app_data_dir() -> str:
     root = os.path.join(
         os.environ.get('USERPROFILE', os.path.expanduser('~')),

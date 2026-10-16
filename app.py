@@ -145,7 +145,6 @@ class BreakTimerApp:
         self.var_min = tk.StringVar(value="15")
         self.var_reason = tk.StringVar()
         self.var_confirm = tk.StringVar()
-        self.var_del_self = tk.BooleanVar(value=False)
         self.var_loan = tk.BooleanVar(value=False)
 
         toast.bind_root(root)
@@ -389,10 +388,10 @@ class BreakTimerApp:
             "cal": tr("📅  Calendar"),
             "stats": tr("📊  Statistics"),
             "settings": tr("⚙  Settings"),
-            "uninstall": tr("🗑  Uninstall")
+            "reset": tr("🔄  Reset")
         }
         for key, label in self.nav_labels.items():
-            if key == "uninstall":
+            if key == "reset":
 
                 tk.Frame(side, bg=card).pack(fill="both", expand=True)
             b = tk.Button(
@@ -456,9 +455,9 @@ class BreakTimerApp:
         self._build_timer_page(self.pages["timer"])
         self._prepare_page(self.pages["timer"])
         yield
-        self.pages["uninstall"] = tk.Frame(self.content, bg=bg)
-        self._build_uninstall_page(self.pages["uninstall"])
-        self._prepare_page(self.pages["uninstall"])
+        self.pages["reset"] = tk.Frame(self.content, bg=bg)
+        self._build_reset_page(self.pages["reset"])
+        self._prepare_page(self.pages["reset"])
         yield
 
 
@@ -581,8 +580,8 @@ class BreakTimerApp:
             self.pages["log"].show()
         elif key == "settings":
             self.pages["settings"].refresh()
-        elif key == "uninstall":
-            self.refresh_uninstall()
+        elif key == "reset":
+            self.refresh_reset()
         self.update_log_badge()
         self.update_settings_badge()
 
@@ -1004,7 +1003,7 @@ class BreakTimerApp:
 
     def _save_timer_state(self):
         """timer_state.json: 积攒的休息时间 + 本周连点领取的记录 + 进行中的专注."""
-        if self.dm.uninstalling:
+        if self.dm.resetting:
             return
         d = self._bonus_state()
         d.update(getattr(self, "_timer_extra", None) or {})
@@ -1026,7 +1025,7 @@ class BreakTimerApp:
                 "ok": int(self._focus_ok)}
 
     def _save_focus_now(self):
-        if self.state == RUNNING and not self.dm.uninstalling:
+        if self.state == RUNNING and not self.dm.resetting:
             try:
                 self._save_timer_state()
             except Exception:
@@ -1976,18 +1975,18 @@ class BreakTimerApp:
             toast.warn(tr("时间到,网络已断开."))
 
 
-    def _build_uninstall_page(self, page):
+    def _build_reset_page(self, page):
         bg, card = COLORS["bg"], COLORS["bg_card"]
         danger = COLORS["danger"]
 
         hdr = tk.Frame(page, bg=bg)
         hdr.pack(fill="x", padx=28, pady=(22, 8))
         tk.Label(
-            hdr, text=tr("🗑  卸载"), bg=bg, fg=COLORS["text"],
+            hdr, text=tr("🔄  重置"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
         ).pack(anchor="w")
         tk.Label(
-            hdr, text=tr("恢复网络并删除本程序留下的全部内容."),
+            hdr, text=tr("删除全部数据,让程序回到第一次打开时的样子."),
             bg=bg, fg=COLORS["text_dim"], font=config.font("body")
         ).pack(anchor="w", pady=(4, 0))
 
@@ -2003,68 +2002,51 @@ class BreakTimerApp:
         tk.Label(
             warn_fr, justify="left", anchor="w", bg=COLORS["danger_bg"], fg=COLORS["text"],
             font=config.font("small"),
-            text=tr("• 学习记录、日历、整点记录、统计、联网额度与日志、名单、设置等全部删除,不留任何记录.\n"
-                    "• 立即恢复网络(重新启用网卡,还原系统代理).\n"
+            text=tr("• 学习记录、日历、整点记录、统计、联网额度与日志、名单、AI 配置等全部删除,不留任何记录.\n"
+                    "• 所有设置恢复默认值,名单清空,系统代理先还原再按默认设置重新接管.\n"
                     "• 进行中的专注不会被记录.\n"
-                    "• 无法撤销.下次打开时会像第一次安装一样,重新开始配置期.")
+                    "• 无法撤销.程序会自动重新打开,像第一次安装一样弹出介绍窗口,重新开始配置期.")
         ).pack(fill="x", padx=16, pady=(0, 10))
 
         form = tk.Frame(page, bg=bg)
         form.pack(fill="x", padx=26, pady=(0, 16))
         row = tk.Frame(form, bg=bg)
         row.pack(anchor="w", pady=(0, 6))
-        ttk.Label(row, text=tr("输入 UNINSTALL 以确认"), style="UI.TLabel").pack(side="left", padx=(0, 8))
+        ttk.Label(row, text=tr("输入 RESET 以确认"), style="UI.TLabel").pack(side="left", padx=(0, 8))
         ttk.Entry(row, textvariable=self.var_confirm, width=16).pack(side="left")
-        ttk.Checkbutton(
-            form, text=tr("同时删除本程序文件"), variable=self.var_del_self,
-            style="UI.TCheckbutton"
-        ).pack(anchor="w", pady=(0, 8))
-        self.btn_uninstall = ttk.Button(
-            form, text=tr("🗑  卸载并清除数据"),
-            style="Danger.TButton", command=self.on_uninstall
+        self.btn_reset = ttk.Button(
+            form, text=tr("🔄  重置并清除数据"),
+            style="Danger.TButton", command=self.on_reset
         )
-        self.btn_uninstall.pack(anchor="w", ipadx=10)
-        self.btn_uninstall.state(["disabled"])
+        self.btn_reset.pack(anchor="w", ipadx=10)
+        self.btn_reset.state(["disabled"])
 
         flavor(page, tr("就这样回到一切之初,修正错误的抉择."), bg=bg).pack(fill="x", padx=26, pady=(4, 16))
 
     def _on_confirm_change(self, *_):
-        ok = self.var_confirm.get().strip() == "UNINSTALL"
-        self.btn_uninstall.state(["!disabled" if ok else "disabled"])
+        ok = self.var_confirm.get().strip() == "RESET"
+        self.btn_reset.state(["!disabled" if ok else "disabled"])
 
-    def refresh_uninstall(self):
+    def refresh_reset(self):
         self.var_confirm.set("")
 
-    def on_uninstall(self):
-        if self.var_confirm.get().strip() != "UNINSTALL":
+    def on_reset(self):
+        if self.var_confirm.get().strip() != "RESET":
             return
         if not toast.ask(
-            tr("这将永久删除全部数据并恢复网络.\n\n不可撤销.继续吗?"),
-            title=tr("卸载确认"), danger=True
+            tr("这将永久删除全部数据,所有设置恢复默认值,程序会重新打开.\n\n不可撤销.继续吗?"),
+            title=tr("重置确认"), danger=True
         ):
             return
-        self.do_uninstall()
+        self.do_reset()
 
-    def do_uninstall(self):
-        self.dm.uninstalling = True
+    def do_reset(self):
+        """重置: 先解除网络限制 (还原系统代理, 启用网卡), 删除全部数据, 再重新打开程序.
+        新进程找不到设置文件, 就像第一次安装: 弹出介绍窗口, 开始配置期, 网络按默认设置接管."""
+        self.dm.resetting = True
         self._cancel_jobs()
+        self._close_check_win()
         self.net.release()
-
         self.dm.erase_all_data()
-
-        removed_self = False
-        if self.var_del_self.get():
-            try:
-
-                os.remove(os.path.abspath(sys.argv[0]))
-                removed_self = True
-            except OSError:
-                pass
-
-        toast.info(
-            tr("全部数据已清除,网络已恢复.")
-            + ("" if not self.var_del_self.get() else
-               (tr("\n程序文件已删除.") if removed_self else
-                tr("\n无法删除程序文件,请手动移除.")))
-        )
+        self.restart_requested = True      # main.py 在主循环结束后重新打开程序
         self.root.destroy()

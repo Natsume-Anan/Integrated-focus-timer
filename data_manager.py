@@ -41,9 +41,9 @@ class DataManager:
         self.old_dir = os.path.join(low_dir, OLD_APP_DIR)
 
 
-        # 旧版本在数据目录外记录卸载次数的文件; 现在不再记录, 卸载时一并删除
+        # 旧版本在数据目录外记录卸载次数的文件; 现在不再记录, 重置时一并删除
         self.legacy_uninstall_file = os.path.join(low_dir, f"{APP_NAME}.uninstall.json")
-        self.uninstalling = False
+        self.resetting = False
 
         self.study_file = os.path.join(self.data_dir, 'study_log.json')
         self.hour_file = os.path.join(self.data_dir, 'hour_log.json')
@@ -97,7 +97,7 @@ class DataManager:
             self.save_study_data()
 
     def save_study_data(self):
-        if self.uninstalling:
+        if self.resetting:
             return
         try:
             with open(self.study_file, 'w', encoding='utf-8') as f:
@@ -187,7 +187,7 @@ class DataManager:
         return len(self.focus_sessions) != before
 
     def save_focus_log(self):
-        if self.uninstalling:
+        if self.resetting:
             return
         self._prune_focus()
         try:
@@ -258,7 +258,7 @@ class DataManager:
         )
 
     def save_hour_log(self):
-        if self.uninstalling:
+        if self.resetting:
             return
         self._prune_hours()
         try:
@@ -339,7 +339,7 @@ class DataManager:
 
 
     def erase_all_data(self):
-        """卸载: 删除本程序留下的全部数据, 不留任何记录."""
+        """重置: 删除本程序留下的全部数据, 不留任何记录."""
         shutil.rmtree(self.data_dir, ignore_errors=True)
         shutil.rmtree(self.old_dir, ignore_errors=True)
         try:
