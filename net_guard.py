@@ -45,7 +45,8 @@ class NetGuard:
         # 设备同步: 其他设备的联网会话 (按理由统计用)
         self.peer_usage = lambda: []
         self.proxy = ProxyController(
-            data_dir, mode_getter=lambda: getattr(config, "FILTER_MODE", "blacklist"),
+            data_dir, mode_getter=lambda: ("blockall" if getattr(config, "NET_MODE", "") == "proxy_all"
+                                           else getattr(config, "FILTER_MODE", "blacklist")),
             dev_getter=config.changes_instant)
         self._nic_off_by_fallback = False
         self._applied_mode = self.net_mode
@@ -153,7 +154,8 @@ class NetGuard:
 
     @property
     def net_mode(self) -> str:
-        return "proxy" if getattr(config, "NET_MODE", "adapter") == "proxy" else "adapter"
+        # proxy_all (代理 - 屏蔽全部) 和 proxy 用同一个后端 (本地过滤代理), 只是不看名单
+        return "proxy" if getattr(config, "NET_MODE", "adapter") in ("proxy", "proxy_all") else "adapter"
 
     @property
     def online(self) -> bool:

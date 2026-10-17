@@ -128,7 +128,7 @@ class OitVpnService : VpnService() {
                     if (Os.poll(pfds, 1000) <= 0) continue
                     val n = input.read(buf)
                     if (n <= 0) continue
-                    if (plan is VpnPlan.Dns) handle(buf, n, plan.filter)
+                    if (plan is VpnPlan.Dns) handle(buf, n, plan)
                     // BlockAll / BlockOnly: 丢掉
                 } catch (e: Exception) {
                     if (!alive) break
@@ -137,15 +137,17 @@ class OitVpnService : VpnService() {
             }
         }
 
-        private fun handle(buf: ByteArray, n: Int, filter: Boolean) {
+        private fun handle(buf: ByteArray, n: Int, plan: VpnPlan.Dns) {
             val p = Packets.parseUdp(buf, n) ?: return
             if (p.dstPort != 53) return
             val host = Dns.qname(p.payload) ?: return
             BlockLog.seen(host)
-            if (filter) {
+            if (plan.filter) {
                 val pkgs = owner(p)
                 val core = OitApp.instance.core
-                val (ok, _) = core.rules.snap.decide(host, pkgs, core.net.online, core.settings.str("FILTER_MODE"))
+                // 屏蔽全部: 除本机地址以外一律拦截; 否则按名单
+                val ok = if (plan.blockAll) host == "localhost" || host.endsWith(".localhost")
+                else core.rules.snap.decide(host, pkgs, core.net.online, core.settings.str("FILTER_MODE")).first
                 if (!ok) {
                     BlockLog.add(host, pkgs.firstOrNull() ?: "?")
                     Dns.nxdomain(p.payload)?.let { write(Packets.buildReply(p, it)) }

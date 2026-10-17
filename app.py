@@ -714,7 +714,7 @@ class BreakTimerApp:
         self._bonus_show(self._bonus_idle_text())
 
         # 作者的话 (MECHANICS.md 6.2): 一直显示在页面下方的空白处
-        flavor(body, tr("学的时间越长得到的休息时间越长.请尽量长时间地专注."), bg=bg).pack(
+        flavor(body, tr("在第二段区间内 学的时间越长得到的休息时间越长.请尽量长时间地专注."), bg=bg).pack(
             side="bottom", fill="x", padx=26, pady=(0, 22))
         self._sync_timer_buttons()
 
@@ -1659,6 +1659,8 @@ class BreakTimerApp:
         """只在 Proxy 断网方式下生效; 开发者模式下不管 (和网络限制一样解除)."""
         if self.dm.resetting or self.net.dev_mode or self.net.net_mode != "proxy":
             return
+        if getattr(config, "NET_MODE", "") == "proxy_all":
+            return                          # 屏蔽全部只管网络, 不看名单
         rules = self.net.proxy.rules
         mode = getattr(config, "FILTER_MODE", "blacklist")
         online = self.net.online

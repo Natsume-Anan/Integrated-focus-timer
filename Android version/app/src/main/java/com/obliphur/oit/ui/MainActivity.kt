@@ -71,6 +71,15 @@ class MainActivity : ComponentActivity() {
     }
     /** 正在等系统的权限窗口 (同时弹两个系统窗口在部分手机上会卡住界面). */
     private var asking = false
+    /** 这次打开界面时用的主题. */
+    var uiTheme = "classic"
+        private set
+
+    /** 重启界面 (改了主题之后). */
+    fun restartUi() {
+        uiTheme = app.core.settings.str("THEME")
+        recreate()
+    }
     private var flowStarted = false
 
     fun requestVpn() {
@@ -115,6 +124,8 @@ class MainActivity : ComponentActivity() {
         // 每次打开应用时检查更新 (MECHANICS 16)
         if (savedInstanceState == null) app.checkUpdateOnOpen()
         pageRequest.value = intent?.getStringExtra("page")
+        // 界面主题在打开界面时定下来, 改了要重启才生效 (MECHANICS 14.8)
+        uiTheme = app.core.settings.str("THEME")
         setContent { Root(this, pageRequest) }
     }
 
@@ -158,7 +169,7 @@ fun Root(act: MainActivity, pageRequest: MutableStateFlow<String?>) {
     val v by app.version.collectAsState()
     val notices by app.notices.collectAsState()
     val core = app.core
-    val theme = core.settings.str("THEME")
+    val theme = act.uiTheme
     val fs = core.settings.str("FONT_SCALE").toFloatOrNull() ?: 1f
     var page by rememberSaveable { mutableStateOf("timer") }
     var settingsTab by rememberSaveable { mutableStateOf("basic") }
@@ -187,7 +198,7 @@ fun Root(act: MainActivity, pageRequest: MutableStateFlow<String?>) {
     }
 
     // 换主题 / 字号 / 语言时和电脑版一样盖一层加载页, 界面在它后面换好 (MECHANICS 11)
-    val look = "$theme|$fs|${core.settings.str("LANGUAGE")}"
+    val look = "$fs|${core.settings.str("LANGUAGE")}"
     var shownLook by remember { mutableStateOf(look) }
     var reloading by remember { mutableStateOf(false) }
     LaunchedEffect(look) {

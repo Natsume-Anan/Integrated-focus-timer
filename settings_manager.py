@@ -101,8 +101,9 @@ SETTINGS_SCHEMA = [
         "choices": [
             ("adapter", "禁用网卡 (Adapter)"),
             ("proxy", "本地代理过滤 (Proxy)"),
+            ("proxy_all", "代理 - 屏蔽全部"),
         ],
-        "fmt": lambda v: "Proxy" if v == "proxy" else "Adapter",
+        "fmt": lambda v: {"proxy": "Proxy", "proxy_all": "Proxy (block all)"}.get(v, "Adapter"),
         "desc": "Adapter:离线时直接禁用物理网卡.Proxy:网卡保持开启,由本地代理按 Rules 页的黑白名单放行 / 拦截.",
         "page": "net",
     },

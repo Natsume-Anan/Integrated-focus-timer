@@ -184,6 +184,10 @@ private fun OptionRow(spec: Spec, edits: MutableMap<String, String>) {
     val o = LocalOit.current
     val core = OitApp.instance.core
     val s = core.settings
+    val ctx = LocalContext.current
+    var askRestart by remember { mutableStateOf(false) }
+    if (askRestart) Confirm(tr("界面主题"), tr("界面主题将在重启 OIT 后生效. 现在重启吗?"), false,
+        { askRestart = false }) { (ctx as? MainActivity)?.restartUi() }
     OitCard {
         Text(tr(spec.label), fontWeight = FontWeight.Bold, color = o.text)
         WaitTag(spec.key)
@@ -193,7 +197,13 @@ private fun OptionRow(spec: Spec, edits: MutableMap<String, String>) {
             Kind.CHOICE -> {
                 val sel = edits[spec.key] ?: s.pending[spec.key]?.value?.toString() ?: s.str(spec.key)
                 Segmented(spec.choices.map { it.first to tr(it.second) }, sel) { v ->
-                    if (!spec.delayed) {
+                    if (spec.key == "THEME") {
+                        // 主题重启后才生效: 存下来, 弹窗问要不要现在重启
+                        if (v != core.settings.str("THEME")) {
+                            core.stageSetting(spec.key, v)
+                            askRestart = true
+                        }
+                    } else if (!spec.delayed) {
                         val (_, msg) = core.stageSetting(spec.key, v)
                         core.toast(msg)
                     } else {
@@ -310,7 +320,7 @@ private fun PageExtras(tab: String, act: MainActivity) {
             val kind = when (plan) {
                 is com.obliphur.oit.core.VpnPlan.BlockAll -> tr("全部断网")
                 is com.obliphur.oit.core.VpnPlan.BlockOnly -> tr("禁用名单里的应用")
-                is com.obliphur.oit.core.VpnPlan.Dns -> if (plan.filter) tr("按名单过滤 DNS") else tr("全部放行")
+                is com.obliphur.oit.core.VpnPlan.Dns -> if (plan.blockAll) tr("屏蔽全部") else if (plan.filter) tr("按名单过滤 DNS") else tr("全部放行")
                 else -> ""
             }
             Dim(when {

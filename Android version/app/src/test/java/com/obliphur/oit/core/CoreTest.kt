@@ -263,9 +263,10 @@ class CoreTest {
         core.rules.remove(RuleKeys.BLACK_DOMAINS, "bilibili.com")
         core.rules.add(RuleKeys.BLACK_APPS, self)
         assertEquals(VpnPlan.Dns(false, 0), plan())               // 黑名单里只有 OIT 自己
-        // Adapter: 全部断网, 局域网也断 (和电脑上禁用网卡一样)
+        // 代理 - 屏蔽全部: 接管 DNS, 全部拦截, 局域网照样能连
         core.stageSetting("NET_MODE", "adapter")
-        assertEquals(VpnPlan.BlockAll(emptySet()), plan())
+        assertEquals(VpnPlan.Dns(true, 0, blockAll = true), plan())
+        assertTrue(lanOpen(plan()))
     }
 
     /** 计时器此刻的状态在设备之间切换: 照着切换, 只有操作的那台记录 (MECHANICS 15.2). */

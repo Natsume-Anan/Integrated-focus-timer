@@ -89,7 +89,7 @@ fun RulesScreen(go: (String) -> Unit) {
                 tr("过滤名单模式") + ": " + core.settings.display("FILTER_MODE"),
                 color = o.text, fontWeight = FontWeight.Bold)
             if (adapter) {
-                Dim(tr("全部断网时名单不起作用."), color = o.warn)
+                Dim(tr("屏蔽全部时名单不起作用."), color = o.warn)
                 PlainButton(tr("去设置里切换断网方式"), modifier = Modifier.padding(top = 6.dp)) { go("settings:net") }
             }
             Dim(tr("本次运行: 放行 {a} · 拦截 {b}", "a" to BlockLog.allowed, "b" to BlockLog.blocked), size = 13)
@@ -112,7 +112,7 @@ fun RulesScreen(go: (String) -> Unit) {
                     "at" to core.settings.applyAtText("FILTER_MODE")), size = 13, color = o.warn)
             }
         }
-        Flavor(tr("你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n不过作者更喜欢用Adapter模式."))
+        Flavor(tr("你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n作者比较喜欢用proxy block-all."))
 
         Segmented(listOf(RuleKeys.BLACKLIST to tr("黑名单"), RuleKeys.WHITELIST to tr("白名单")), view) { view = it }
         val (dk, ak) = RuleKeys.forMode(view)

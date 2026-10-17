@@ -56,7 +56,7 @@ object Schema {
         num("BREAK_CARRY_RATE", "暂停休息结转比例", "×", 1.0, 0.0, 1.0, false, 0.8, "timer"),
         // ---- 联网 ----
         Spec("NET_MODE", "断网方式", Kind.CHOICE, true, "net", "proxy",
-            choices = listOf("adapter" to "全部断网 (Adapter)", "proxy" to "规则过滤 (Proxy)")),
+            choices = listOf("adapter" to "代理 - 屏蔽全部", "proxy" to "代理 - 规则过滤")),
         num("DAILY_LIMIT", "每日联网额度", "min", 60.0, 0.0, 1440.0, true, 7200.0, "net"),
         num("COOLDOWN", "联网冷静期", "min", 60.0, 0.0, 240.0, true, 300.0, "net"),
         num("ENFORCE_EVERY", "断网复查间隔", "s", 1.0, 5.0, 3600.0, true, 60.0, "net"),

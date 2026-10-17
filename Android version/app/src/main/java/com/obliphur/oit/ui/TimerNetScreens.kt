@@ -99,7 +99,7 @@ fun TimerScreen() {
             // 连点按钮: 按钮上只写这几个字, 不写具体规则
             PlainButton(t.bonusLabel()) { t.onBonusClick() }
         }
-        Flavor(tr("学的时间越长得到的休息时间越长.请尽量长时间地专注."), Modifier.padding(top = 24.dp))
+        Flavor(tr("在第二段区间内 学的时间越长得到的休息时间越长.请尽量长时间地专注."), Modifier.padding(top = 24.dp))
     }
 }
 

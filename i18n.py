@@ -334,6 +334,10 @@ EN = {
         "Loosening changes are held back in the hope that, at some future moment, reason only needs to win for a short while to stop the process.\nWhy hold back tightening too? The author hopes you won't drain the pond to catch the fish. You may see how valuable one more hour of study is, but not how much pressure one less hour of rest puts on your mental health. So use this time to think about how less time, or blocking certain key sites, would affect your life.",
     "你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n不过作者更喜欢用Adapter模式.":
         "Your thoughtful author has already considered withdrawal symptoms and the need to look things up while configuring, so everything is allowed by default.\nThe limits on changing settings only take effect after the initial setup.\nThat said, the author prefers Adapter mode.",
+    "你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n作者比较喜欢用proxy block-all.":
+        "Your thoughtful author has already considered withdrawal symptoms and the need to look things up while configuring, so everything is allowed by default.\nThe limits on changing settings only take effect after the initial setup.\nThe author rather likes proxy block-all.",
+    "在第二段区间内 学的时间越长得到的休息时间越长.请尽量长时间地专注.":
+        "Within the second range, the longer you study, the more break time you earn. Try to stay focused as long as you can.",
     "学的时间越长得到的休息时间越长.请尽量长时间地专注.": "The longer you study, the more break time you earn. Try to stay focused as long as you can.",
     "不要勉强.": "Don't push yourself.",
     "就这样回到一切之初,修正错误的抉择.": "And so, back to the very beginning, to correct the wrong choice.",
@@ -437,6 +441,9 @@ EN = {
     "新版本 {v} 已下载, 点安装打开系统的安装界面.": "Version {v} is downloaded. Tap Install to open the system installer.",
     "新版本 {v} 已下载": "Version {v} downloaded",
     "安装": "Install",
+    "代理 - 屏蔽全部": "Proxy · block everything",
+    "代理 - 屏蔽全部: 离线时全部拦截, 名单不起作用.": "Proxy · block everything: everything is blocked while offline; the lists have no effect.",
+    "屏蔽全部": "blocking everything",
     # ---- 设备同步 (MECHANICS 15) ----
     "对方": "the other device",
     "本机": "this device",

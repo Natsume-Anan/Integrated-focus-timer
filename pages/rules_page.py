@@ -23,6 +23,7 @@ _WHY_TEXT = {
     "blacklist-domain": "网站黑名单",
     "self": "回环",
     "not-whitelisted": "不在白名单",
+    "blockall": "屏蔽全部",
 }
 
 _PANELS = (
@@ -103,7 +104,7 @@ class RulesPage(tk.Frame):
 
         # 作者的话: 为什么默认放行 (MECHANICS.md 4.1)
         flavor(body, tr(
-            "你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n不过作者更喜欢用Adapter模式."), bg=bg).pack(fill="x", pady=(0, 10))
+            "你们贴心的作者已经考虑到了戒断反应和设置参数的资料查询需要,所以默认是放行的.\n在完成初始设置后,各项设置的修改限制才会生效.\n作者比较喜欢用proxy block-all."), bg=bg).pack(fill="x", pady=(0, 10))
 
         grid = tk.Frame(body, bg=bg)
         grid.pack(fill="x")
@@ -308,7 +309,8 @@ class RulesPage(tk.Frame):
         r.promote_due()
         c = self.ctrl
 
-        proxy_on = getattr(config, "NET_MODE", "adapter") == "proxy"
+        net_mode = getattr(config, "NET_MODE", "adapter")
+        proxy_on = net_mode in ("proxy", "proxy_all")
         mode = self._mode()
         active = keys_for_mode(mode)
 
@@ -331,9 +333,10 @@ class RulesPage(tk.Frame):
         if proxy_on:
             hide_pack(self.btn_settings)
             run = tr("运行中") if c.running else tr("未运行")
-            cfg(self.lbl_mode,
-                text=tr("Proxy 模式 · 本地代理 127.0.0.1:{port} · {run}").format(
-                    port=c.port, run=run),
+            text = tr("Proxy 模式 · 本地代理 127.0.0.1:{port} · {run}").format(port=c.port, run=run)
+            if net_mode == "proxy_all":
+                text += "\n" + tr("代理 - 屏蔽全部: 离线时全部拦截, 名单不起作用.")
+            cfg(self.lbl_mode, text=text,
                 fg=COLORS["success"] if c.running else COLORS["warn"])
         else:
             cfg(self.lbl_mode,
@@ -459,7 +462,7 @@ class RulesPage(tk.Frame):
         if not sel or sel[0] >= len(self._found_ids):
             toast.warn(tr("先在上面选一台设备."))
             return
-        if getattr(config, "NET_MODE", "adapter") != "proxy":
+        if getattr(config, "NET_MODE", "adapter") not in ("proxy", "proxy_all"):
             toast.warn(tr("两端都使用 Proxy 断网方式时才能同步."))
             return
         d = self.sync.found.get(self._found_ids[sel[0]])
@@ -487,7 +490,7 @@ class RulesPage(tk.Frame):
         s = self.sync
         if s is None or not hasattr(self, "lbl_sync_me"):
             return
-        proxy_on = getattr(config, "NET_MODE", "adapter") == "proxy"
+        proxy_on = getattr(config, "NET_MODE", "adapter") in ("proxy", "proxy_all")
         me = tr("本机: {name} · 端口 {port}", name=s.my_name, port=s.port or "-")
         if not proxy_on:
             me += "\n" + tr("两端都使用 Proxy 断网方式时才能同步.")

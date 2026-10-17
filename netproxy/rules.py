@@ -27,6 +27,8 @@ LIST_KEYS = (WHITE_DOMAINS, WHITE_APPS, BLACK_DOMAINS, BLACK_APPS)
 
 MODE_BLACKLIST = "blacklist"
 MODE_WHITELIST = "whitelist"
+# 代理 - 屏蔽全部 (断网方式 proxy_all): 不看名单, 离线时除本机地址外全部拦截, 联网会话中全部放行
+MODE_BLOCKALL = "blockall"
 
 CHANGE_DELAY_HOURS = 48
 LOOSEN_DELAY_HOURS = CHANGE_DELAY_HOURS   # 旧名字, 保留兼容
@@ -305,6 +307,8 @@ class RuleStore:
         s = self._snap
         if host in _LOOPBACK or host.startswith("127."):
             return True, "local"
+        if mode == MODE_BLOCKALL:
+            return (True, "online") if online else (False, "blockall")
         if mode == MODE_WHITELIST:
             if online:
                 return True, "online"
@@ -393,6 +397,10 @@ def _selftest():
     assert empty.decide("anything.com", "x.exe", False, MODE_WHITELIST) == (False, "offline"), \
         "白名单为空时离线全拦"
     assert keys_for_mode(MODE_WHITELIST) == (WHITE_DOMAINS, WHITE_APPS)
+    # 屏蔽全部: 名单不起作用
+    assert rs.decide("www.school.edu.cn", "code.exe", False, MODE_BLOCKALL) == (False, "blockall")
+    assert rs.decide("zhihu.com", "chrome.exe", True, MODE_BLOCKALL) == (True, "online")
+    assert rs.decide("localhost", "", False, MODE_BLOCKALL) == (True, "local")
     assert keys_for_mode("whatever") == (BLACK_DOMAINS, BLACK_APPS)
 
     assert rs.app_allowed("Steam.exe", False, MODE_BLACKLIST) == (False, "blacklist-app")

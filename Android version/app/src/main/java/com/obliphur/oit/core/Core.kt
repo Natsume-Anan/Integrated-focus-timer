@@ -39,7 +39,7 @@ sealed class VpnPlan {
     /** 只有 include 里的应用的流量进 VPN 后丢弃, 其余应用不受影响. */
     data class BlockOnly(val include: Set<String>) : VpnPlan()
     /** 只接管 DNS: filter=true 时按名单拦截域名 (和发起查询的应用), 否则全部放行. */
-    data class Dns(val filter: Boolean, val rulesVersion: Long) : VpnPlan()
+    data class Dns(val filter: Boolean, val rulesVersion: Long, val blockAll: Boolean = false) : VpnPlan()
 }
 
 class Core(val dir: File, val host: Host, val mono: () -> Double) {
@@ -373,8 +373,9 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
         if (dm.resetting || net.dead || settings.devMode) return VpnPlan.None
         val online = net.online
         val snap = rules.snap
+        // 代理 - 屏蔽全部 (设置里的 Adapter): 离线时接管 DNS, 所有域名一律拦截; 联网中全部放行
         if (settings.str("NET_MODE") == "adapter")
-            return if (online) VpnPlan.Dns(false, 0) else VpnPlan.BlockAll(emptySet())
+            return if (online) VpnPlan.Dns(false, 0) else VpnPlan.Dns(true, 0, blockAll = true)
         if (settings.str("FILTER_MODE") == RuleKeys.WHITELIST) {
             if (online) return VpnPlan.Dns(false, 0)
             if (snap.lists[RuleKeys.WHITE_DOMAINS]!!.isEmpty())
