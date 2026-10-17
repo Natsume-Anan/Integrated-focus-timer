@@ -61,3 +61,65 @@ python main.py
 ## 开发
 
 各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`...
+
+### 项目结构
+
+```text
+obliphur_terminal/
+├─ main.py               入口: 申请管理员权限, 启动界面
+├─ app.py                主窗口: 各页面, 计时器, 联网页, 定时检查, 关闭 / 重置
+├─ config.py             默认数值, 主题与字号, 版本号 (APP_VERSION)
+├─ settings_manager.py   设置项定义, 48 小时冷静期, 配置期
+├─ data_manager.py       学习时长, 整点记录, 专注时间段, 窗口使用时间 (统计)
+├─ net_guard.py          联网额度, 申请 / 快速访问 / 借贷, 断网方式切换
+├─ netproxy/             本地过滤代理 (Proxy 断网方式)
+│  ├─ server.py          HTTP / HTTPS 隧道代理, 403 拦截页
+│  ├─ rules.py           黑白名单与判定, 名单改动的冷静期
+│  ├─ controller.py      把代理, 名单, 系统代理拼在一起
+│  ├─ sysproxy.py        Windows 系统代理的安装 / 还原
+│  ├─ procinfo.py        连接 → 发起它的程序
+│  └─ selftest.py        端到端自检
+├─ window_guard.py       任务栏窗口数上限, 按前台窗口关程序, 前台程序识别
+├─ devsync.py            设备同步: 发现, 绑定, 加密, 同步, 安装包直接传输
+├─ sync_local.py         设备同步 ↔ 本机数据
+├─ firewall.py           Windows 防火墙: 放行同步端口
+├─ updater.py            从 GitHub 检查 / 安装更新
+├─ ai_assist.py          AI 名单建议: 服务商, 提示词, 解析
+├─ context_collect.py    AI 建议用的本机信息 (已安装应用, 浏览记录里的域名)
+├─ i18n.py               中英文界面文字
+├─ toast.py              提示 / 确认 / 只能手动关闭的提醒窗
+├─ shortcut.py           桌面快捷方式, 开始菜单
+├─ uninstall.py / .bat   独立的卸载程序
+├─ pages/                各页面的界面
+│  ├─ settings_page.py   设置 (按模块分页)
+│  ├─ sync_panel.py      设备同步 (设置 → 基本设置)
+│  ├─ rules_page.py      规则 (名单, 拦截记录)
+│  ├─ ai_dialogs.py      AI 建议的对话框
+│  ├─ stats_page.py      统计
+│  ├─ calendar_page.py   日历
+│  ├─ hour_log_page.py   整点记录
+│  └─ widgets.py         共用控件 (滚动区, 开关, 加载页 …)
+├─ defaults/             空模板 (名单, AI 配置)
+├─ MECHANICS.md          各机制的具体规则与数值
+├─ for_developer.md      开发约定
+└─ Android version/      Android 版
+   └─ app/src/main/java/com/obliphur/oit/
+      ├─ OitApp.kt       应用入口, 平台相关的接口实现, 更新 / 发更新给其他设备
+      ├─ core/           和平台无关的逻辑 (对应桌面版的同名模块)
+      │  ├─ Core.kt      各部分拼在一起: 定时, VPN 计划, 锁定应用
+      │  ├─ Settings.kt  设置项与冷静期
+      │  ├─ NetGuard.kt  联网额度与申请
+      │  ├─ Timer.kt     专注计时器
+      │  ├─ Rules.kt     黑白名单
+      │  ├─ DataStore.kt 统计数据
+      │  ├─ Config.kt    数值, 工具函数
+      │  ├─ Store.kt     读写文件
+      │  └─ I18n.kt / EnStrings.kt  英文界面
+      ├─ service/        前台服务 (Platform.kt), VPN (OitVpnService.kt, Packets.kt),
+      │                  锁定应用 (AppLock.kt), 更新 (Updater.kt)
+      ├─ sync/           设备同步 (SyncService.kt, SyncCrypto.kt, AndroidLocal.kt)
+      ├─ ai/Ai.kt        AI 名单建议
+      └─ ui/             各页面 (Jetpack Compose)
+```
+
+本机的数据不在程序文件夹里, 在 `%USERPROFILE%\AppData\LocalLow\Obliphur's Integrated Terminal\` (见 `MECHANICS.md` 第 10 节). `config_local.py` 是本机的覆盖设置, 不上传.
