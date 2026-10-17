@@ -20,7 +20,6 @@
 
 - 本项目**包含 AI 生成的代码**,本文亦由 AI 整理.
 - 程序包含**关闭网卡等强制性断网措施**.
-- **需要立即恢复网络时,请使用侧栏最底部的 Uninstall.**
 
 ---
 
@@ -50,8 +49,6 @@
 python main.py
 ```
 
----
-
 ## 开发
 
-各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`, `python -m netproxy.selftest`.
+各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`, `python -m netproxy.selftest`, `python uninstall.py --selftest`.
