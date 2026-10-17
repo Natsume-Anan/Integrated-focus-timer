@@ -175,7 +175,7 @@ class RulesPage(tk.Frame):
             p = self.rules.pending_for(key, item) if key and item else None
             p = p or (self.rules.pending[-1] if self.rules.pending else None)
             at = f"{p['apply_at']:%Y-%m-%d %H:%M}" if p else ""
-            toast.info(tr("这项改动要等冷静期,将于 {at} 生效.").format(at=at))
+            toast.info(tr("将于 {at} 生效.").format(at=at))
         elif status == "cancelled":
             toast.info(tr("已取消排队中的改动,名单保持原样."))
         elif status == "exists":
@@ -260,8 +260,7 @@ class RulesPage(tk.Frame):
             options = [(a["exe"], f"{a['name']}  ({a['exe']})") for a in apps]
         else:
             if not toast.ask(
-                tr("将读取本机浏览器历史,只统计「域名 + 访问次数」,不读网址,标题和搜索词,"
-                   "也不保存,不上传.\n\n继续吗?"),
+                tr("只读取浏览器历史里的域名和访问次数,不保存,不上传."),
                 title=tr("读取浏览器记录")
             ):
                 return
@@ -332,7 +331,7 @@ class RulesPage(tk.Frame):
                 fg=COLORS["success"] if c.running else COLORS["warn"])
         else:
             cfg(self.lbl_mode,
-                text=tr("当前是 Adapter 模式 —— 规则已保存,但暂未启用."),
+                text=tr("Adapter 模式 · 规则未启用"),
                 fg=COLORS["warn"])
             show_pack(self.btn_settings, anchor="w", pady=(6, 0))
         cfg(self.lbl_stats,

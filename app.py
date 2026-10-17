@@ -474,7 +474,7 @@ class BreakTimerApp:
         # 加载页盖住整个窗口; 旧界面在它后面拆掉, 新界面在它后面一页一页建好
         # (进度条随之前进), 最后在冻结中撤掉加载页, 新界面整窗一次显示.
         cover = LoadingCover(self.root, tr("正在重新加载界面…"),
-                             tr("切换语言 / 字号 / 主题需要重建所有页面,请稍候"),
+                             tr("请稍候"),
                              steps=self.LAYOUT_STEPS + 1).show()
         try:
             self._rebuild_ui(cover)
@@ -721,13 +721,13 @@ class BreakTimerApp:
         """副按钮: 空闲 → 用积攒的休息时间直接开始休息; 休息中 → 暂停休息."""
         if self.state == IDLE:
             if self.break_carry <= 0:
-                toast.info(tr("还没有积攒的休息时间.先专注一轮吧."))
+                toast.info(tr("还没有积攒的休息时间."))
                 return
             self.last_t_minutes = 0.0
             total = int(self.break_carry)
             self._start_break()
             if self.state == ON_BREAK:
-                toast.success(tr("开始休息 {t}(用的是积攒的休息时间).").format(t=fmt_ms(total)))
+                toast.success(tr("开始休息 {t}.").format(t=fmt_ms(total)))
         elif self.state == ON_BREAK:
             self.end_break_early()
 
@@ -828,13 +828,13 @@ class BreakTimerApp:
             self._bonus_break_active = True
             self._save_timer_state()
             where = tr("已加到这次休息里.")
-            where += "\n" + tr("这次休息可以随时暂停(联网时也可以),剩余时间不打折.")
+            where += "\n" + tr("这次休息可以随时暂停,剩余时间不打折.")
         else:
             # 存进积攒的休息时间; 用到它的下一次休息享受"可暂停、不打折"
             self._timer_extra["bonus_pending"] = True
             self._set_break_carry(self.break_carry + add)
-            where = tr("已存入积攒的休息时间,可以按 [开始休息] 使用.")
-            where += "\n" + tr("下一次休息可以随时暂停(联网时也可以),剩余时间不打折.")
+            where = tr("已存入积攒的休息时间.")
+            where += "\n" + tr("下一次休息可以随时暂停,剩余时间不打折.")
         msg = tr("获得 {t} 休息时间.").format(t=fmt_ms(add)) + where
         msg += "\n" + tr("本周还能领 {left}.").format(left=fmt_hm(left - add))
         msg += "\n\n" + tr("这么想休息,也许是真的累了.休息不需要理由.")
@@ -863,7 +863,7 @@ class BreakTimerApp:
         self.state = ON_BREAK
         self.break_start_wall = datetime.now()
         if bonus:
-            toast.info(tr("这次休息含领到的时间:可以随时暂停(联网时也可以),剩余时间不打折."),
+            toast.info(tr("这次休息可以随时暂停,剩余时间不打折."),
                        timeout=8000)
         self._show_on_break()
         self.schedule_update()
@@ -887,7 +887,7 @@ class BreakTimerApp:
         self._sync_timer_buttons()
         total = self._break_seconds()
         self.lbl_time.config(text=fmt_ms(total))
-        sub = tr("已工作 {m:.2f} 分钟 → 上方是建议休息时长").format(m=self.last_t_minutes)
+        sub = tr("已工作 {m:.2f} 分钟").format(m=self.last_t_minutes)
         if self.break_carry > 0:
             sub += "\n" + tr("(含之前暂停休息结转的 {c})").format(c=fmt_ms(self.break_carry))
         self.lbl_sub.config(text=sub)
@@ -925,10 +925,10 @@ class BreakTimerApp:
             self._set_break_carry(self.break_carry + add)
             if not silent:
                 if full:
-                    toast.info(tr("休息已暂停.\n这次不打折,剩余 {left} 全部留给下次休息.").format(
+                    toast.info(tr("休息已暂停,剩余 {left} 留给下次.").format(
                         left=fmt_ms(left)))
                 else:
-                    toast.info(tr("休息已暂停.\n剩余 {left} 按 ×{r:g} 计入下次休息: +{add}").format(
+                    toast.info(tr("休息已暂停,下次休息 +{add}.").format(
                         left=fmt_ms(left), r=config.BREAK_CARRY_RATE, add=fmt_ms(add)))
         if silent:
             self.state = IDLE
@@ -990,7 +990,7 @@ class BreakTimerApp:
 
     def _idle_sub_text(self) -> str:
         if self.break_carry > 0:
-            return tr("积攒的休息时间 {c}:下次休息时自动加上,也可以按 [开始休息] 直接使用.").format(
+            return tr("积攒的休息时间: {c}").format(
                 c=fmt_ms(self.break_carry))
         return ""
 
@@ -1086,16 +1086,16 @@ class BreakTimerApp:
             return
         if penalized:
             ok = min(ok, sec)
-            msg = tr("上次专注时程序退出了,当时\"还在吗\"提醒已经过了期限,专注按{at}自动结束计算.").format(
+            msg = tr("上次专注时程序退出了,专注已按{at}自动结束.").format(
                 at=f"{start + timedelta(seconds=sec):%m-%d %H:%M}")
-            msg += "\n" + tr("从{since}起没有确认的{seg}只按×{p:g}计入,这次专注共计入{m:.1f}分钟.").format(
+            msg += "\n" + tr("没有确认的部分按×{p:g}计入,共计入{m:.1f}分钟.").format(
                 since=f"{start + timedelta(seconds=ok):%H:%M}", seg=fmt_hm(sec - ok),
                 p=float(config.FOCUS_CHECK_PENALTY), m=minutes)
         else:
             msg = tr("上次专注时程序退出了,专注记到 {at} 为止: 计入 {m:.1f} 分钟.").format(
                 at=f"{alive:%m-%d %H:%M}", m=minutes)
         if brk > 0:
-            msg += "\n" + tr("对应的休息时间 {t} 已存入积攒的休息时间.").format(t=fmt_ms(brk))
+            msg += "\n" + tr("积攒的休息时间 +{t}.").format(t=fmt_ms(brk))
         toast.notice(tr("⏱  上次的专注已记录"), msg)
 
     def _book_focus(self, start: datetime, seconds: float, ok=None):
@@ -1145,7 +1145,7 @@ class BreakTimerApp:
             self._check_win = toast.notice(
                 tr("⏱  还在专注吗?"),
                 tr("已经专注 {t} 了.").format(t=fmt_hm(mark)) + "\n"
-                + tr("请在{at}之前关掉这个窗口.否则专注会自动结束,没有确认的这一段只按×{p:g}计入.").format(
+                + tr("请在{at}之前关掉这个窗口,否则专注会自动结束.").format(
                     at=f"{due:%H:%M}", p=float(config.FOCUS_CHECK_PENALTY)),
                 [(tr("还在,继续专注"), None, True), (tr("■  结束专注"), self._end_from_check, False)])
         if time.monotonic() - self._focus_saved >= float(config.FOCUS_SAVE_EVERY):
@@ -1172,11 +1172,11 @@ class BreakTimerApp:
         msg = tr("提醒窗{n}分钟内没有被关掉,专注已在{at}自动结束.").format(
             n=int(round(float(config.FOCUS_CHECK_GRACE) / 60)),
             at=f"{start + timedelta(seconds=seconds):%H:%M}")
-        msg += "\n" + tr("从{since}起没有确认的{seg}只按×{p:g}计入,这次专注共计入{m:.1f}分钟.").format(
+        msg += "\n" + tr("没有确认的部分按×{p:g}计入,共计入{m:.1f}分钟.").format(
             since=f"{start + timedelta(seconds=ok):%H:%M}", seg=fmt_hm(seconds - ok),
             p=float(config.FOCUS_CHECK_PENALTY), m=minutes)
         if brk > 0:
-            msg += "\n" + tr("对应的休息时间 {t} 已存入积攒的休息时间.").format(t=fmt_ms(brk))
+            msg += "\n" + tr("积攒的休息时间 +{t}.").format(t=fmt_ms(brk))
         toast.notice(tr("⏹  专注已自动结束"), msg)
 
     def _restore_timer_view(self):
@@ -1398,7 +1398,7 @@ class BreakTimerApp:
                 lines.append(f"• {title} ({exe})" if exe else f"• {title}")
         if len(closed) > 8:
             lines.append("…")
-        toast.warn(tr("任务栏上有 {n} 个窗口,超过上限 {x} 个,随机关闭了 {k} 个:\n{titles}",
+        toast.warn(tr("窗口超过上限 {x} 个,关闭了:\n{titles}",
                       n=n, x=limit, k=len(closed), titles="\n".join(lines)))
 
     # ---- 窗口使用时间统计 ----
@@ -1431,12 +1431,9 @@ class BreakTimerApp:
 
     def _show_welcome(self):
         hours = int(config.SETUP_HOURS)
-        msg = (tr("OIT帮你把上网集中起来:联网要先申请,等过冷静期才连上,每天有额度.")
-               + "\n" + tr("另有专注计时器、整点记录和统计,帮你看清时间花在哪里.")
-               + "\n\n" + tr("接下来{h}小时是配置期:所有设置和名单的修改都立即生效,"
-                               "请趁这段时间按自己的习惯调好.").format(h=hours)
-               + "\n" + tr("配置期结束后,每次修改都要等 48 小时才生效.")
-               + "\n" + tr("调好了,可以在 设置 → 基本设置 里提前结束配置期."))
+        msg = (tr("联网要先申请,等过冷静期才连上,每天有额度.")
+               + "\n\n" + tr("接下来{h}小时是配置期:所有修改立即生效.").format(h=hours)
+               + "\n" + tr("之后每次修改都要等 48 小时."))
         toast.notice(tr("👋  欢迎使用 OIT"), msg, [
             (tr("去设置"), self._open_basic_settings, True), (tr("开始使用"), None, False)])
 
@@ -1452,7 +1449,7 @@ class BreakTimerApp:
         self._setup_was_active = False
         self._log_notice("SETUP period ended by user")
         self._after_setup_change()
-        toast.info(tr("配置期已结束.之后的修改都要等 48 小时才生效."))
+        toast.info(tr("配置期已结束."))
 
     def _check_setup_period(self):
         """配置期自然到期时提示一次, 并刷新界面上的标记."""
@@ -1462,7 +1459,7 @@ class BreakTimerApp:
             self._log_notice("SETUP period ended (time is up)")
             self._after_setup_change()
             toast.notice(tr("⏳  配置期结束了"),
-                         tr("从现在起,设置和名单的修改都要等 48 小时才生效."))
+                         tr("之后的修改都要等 48 小时."))
 
     def _after_setup_change(self):
         self.update_settings_badge()
@@ -1490,7 +1487,7 @@ class BreakTimerApp:
         self.update_settings_badge()
         self.refresh_net(force=True)
         labels = ",".join(tr(self.settings.display(k)) for k in due)
-        toast.success(tr("48 小时冷静期已结束,以下配置从现在开始生效:") + "\n" + labels)
+        toast.success(tr("以下配置已生效:") + "\n" + labels)
         self._log_notice(f"SETTINGS applied: {', '.join(due)}")
         return due
 
@@ -1723,7 +1720,7 @@ class BreakTimerApp:
             toast.warn(tr(msg2))
             return
         if not toast.ask(
-            tr("快速访问跳过冷静期立刻联网,额度按 ×{a:g} 消耗.\n\n联网: {m} 分钟\n消耗: {cost} 今日额度\n\n确定吗?").format(
+            tr("快速访问跳过冷静期立刻联网,额度按 ×{a:g} 消耗.").format(
                 a=config.QUICK_MULTIPLIER, m=minutes,
                 cost=fmt_hm(minutes * 60 * config.QUICK_MULTIPLIER)),
             title=tr("快速访问"), danger=True
@@ -1780,8 +1777,8 @@ class BreakTimerApp:
                 self.pages["settings"].refresh()
         msg = tr("明天的联网额度已经借掉了 {pct} ({used} / {limit}).").format(
             pct=f"{after / limit:.0%}", used=fmt_hm(after), limit=fmt_hm(limit))
-        msg += "\n\n" + tr("借得这么多,也许是休息不够.不妨在 设置 → 计时器 里调高「休息时间倍率」.")
-        msg += "\n\n" + tr("另外,下一次修改「每日联网额度」会立即生效,不必等 48 小时.")
+        msg += "\n\n" + tr("也许是休息不够,可以调高「休息时间倍率」.")
+        msg += "\n\n" + tr("下一次修改「每日联网额度」免等待.")
         toast.notice(tr("💳  借得有点多了"), msg, [
             (tr("去设置"), self._open_detail_settings, True), (tr("知道了"), None, False)])
 
@@ -1819,7 +1816,7 @@ class BreakTimerApp:
             toast.warn(tr(msg2))
             return
         if not toast.ask(
-            tr("立刻结束冷静期并联网?\n\n联网: {m} 分钟\n消耗: {cost} 今日额度(×{a:g})\n\n确定吗?").format(
+            tr("立刻结束冷静期并联网?额度按 ×{a:g} 消耗.").format(
                 m=minutes, cost=fmt_hm(minutes * 60 * config.QUICK_MULTIPLIER), a=config.QUICK_MULTIPLIER),
             title=tr("快速访问"), danger=True
         ):
@@ -1854,10 +1851,7 @@ class BreakTimerApp:
 
             self._net_set_status("Developer mode — network unrestricted", COLORS["warn"])
             cfg(self.net_lbl_time, text="DEV")
-            cfg(self.net_lbl_sub,
-                text=tr("开发者模式已开启:本程序不会断网,也不会申请/计时.\n"
-                        "调试完成后请到 Settings 页关掉它.")
-            )
+            cfg(self.net_lbl_sub, text=tr("开发者模式已开启:不断网,不计时."))
             hide_pack(self.net_form)
             hide_pack(self.net_ctrl)
             self._net_bar_set(n)
@@ -1914,7 +1908,7 @@ class BreakTimerApp:
             cfg(self.net_lbl_time, text=fmt_ms(n.grant_left))
             if n.grant_quick:
                 cfg(self.net_lbl_sub,
-                    text=tr("⚡ 快速访问 —— 额度按 ×{a:g} 消耗,归零自动断网.").format(
+                    text=tr("⚡ 快速访问 ×{a:g}").format(
                         a=n.grant_rate)
                 )
             else:
@@ -2013,7 +2007,7 @@ class BreakTimerApp:
         if self.var_confirm.get().strip() != "RESET":
             return
         if not toast.ask(
-            tr("这将永久删除全部数据,所有设置恢复默认值,程序会重新打开.\n\n不可撤销.继续吗?"),
+            tr("这将永久删除全部数据,不可撤销."),
             title=tr("重置确认"), danger=True
         ):
             return

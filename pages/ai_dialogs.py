@@ -97,11 +97,11 @@ def open_model_settings(parent, cfg: "ai_assist.AIConfig") -> bool:
         cb_proto.set(prof["protocol"])
         cb_proto.config(state="readonly" if k == "custom" else "disabled")
         var_key.set(prof["api_key"])
-        note.config(text=(tr("自定义供应商:Base URL 与型号请自行填写,协议选 openai(兼容接口)或 anthropic.")
+        note.config(text=(tr("请填写 Base URL 与型号,协议选 openai 或 anthropic.")
                           if k == "custom"
-                          else tr("已自动填入 {name} 的 Base URL,型号可自行修改.")
+                          else tr("已填入 {name} 的 Base URL.")
                           ).format(name=_provider_label(k)) + "\n" +
-                 tr("API Key 加密后保存在本机,只有当前 Windows 账户能解开;只经 https 发往所选服务商,不会随名单或日志输出."))
+                 tr("API Key 加密保存在本机,只发往所选服务商."))
         state["cur"] = k
 
     def on_provider(_e=None):
@@ -193,12 +193,12 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
         _label(fr, tr("先说清楚会发生什么"), ).pack(fill="x")
         info = _label(
             fr,
-            tr("· 只有你勾选的内容会被读取;读取后先给你预览,你点「发送」之后才会联网.") + "\n" +
-            tr("· 浏览器记录只取「域名 + 访问次数」,不读网址,标题,搜索词;应用清单只含应用名与 exe 名.") + "\n" +
-            tr("· 预览框里的文字可以直接修改:不想让模型看到的网站或应用,删掉那一行即可;也可以自己补充.") + "\n" +
-            tr("· 内容只发给下面这一家模型服务商,本程序不保存这些内容.") + "\n" +
-            (tr("· 黑名单模式下,模型只给候选条目,不会给出理由或评价.") if black else
-             tr("· 模型给出的只是候选,由你勾选后才会加入名单.")),
+            tr("· 只读取你勾选的内容,点「发送」后才联网.") + "\n" +
+            tr("· 浏览器记录只取域名和访问次数.") + "\n" +
+            tr("· 发送前可以在预览里删改.") + "\n" +
+            tr("· 只发给下面这家服务商,本程序不保存.") + "\n" +
+            (tr("· 模型只给候选条目,不给评价.") if black else
+             tr("· 候选条目由你勾选后才加入名单.")),
             dim=True, small=True)
         info.pack(fill="x", pady=(4, 10))
         wrap_label(info, 20)
@@ -245,7 +245,7 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
 
     # ── ② 预览 ──
     def step_preview(fr):
-        _label(fr, tr("以下就是将要发送的全部内容(加上固定的提示词).可以直接编辑:删掉不想发送的行,或自行补充.")
+        _label(fr, tr("将要发送的全部内容,可以直接编辑.")
                ).pack(fill="x")
         tf = tk.Frame(fr, bg=COLORS["bg"])
         tf.pack(fill="both", expand=True, pady=(6, 4))
@@ -338,8 +338,8 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
                     line += "   " + tr("(推荐,不在本机记录中)")
             lb.insert("end", line)
         lb.select_set(0, "end")
-        hint = (tr("配置期内:名单的所有改动立即生效.") if config.changes_instant()
-                else tr("加入名单要等 48 小时的冷静期才生效."))
+        hint = (tr("配置期内:立即生效.") if config.changes_instant()
+                else tr("48 小时后生效."))
         _label(fr, hint, dim=True, small=True).pack(fill="x")
 
         def adopt():
@@ -349,7 +349,7 @@ def open_suggest(parent, cfg: "ai_assist.AIConfig", rules, mode: str, on_done=No
                 return
             statuses = [rules.add(items[i][0], items[i][1]["item"])[0] for i in picked]
             if "staged" in statuses:
-                toast.info(tr("已提交,要等 48 小时的冷静期后生效."))
+                toast.info(tr("已提交,48 小时后生效."))
             elif "applied" in statuses:
                 toast.success(tr("已加入名单."))
             else:

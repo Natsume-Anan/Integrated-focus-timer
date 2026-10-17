@@ -416,7 +416,7 @@ class SettingsManager:
             had = self.pending.pop(key, None) is not None
             if had:
                 self.save()
-                return "staged", tr("{label} 已恢复到当前生效值,排队中的改动已取消.",
+                return "staged", tr("{label} 的待生效修改已取消.",
                                     label=tr(spec['label']))
             return "nochange", tr("{label} 与当前生效值相同.", label=tr(spec['label']))
 
@@ -430,7 +430,7 @@ class SettingsManager:
             self.pending.pop(key, None)
             self.save()
             self.apply_to_config()
-            return "instant", tr("{label} 已立即生效(这一次免等待已用掉).",
+            return "instant", tr("{label} 已立即生效.",
                                  label=tr(spec['label']))
 
         self.pending[key] = {

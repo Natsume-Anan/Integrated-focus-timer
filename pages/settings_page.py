@@ -287,7 +287,7 @@ class SettingsPage(tk.Frame):
 
     def _end_setup(self):
         if not toast.ask(
-            tr("结束配置期后,设置和名单的每次修改都要等 48 小时才生效.\n不能撤销.确定结束吗?"),
+            tr("结束后每次修改都要等 48 小时,不能撤销."),
             title=tr("结束配置期"), danger=True
         ):
             return
@@ -320,7 +320,7 @@ class SettingsPage(tk.Frame):
     def _on_dev_switch(self, enabled):
         enabled = bool(enabled)
         if enabled and not toast.ask(
-            tr("开发者模式开关:开启后本程序不再以任何方式断网.调试完成后请关掉.确定开启吗?"),
+            tr("开启后不再断网."),
             title=tr("开发者模式确认")
         ):
             self.sw_dev.set(False)
@@ -487,7 +487,7 @@ class SettingsPage(tk.Frame):
         if not n:
             return
         if not toast.ask(
-            tr("确定取消全部 {n} 项待生效修改吗?").format(n=n),
+            tr("取消全部 {n} 项待生效修改?").format(n=n),
             title=tr("取消待生效修改")
         ):
             return
