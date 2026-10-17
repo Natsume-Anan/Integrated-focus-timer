@@ -14,6 +14,10 @@ from .widgets import ScrollArea, smooth, cfg, show_pack, hide_pack
 # 图表颜色都跟随当前主题 (config.CHART_PALETTE / COLORS 会在切换主题时原地更新)
 PALETTE = config.CHART_PALETTE
 
+# 占比低于这个值的项归入「其他」; 鼠标停在「其他」上可以看到具体是哪些
+OTHER_BELOW = 0.01
+OTHER_TIP_LINES = 25
+
 
 def _c(key: str) -> str:
     return COLORS[key]
@@ -24,8 +28,9 @@ WEEKDAYS_EN = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 class StatsPage(tk.Frame):
-    """📊 Statistics:上月 / 本月的整点记录活动, 联网理由与各程序的前台时间, 饼状图 + 图例.
+    """📊 Statistics:整点记录活动, 联网理由与各程序的前台时间, 饼状图 + 图例.
 
+    右上角切换看本月还是上月 (专注计时页固定看最近 7 天, 不显示这个切换).
     第一页(整点记录)只在整点记录开启时出现;每一页可单独切换「占比 / 总时间」."""
 
     def __init__(self, master, data_manager, net_guard, focus_live=None):
@@ -35,9 +40,11 @@ class StatsPage(tk.Frame):
         self.focus_live = focus_live
         self.page = "log"
         self.mode = {"log": "pct", "net": "pct", "window": "pct"}
+        self.month = "this"          # "this" 本月 / "last" 上月
         self._tabs_log_on = None
         self._focus_days = []
         self._focus_geom = None
+        self._tip = None            # 「其他」的悬停提示 (一个无边框的小窗)
         self._build()
         self.after(60000, self._focus_tick)
 
@@ -49,7 +56,20 @@ class StatsPage(tk.Frame):
         tk.Label(
             hdr, text=tr("📊  统计"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
-        ).pack(anchor="w")
+        ).pack(side="left")
+
+        # 右上角: 看本月还是上月
+        self.month_bar = tk.Frame(hdr, bg=bg)
+        self.month_bar.pack(side="right")
+        self.month_btns = {}
+        for key, text in (("this", tr("本月")), ("last", tr("上月"))):
+            b = tk.Button(
+                self.month_bar, text=text, relief="flat", bd=0, padx=14, pady=6,
+                font=config.font("body", bold=True), cursor="hand2",
+                command=lambda k=key: self._set_month(k)
+            )
+            b.pack(side="right", padx=(4, 0))
+            self.month_btns[key] = b
 
         bar = tk.Frame(self, bg=bg)
         bar.pack(fill="x", padx=26, pady=(8, 8))
@@ -100,33 +120,40 @@ class StatsPage(tk.Frame):
         self.focus_cv.bind("<Motion>", self._focus_hover)
         self.focus_cv.bind("<Leave>", lambda e: self.focus_cv.delete("tip"))
 
-        self.cols = []
-        for i in range(2):
-            body.columnconfigure(i, weight=1, uniform="col")
-            col = tk.Frame(body, bg=COLORS["bg_card"],
-                           highlightbackground=COLORS["border"], highlightthickness=1)
-            col.grid(row=0, column=i, sticky="nsew", padx=6)
-            title = tk.Label(col, text="", bg=COLORS["bg_card"], fg=COLORS["text"],
-                             font=config.font("h2", bold=True), anchor="w")
-            title.pack(fill="x", padx=14, pady=(10, 0))
-            total = tk.Label(col, text="", bg=COLORS["bg_card"], fg=COLORS["accent"],
-                             font=config.font("body", bold=True), anchor="w")
-            total.pack(fill="x", padx=14)
-            size = config.scaled(210)
-            canvas = tk.Canvas(col, width=size, height=size, bg=COLORS["bg_card"],
-                               highlightthickness=0)
-            canvas.pack(pady=(6, 6))
-            legend = ScrollArea(col, height=config.scaled(170), bg=COLORS["bg_card"])
-            legend.pack(fill="both", expand=True, padx=8, pady=(0, 8))
-            self.cols.append({"title": title, "total": total, "canvas": canvas,
-                              "size": size, "legend": legend,
-                              "rows": [], "empty": None, "sig": None, "keys": None})
-        body.rowconfigure(0, weight=1)
+        # 一张卡片: 上面是月份和合计, 下面左边饼图, 右边图例
+        card = COLORS["bg_card"]
+        col = tk.Frame(body, bg=card, highlightbackground=COLORS["border"], highlightthickness=1)
+        col.pack(fill="both", expand=True, padx=6)
+        title = tk.Label(col, text="", bg=card, fg=COLORS["text"],
+                         font=config.font("h2", bold=True), anchor="w")
+        title.pack(fill="x", padx=14, pady=(10, 0))
+        total = tk.Label(col, text="", bg=card, fg=COLORS["accent"],
+                         font=config.font("body", bold=True), anchor="w")
+        total.pack(fill="x", padx=14)
+        row = tk.Frame(col, bg=card)
+        row.pack(fill="both", expand=True, padx=8, pady=(6, 10))
+        size = config.scaled(260)
+        canvas = tk.Canvas(row, width=size, height=size, bg=card, highlightthickness=0)
+        canvas.pack(side="left", anchor="n", padx=(10, 20), pady=(4, 0))
+        canvas.tag_bind("other", "<Enter>", lambda e: self._pie_hover(0, e))
+        canvas.tag_bind("other", "<Motion>", lambda e: self._pie_hover(0, e))
+        canvas.tag_bind("other", "<Leave>", lambda e: self._hide_tip())
+        legend = ScrollArea(row, height=size, bg=card)
+        legend.pack(side="left", fill="both", expand=True)
+        self.cols = [{"title": title, "total": total, "canvas": canvas,
+                      "size": size, "legend": legend,
+                      "rows": [], "empty": None, "sig": None, "keys": None,
+                      "other": [], "other_row": None, "grand": 0.0}]
 
 
     @smooth
     def _set_page(self, key: str):
         self.page = key
+        self.refresh()
+
+    @smooth
+    def _set_month(self, key: str):
+        self.month = key
         self.refresh()
 
     @smooth
@@ -137,6 +164,12 @@ class StatsPage(tk.Frame):
     def _style_buttons(self):
         for key, b in self.tab_btns.items():
             on = key == self.page
+            cfg(b, bg=COLORS["accent"] if on else COLORS["bg_card"],
+                     fg=COLORS["on_accent"] if on else COLORS["text"],
+                     activebackground=COLORS["accent_hover"] if on else COLORS["border"],
+                     activeforeground=COLORS["on_accent"] if on else COLORS["text"])
+        for key, b in self.month_btns.items():
+            on = key == self.month
             cfg(b, bg=COLORS["accent"] if on else COLORS["bg_card"],
                      fg=COLORS["on_accent"] if on else COLORS["text"],
                      activebackground=COLORS["accent_hover"] if on else COLORS["border"],
@@ -164,6 +197,7 @@ class StatsPage(tk.Frame):
         return PALETTE[i] if i < len(PALETTE) else _c("chart_other")
 
     def refresh(self):
+        self._hide_tip()
         log_on = bool(self.dm.hour_enabled)
         if not log_on and self.page == "log":
             self.page = "net"
@@ -180,6 +214,7 @@ class StatsPage(tk.Frame):
         self._style_buttons()
 
         if self.page == "focus":
+            hide_pack(self.month_bar)
             hide_pack(self.mode_bar)
             show_pack(self.focus_legend, side="right")
             hide_pack(self.pie_body)
@@ -189,12 +224,13 @@ class StatsPage(tk.Frame):
             return
         hide_pack(self.focus_legend)
         hide_pack(self.focus_body)
+        show_pack(self.month_bar, side="right")
         show_pack(self.mode_bar, side="right")
         show_pack(self.pie_body, fill="both", expand=True, padx=20, pady=(10, 16))
 
         this, last = month_prefixes()
-        for col, (name, prefix) in zip(self.cols, ((tr("上月"), last), (tr("本月"), this))):
-            self._draw_column(col, f"{name} · {prefix}", self._data(prefix))
+        name, prefix = (tr("上月"), last) if self.month == "last" else (tr("本月"), this)
+        self._draw_column(self.cols[0], f"{name} · {prefix}", self._data(prefix))
 
     def _draw_column(self, col, title: str, data: dict):
         pct_mode = self.mode[self.page] == "pct"
@@ -209,15 +245,22 @@ class StatsPage(tk.Frame):
         cfg(col["title"], text=title)
         cfg(col["total"], text=tr("合计 {t} · {n} 项").format(t=fmt_hm(total), n=len(items)))
 
-        slices = [(k, v, self._color(i, k)) for i, (k, v) in enumerate(items[:len(PALETTE)])]
-        rest = sum(v for _, v in items[len(PALETTE):])
-        if rest > 0:
-            slices.append((tr("其他"), rest, _c("chart_other")))
-        self._draw_pie(col["canvas"], col["size"], slices, total, pct_mode)
-        self._fill_legend(col, items, total, pct_mode)
+        # 占比 ≥ 1% 的项单独上色 (最多用完调色板), 其余归入「其他」
+        main = [(k, v) for k, v in items if total > 0 and v / total >= OTHER_BELOW]
+        main = main[:len(PALETTE)]
+        shown = {k for k, _ in main}
+        col["other"] = [(k, v) for k, v in items if k not in shown]
+        slices = [(k, v, self._color(i, k)) for i, (k, v) in enumerate(main)]
+        if col["other"]:
+            slices.append((tr("其他"), sum(v for _, v in col["other"]), _c("chart_other")))
+        col["other_row"] = len(main) if col["other"] else None
+        col["grand"] = total
+        self._draw_pie(col["canvas"], col["size"], slices, total, pct_mode,
+                       other=bool(col["other"]))
+        self._fill_legend(col, slices, total, pct_mode)
 
     def _fill_legend(self, col, items, total, pct_mode):
-        """图例的每一行控件循环使用: 只在行数不够时新建, 多出来的收起来."""
+        """items: [(名称, 秒, 颜色)]. 图例的每一行控件循环使用: 只在行数不够时新建, 多出来的收起来."""
         inner = col["legend"].inner
         card = COLORS["bg_card"]
         if col["empty"] is None:
@@ -240,6 +283,11 @@ class StatsPage(tk.Frame):
             name = tk.Label(row, text="", bg=card, fg=COLORS["text"], anchor="w",
                             font=config.font("small"))
             name.pack(side="left", fill="x", expand=True)
+            idx = len(rows)
+            for w in (row, sw, val, name):
+                w.bind("<Enter>", lambda e, c=col, i=idx: self._legend_hover(c, i, e))
+                w.bind("<Motion>", lambda e, c=col, i=idx: self._legend_hover(c, i, e))
+                w.bind("<Leave>", lambda e: self._hide_tip())
             rows.append((row, sw, val, name))
             created = True
 
@@ -247,21 +295,76 @@ class StatsPage(tk.Frame):
             if i >= len(items):
                 hide_pack(row)
                 continue
-            k, v = items[i]
-            cfg(sw, bg=self._color(i, k))
+            k, v, color = items[i]
+            cfg(sw, bg=color)
             cfg(val, text=f"{v / total * 100:.1f}%" if pct_mode else fmt_hm(v))
             cfg(name, text=k)
             show_pack(row, fill="x", padx=4, pady=1)
         if created:
             col["legend"].bind_children()
         # 只有项目或顺序变了才滚回顶部; 窗口页每分钟刷新一次, 不要打断正在看的图例
-        keys = tuple(k for k, _ in items)
+        keys = tuple(k for k, _v, _c2 in items)
         if col["keys"] != keys:
             col["keys"] = keys
             col["legend"].scroll_to_top()
 
-    @staticmethod
-    def _draw_pie(cv: tk.Canvas, size: int, slices, total: float, pct_mode: bool):
+    # ---- 「其他」的悬停提示 ----
+
+    def _other_text(self, col) -> str:
+        items = col["other"]
+        total = sum(v for _, v in items) or 1.0
+        grand = col["grand"] or total
+        pct_mode = self.mode.get(self.page, "pct") == "pct"
+        lines = [f"{k}    {v / grand * 100:.2f}%" if pct_mode else f"{k}    {fmt_hm(v)}"
+                 for k, v in items[:OTHER_TIP_LINES]]
+        if len(items) > OTHER_TIP_LINES:
+            lines.append(tr("…以及另外 {n} 项").format(n=len(items) - OTHER_TIP_LINES))
+        return "\n".join(lines)
+
+    def _show_tip(self, col, x_root: int, y_root: int):
+        if not col["other"]:
+            return
+        if self._tip is None or not self._tip.winfo_exists():
+            self._tip = tk.Toplevel(self)
+            self._tip.overrideredirect(True)
+            self._tip.attributes("-topmost", True)
+            self._tip.label = tk.Label(
+                self._tip, bg=COLORS["text"], fg=COLORS["bg"], justify="left",
+                font=config.font("small"), padx=config.scaled(8), pady=config.scaled(6))
+            self._tip.label.pack()
+        lbl = self._tip.label
+        text = self._other_text(col)
+        if lbl.cget("text") != text:
+            lbl.config(text=text)
+        self._tip.update_idletasks()
+        w, h = self._tip.winfo_reqwidth(), self._tip.winfo_reqheight()
+        x, y = x_root + config.scaled(14), y_root + config.scaled(14)
+        if x + w > self.winfo_screenwidth():
+            x = x_root - w - config.scaled(8)
+        if y + h > self.winfo_screenheight():
+            y = y_root - h - config.scaled(8)
+        self._tip.geometry(f"+{int(x)}+{int(y)}")
+        self._tip.deiconify()
+
+    def _hide_tip(self):
+        if self._tip is not None:
+            try:
+                self._tip.withdraw()
+            except tk.TclError:
+                self._tip = None
+
+    def _pie_hover(self, i: int, event):
+        self._show_tip(self.cols[i], event.x_root, event.y_root)
+
+    def _legend_hover(self, col, idx: int, event):
+        if col["other_row"] == idx:
+            self._show_tip(col, event.x_root, event.y_root)
+        else:
+            self._hide_tip()
+
+    def _draw_pie(self, cv: tk.Canvas, size: int, slices, total: float, pct_mode: bool,
+                  other: bool = False):
+        """other: 最后一块是「其他」, 给它打上 other 标签, 鼠标停在上面时显示具体项."""
         cv.delete("all")
         pad = 6
         x0, y0, x1, y1 = pad, pad, size - pad, size - pad
@@ -272,14 +375,16 @@ class StatsPage(tk.Frame):
                            font=config.font("small"))
             return
         if len(slices) == 1:
-            cv.create_oval(x0, y0, x1, y1, fill=slices[0][2], outline=COLORS["bg_card"])
+            cv.create_oval(x0, y0, x1, y1, fill=slices[0][2], outline=COLORS["bg_card"],
+                           tags=("other",) if other else ())
         start = 90.0
         labels = []
-        for name, v, color in slices:
+        for i, (name, v, color) in enumerate(slices):
             extent = -360.0 * v / total
             if len(slices) > 1:
                 cv.create_arc(x0, y0, x1, y1, start=start, extent=extent,
-                              fill=color, outline=COLORS["bg_card"], width=2, style="pieslice")
+                              fill=color, outline=COLORS["bg_card"], width=2, style="pieslice",
+                              tags=("other",) if other and i == len(slices) - 1 else ())
             if v / total >= 0.06:
                 mid = math.radians(start + extent / 2.0)
                 rr = 0.62 * r if len(slices) > 1 else 0.0

@@ -61,7 +61,7 @@ EN = {
     "快速访问": "Quick access",
     "紧急借贷": "Emergency loan",
     "快速访问跳过冷静期立刻联网,额度按 ×{a:g} 消耗.\n\n联网: {m} 分钟\n消耗: {cost} 今日额度\n\n确定吗?": "Quick access skips the cooldown and goes online now; quota is used at {a:g}x.\n\nOnline: {m} min\nCost: {cost} of today's quota\n\nContinue?",
-    "紧急借贷不会联网,只会给今天加额度;代价是明天扣 {b:g} 倍.\n借到的额度今天用不完也不退.\n\n今天额度: +{add}\n明天额度: -{cost}\n\n确定吗?": "An emergency loan does not go online; it only adds quota for today, and tomorrow pays {b:g}x.\nBorrowed quota left unused today is not refunded.\n\nToday's quota: +{add}\nTomorrow's quota: -{cost}\n\nContinue?",
+    "紧急借贷不会联网,只会给今天加额度;明天扣 {b:g} 倍.": "An emergency loan does not go online; it only adds quota for today, and tomorrow pays {b:g}x.",
     "今天额度 +{add}.": "Today's quota +{add}.",
     "立刻结束冷静期并联网?\n\n联网: {m} 分钟\n消耗: {cost} 今日额度(×{a:g})\n\n确定吗?": "End the cooldown and go online now?\n\nOnline: {m} min\nCost: {cost} of today's quota ({a:g}x)\n\nContinue?",
     "⚡ 快速访问 —— 额度按 ×{a:g} 消耗,归零自动断网.": "⚡ Quick access — quota is used at {a:g}x. Network is cut automatically at zero.",
@@ -442,6 +442,7 @@ EN = {
     "每 10 秒看一次当前在前台的程序,把这 10 秒记给它;桌面,文件资源管理器和命令行窗口记为空白.结果在 Statistics 页的「窗口」.": "Every 10 seconds, checks which program is in the foreground and credits it with those 10 seconds; the desktop, File Explorer and command-line windows count as idle. See the \"Windows\" tab on the Statistics page.",
     "🪟  窗口": "🪟  Windows",
     "未知程序": "Unknown program",
+    "…以及另外 {n} 项": "…and {n} more",
     "任务栏上有 {n} 个窗口,超过上限 {x} 个,随机关闭了 {k} 个:\n{titles}": "{n} windows on the taskbar, more than the limit of {x}. Closed {k} at random:\n{titles}",
     # ---- uninstall.py ----
     "PAC 脚本 {url}": "PAC script {url}",

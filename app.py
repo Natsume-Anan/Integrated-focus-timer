@@ -1745,7 +1745,7 @@ class BreakTimerApp:
             toast.warn(tr(msg2))
             return
         if not toast.ask(
-            tr("紧急借贷不会联网,只会给今天加额度;代价是明天扣 {b:g} 倍.\n借到的额度今天用不完也不退.\n\n今天额度: +{add}\n明天额度: -{cost}\n\n确定吗?").format(
+            tr("紧急借贷不会联网,只会给今天加额度;明天扣 {b:g} 倍.").format(
                 b=config.LOAN_RATE, add=fmt_hm(minutes * 60),
                 cost=fmt_hm(minutes * 60 * config.LOAN_RATE)),
             title=tr("紧急借贷"), danger=True
