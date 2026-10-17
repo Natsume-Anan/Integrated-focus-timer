@@ -48,24 +48,39 @@ class Updater(private val ctx: Context) {
 
         fun text(v: List<Int>?) = v?.joinToString(".") ?: "?"
 
+        const val ACCEPT_JSON = "application/vnd.github+json"
+        const val ACCEPT_FILE = "application/octet-stream"
+
+        /** 下载来源: 地址, Accept, 大小 (-1 = 不知道), SHA-256 (null = 不知道). */
+        data class Source(val url: String, val accept: String, val size: Long, val sha256: String?)
+
+        /** 附件走 GitHub API 的附件地址: 直接跳到 release-assets.githubusercontent.com, 不经过 github.com
+         *  (有的网络里 github.com 连不上, api.github.com 和下载服务器却能直连). 大小和 SHA-256 用来核对 (同 updater.asset_source). */
+        fun assetSource(a: JSONObject): Source {
+            val api = a.optString("url")
+            val url = if (api.startsWith("https://api.github.com/")) api else a.optString("browser_download_url")
+            val d = a.optString("digest")
+            return Source(url, ACCEPT_FILE, a.optLong("size", -1), if (d.startsWith("sha256:")) d.substring(7).lowercase() else null)
+        }
+
         /** 发布里的电脑版安装包: 名字带 windows / win / pc / python 的 .zip, 没有就用源码包 (同 updater.pick_download). */
-        fun pickWindows(rel: JSONObject): String? {
+        fun pickWindows(rel: JSONObject): Source? {
             val assets = rel.optJSONArray("assets")
             if (assets != null) for (i in 0 until assets.length()) {
                 val a = assets.optJSONObject(i) ?: continue
                 val n = a.optString("name").lowercase()
-                if (n.endsWith(".zip") && listOf("windows", "win", "pc", "python").any { it in n }) return a.optString("browser_download_url")
+                if (n.endsWith(".zip") && listOf("windows", "win", "pc", "python").any { it in n }) return assetSource(a)
             }
-            return rel.optString("zipball_url").ifEmpty { null }
+            return rel.optString("zipball_url").ifEmpty { null }?.let { Source(it, ACCEPT_JSON, -1, null) }
         }
 
         /** 发布里的安卓安装包: 优先名字里带 release / android 的 .apk. */
-        fun pickApk(rel: JSONObject): String? {
+        fun pickApk(rel: JSONObject): Source? {
             val assets = rel.optJSONArray("assets") ?: return null
             val apks = (0 until assets.length()).mapNotNull { assets.optJSONObject(it) }
                 .filter { it.optString("name").lowercase().endsWith(".apk") }
             val best = apks.firstOrNull { it.optString("name").lowercase().let { n -> "release" in n || "android" in n } } ?: apks.firstOrNull()
-            return best?.optString("browser_download_url")
+            return best?.let { assetSource(it) }
         }
     }
 
@@ -94,7 +109,7 @@ class Updater(private val ctx: Context) {
     }
 
     /** 只连 GitHub 的 https 地址; 跳转也只能跳到 GitHub. */
-    private fun open(start: String, timeoutMs: Int): HttpURLConnection {
+    private fun open(start: String, timeoutMs: Int, accept: String = ACCEPT_JSON): HttpURLConnection {
         var url = start
         repeat(6) {
             val u = URL(url)
@@ -104,7 +119,7 @@ class Updater(private val ctx: Context) {
             c.connectTimeout = timeoutMs
             c.readTimeout = timeoutMs
             c.setRequestProperty("User-Agent", "OIT/${BuildConfig.VERSION_NAME}")
-            c.setRequestProperty("Accept", "application/vnd.github+json")
+            c.setRequestProperty("Accept", accept)
             val code = c.responseCode
             if (code in 300..399) {
                 url = URL(u, c.getHeaderField("Location") ?: throw IllegalStateException("HTTP $code")).toString()
@@ -155,29 +170,41 @@ class Updater(private val ctx: Context) {
         return rel
     }
 
-    private fun downloadTo(url: String, f: File) {
+    /** 下载到 f: 先写 .part, 核对过大小和 SHA-256 再改名; 失败时删掉 .part. */
+    private fun downloadTo(src: Source, f: File) {
         val part = File(f.path + ".part")
-        val c = open(url, 60_000)
-        var total = 0L
-        c.inputStream.use { inp ->
-            part.outputStream().use { out ->
-                val buf = ByteArray(65536)
-                while (true) {
-                    val n = inp.read(buf)
-                    if (n < 0) break
-                    total += n
-                    if (total > MAX_DOWNLOAD) throw IllegalStateException("download too large")
-                    out.write(buf, 0, n)
+        try {
+            val c = open(src.url, 60_000, src.accept)
+            val md = java.security.MessageDigest.getInstance("SHA-256")
+            var total = 0L
+            c.inputStream.use { inp ->
+                part.outputStream().use { out ->
+                    val buf = ByteArray(65536)
+                    while (true) {
+                        val n = inp.read(buf)
+                        if (n < 0) break
+                        total += n
+                        if (total > MAX_DOWNLOAD) throw IllegalStateException("download too large")
+                        md.update(buf, 0, n)
+                        out.write(buf, 0, n)
+                    }
                 }
             }
+            c.disconnect()
+            if (src.size >= 0 && total != src.size) throw IllegalStateException("size mismatch ($total != ${src.size})")
+            val sha = md.digest().joinToString("") { "%02x".format(it) }
+            if (src.sha256 != null && sha != src.sha256) throw IllegalStateException("SHA-256 mismatch")
+            f.delete()
+            if (!part.renameTo(f)) throw IllegalStateException("cannot save the download")
+        } catch (e: Exception) {
+            part.delete()
+            throw e
         }
-        c.disconnect()
-        if (!part.renameTo(f)) throw IllegalStateException("cannot save the download")
     }
 
     /** 给其他设备下载这个平台的安装包 (同一个版本只下载一次). 在后台线程里调用. */
     fun fetchPackage(rel: JSONObject, platform: String): File {
-        val url = when (platform) {
+        val src = when (platform) {
             "android" -> pickApk(rel)
             "windows" -> pickWindows(rel)
             else -> null
@@ -186,7 +213,7 @@ class Updater(private val ctx: Context) {
         val f = File(dir, "OIT-$platform-${text(releaseVersion(rel))}" + if (platform == "android") ".apk" else ".zip")
         dir.listFiles()?.forEach { if (it != f) it.delete() }
         if (f.length() > 0) return f
-        downloadTo(url, f)
+        downloadTo(src, f)
         return f
     }
 
@@ -201,28 +228,14 @@ class Updater(private val ctx: Context) {
     fun download(done: () -> Unit) {
         val rel = release ?: return
         if (state != "available") return
-        val url = pickApk(rel) ?: return
+        val src = pickApk(rel) ?: return
         state = "downloading"
         Thread {
             try {
                 val dir = File(ctx.cacheDir, "updates").apply { mkdirs() }
                 dir.listFiles()?.forEach { it.delete() }
                 val f = File(dir, "OIT-${text(latest)}.apk")
-                val c = open(url, 60_000)
-                var total = 0L
-                c.inputStream.use { inp ->
-                    f.outputStream().use { out ->
-                        val buf = ByteArray(65536)
-                        while (true) {
-                            val n = inp.read(buf)
-                            if (n < 0) break
-                            total += n
-                            if (total > MAX_DOWNLOAD) throw IllegalStateException("download too large")
-                            out.write(buf, 0, n)
-                        }
-                    }
-                }
-                c.disconnect()
+                downloadTo(src, f)
                 apk = f
                 error = ""
                 state = "ready"

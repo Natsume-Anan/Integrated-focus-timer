@@ -357,6 +357,19 @@ class CoreTest {
         assertTrue(core.dm.focus.any { it.kind == "idle" })
     }
 
+    /** 下载安装包走 GitHub API 的附件地址 (不经过 github.com), 带着大小和 SHA-256 核对 (MECHANICS 16). */
+    @Test
+    fun updateSourceUsesApiAssetUrl() {
+        val U = com.obliphur.oit.service.Updater
+        val rel = JSONObject().put("zipball_url", "https://api.github.com/repos/x/y/zipball/1.0.9").put("assets", org.json.JSONArray()
+            .put(JSONObject().put("name", "OIT.apk").put("url", "https://api.github.com/repos/x/y/releases/assets/7")
+                .put("browser_download_url", "https://github.com/x/y/releases/download/1.0.9/OIT.apk")
+                .put("size", 5).put("digest", "sha256:ABCD")))
+        assertEquals(com.obliphur.oit.service.Updater.Companion.Source("https://api.github.com/repos/x/y/releases/assets/7", U.ACCEPT_FILE, 5, "abcd"), U.pickApk(rel))
+        assertEquals(com.obliphur.oit.service.Updater.Companion.Source("https://api.github.com/repos/x/y/zipball/1.0.9", U.ACCEPT_JSON, -1, null), U.pickWindows(rel))
+        assertNull(U.pickApk(JSONObject()))
+    }
+
     /** 应用名单: 前台应用不能用就锁定, 离开后撤掉 (MECHANICS 14.6). */
     @Test
     fun appLock() {
@@ -459,7 +472,7 @@ class CoreTest {
         val rel = org.json.JSONObject().put("assets", org.json.JSONArray()
             .put(org.json.JSONObject().put("name", "OIT-windows.zip").put("browser_download_url", "w"))
             .put(org.json.JSONObject().put("name", "OIT-android-release.apk").put("browser_download_url", "a")))
-        assertEquals("a", U.pickApk(rel))
+        assertEquals("a", U.pickApk(rel)?.url)
         assertEquals(null, U.pickApk(org.json.JSONObject().put("assets", org.json.JSONArray())))
     }
 

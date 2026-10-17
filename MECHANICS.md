@@ -783,6 +783,10 @@ Android 版按本文第 1 ~ 11 节实现, 数值和规则都相同. 下面只写
     取完核对大小和 SHA-256, 对不上就丢掉.
   - 接收方收到之后和自己下载的一样: 电脑在自动更新开着时直接安装, 提示"立即重启", 否则先问; 手机弹出提示, 点"安装"打开系统的安装界面. git 仓库里的开发版本不收.
 - 只连 GitHub 的 https 地址, 跳转也只能跳到 GitHub 的下载地址.
-  电脑上不经过系统代理 (OIT 自己的过滤代理), 所以 Proxy 方式下不管名单怎么写都能检查; Adapter 方式离线时网卡被禁用, 检查会失败.
+  电脑上不经过 OIT 自己的过滤代理, 所以 Proxy 方式下不管名单怎么写都能检查; Adapter 方式离线时网卡被禁用, 检查会失败.
+- **下载路线** (两端相同): 安装包走 GitHub API 的附件地址 (`api.github.com/…/releases/assets/<id>`), 它直接跳到下载服务器 (release-assets.githubusercontent.com),
+  不经过 github.com —— 有的网络里 github.com 连不上, api.github.com 和下载服务器却能直连, 所以**不用开自己的代理**. 电脑版没有 zip 附件时用的源码包走 api.github.com → codeload.github.com.
+  下载完核对大小和 GitHub 给的 SHA-256, 对不上就丢掉; 下载失败时不留下半截的文件.
+  电脑上直连不通时, 再经过原来设的代理 (Clash 之类, OIT 接管系统代理前的设置) 试一次.
   手机上走 Wi-Fi / 移动数据本身, 不经过 OIT 的 VPN.
 - 发布新版本时: 先改两端的版本号 (`config.py` 的 `APP_VERSION`, `Android version/app/build.gradle.kts` 的 `versionName` 和 `versionCode`), 发布的名称写版本号, 附上 APK (和可选的电脑版 zip).
