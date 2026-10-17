@@ -23,7 +23,7 @@ _WHY_TEXT = {
     "blacklist-domain": "网站黑名单",
     "self": "回环",
     "not-whitelisted": "不在白名单",
-    "blockall": "屏蔽全部",
+    "blockall": "全屏蔽",
 }
 
 _PANELS = (
@@ -335,7 +335,7 @@ class RulesPage(tk.Frame):
             run = tr("运行中") if c.running else tr("未运行")
             text = tr("Proxy 模式 · 本地代理 127.0.0.1:{port} · {run}").format(port=c.port, run=run)
             if net_mode == "proxy_all":
-                text += "\n" + tr("代理 - 屏蔽全部: 离线时全部拦截, 名单不起作用.")
+                text += "\n" + tr("代理-全屏蔽 (Proxy block-all): 离线时全部拦截, 名单不起作用.")
             cfg(self.lbl_mode, text=text,
                 fg=COLORS["success"] if c.running else COLORS["warn"])
         else:
@@ -494,7 +494,16 @@ class RulesPage(tk.Frame):
         me = tr("本机: {name} · 端口 {port}", name=s.my_name, port=s.port or "-")
         if not proxy_on:
             me += "\n" + tr("两端都使用 Proxy 断网方式时才能同步.")
-        cfg(self.lbl_sync_me, text=me, fg=COLORS["text_dim"] if proxy_on else COLORS["warn"])
+        # 防火墙挡住入站连接时, 别的设备找不到本机 / 连不进来 (firewall.py)
+        fw = getattr(s, "firewall", None) or {}
+        fw_bad = bool(fw.get("blockers") or fw.get("error"))
+        if fw.get("blockers"):
+            me += "\n" + tr("Windows 防火墙里有阻止 Python 入站连接的规则, 其他设备连不进本机: {names}",
+                            names=", ".join(fw["blockers"][:4]))
+        elif fw.get("error"):
+            me += "\n" + tr("没能在 Windows 防火墙里放行同步端口: {e}", e=fw["error"][:120])
+        cfg(self.lbl_sync_me, text=me,
+            fg=COLORS["text_dim"] if proxy_on and not fw_bad else COLORS["warn"])
 
         peers = s.peers()
         found = [d for d in s.found.values() if d["id"] not in peers]

@@ -18,8 +18,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -35,7 +33,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.obliphur.oit.BuildConfig
 import com.obliphur.oit.OitApp
 import com.obliphur.oit.core.Cfg
 import com.obliphur.oit.core.Kind
@@ -79,15 +76,6 @@ fun SettingsScreen(tab: String, setTab: (String) -> Unit, act: MainActivity) {
                 if (ask) Confirm(tr("结束配置期"), tr("结束后每次修改都要等 48 小时,不能撤销."), true, { ask = false }) {
                     core.endSetupPeriod()
                 }
-            }
-            if (BuildConfig.DEBUG) OitCard {
-                var ask by remember { mutableStateOf(false) }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text(tr("🛠  开发者模式"), fontWeight = FontWeight.Bold, color = o.text, modifier = Modifier.weight(1f))
-                    Switch(s.devMode, { if (it) ask = true else core.setDevMode(false) },
-                        colors = SwitchDefaults.colors(checkedTrackColor = o.accent))
-                }
-                if (ask) Confirm(tr("开发者模式确认"), tr("开启后不再断网."), false, { ask = false }) { core.setDevMode(true) }
             }
         }
 
@@ -161,7 +149,6 @@ private fun WaitTag(key: String) {
         "instant" -> "⚡ " + tr("即时生效")
         "setup" -> tr("配置期内即时生效")
         "free" -> tr("这一次免等待")
-        "dev" -> tr("开发者模式下即时生效")
         else -> ""
     }
     if (tag.isNotEmpty()) Text(tag, color = o.success, fontSize = 12.sp)
@@ -319,12 +306,10 @@ private fun PageExtras(tab: String, act: MainActivity) {
             val running = OitVpnService.instance != null && plan != null
             val kind = when (plan) {
                 is com.obliphur.oit.core.VpnPlan.BlockAll -> tr("全部断网")
-                is com.obliphur.oit.core.VpnPlan.BlockOnly -> tr("禁用名单里的应用")
-                is com.obliphur.oit.core.VpnPlan.Dns -> if (plan.blockAll) tr("屏蔽全部") else if (plan.filter) tr("按名单过滤 DNS") else tr("全部放行")
+                is com.obliphur.oit.core.VpnPlan.Dns -> if (plan.blockAll) tr("全屏蔽") else if (plan.filter) tr("按名单过滤 DNS") else tr("全部放行")
                 else -> ""
             }
             Dim(when {
-                app.core.settings.devMode -> tr("开发者模式: 不断网")
                 app.vpnNeedsPermission -> tr("没有 VPN 权限")
                 OitVpnService.leak -> tr("断网未生效")
                 running -> tr("运行中") + " · " + kind

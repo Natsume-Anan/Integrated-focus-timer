@@ -2,7 +2,7 @@
 ProxyController:把规则库,过滤代理,系统代理拼成一个对象,NetGuard 只和它打交道.
 
     start()         启动过滤代理并把系统代理指过来(幂等,同时纠正被改回去的设置)
-    set_online(b)   False = 离线(只放行白名单);True = 联网(只拦黑名单)
+    set_online(b)   False = 离线(按名单过滤);True = 联网(全部放行)
     stop(restore)   关掉代理,并还原系统代理
 """
 

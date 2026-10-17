@@ -73,19 +73,30 @@ data class RulePending(val op: String, val list: String, val item: String, val a
 class RuleSnap(val lists: Map<String, List<String>>, val version: Long) {
     private val apps = lists.mapValues { it.value.toHashSet() }
 
-    /** (放行?, 原因). 原因: local / blacklist-app / blacklist-domain / default-allow /
-     *  online / whitelist-app / whitelist-domain / offline */
-    fun decide(host: String?, pkgs: Collection<String>, online: Boolean, mode: String): Pair<Boolean, String> {
+    /** 联网只看网站名单 (MECHANICS 4.1 / 14.2): 应用名单只管锁定应用 (appAllowed), 不参与联网判定.
+     *  (放行?, 原因). 原因: local / online / blacklist-domain / default-allow / whitelist-domain / offline */
+    fun decide(host: String?, online: Boolean, mode: String): Pair<Boolean, String> {
         val h = (host ?: "").lowercase().trim('.')
         if (h in LOOPBACK || h.startsWith("127.")) return true to "local"
+        // 联网会话中两种名单模式都全部放行 (MECHANICS 4.1)
+        if (online) return true to "online"
         if (mode == RuleKeys.WHITELIST) {
-            if (online) return true to "online"
-            if (pkgs.any { it in apps[RuleKeys.WHITE_APPS]!! }) return true to "whitelist-app"
             if (lists[RuleKeys.WHITE_DOMAINS]!!.any { domainMatch(h, it) }) return true to "whitelist-domain"
             return false to "offline"
         }
-        if (pkgs.any { it in apps[RuleKeys.BLACK_APPS]!! }) return false to "blacklist-app"
         if (lists[RuleKeys.BLACK_DOMAINS]!!.any { domainMatch(h, it) }) return false to "blacklist-domain"
+        return true to "default-allow"
+    }
+
+    /** 前台应用能不能用 (应用名单, MECHANICS 14.6, 对应桌面版 4.7). 不能用的会被锁定.
+     *  (允许?, 原因). 原因: online / whitelist-app / not-whitelisted / blacklist-app / default-allow */
+    fun appAllowed(pkg: String, online: Boolean, mode: String): Pair<Boolean, String> {
+        if (mode == RuleKeys.WHITELIST) {
+            if (online) return true to "online"
+            if (pkg in apps[RuleKeys.WHITE_APPS]!!) return true to "whitelist-app"
+            return false to "not-whitelisted"
+        }
+        if (pkg in apps[RuleKeys.BLACK_APPS]!!) return false to "blacklist-app"
         return true to "default-allow"
     }
 }

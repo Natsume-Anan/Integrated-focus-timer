@@ -37,8 +37,6 @@ class SettingsPage(tk.Frame):
         self.areas = {}          # 每个模块一页
         self._tab = "basic"
         self._syncing = False
-        self.sw_dev = None
-        self.lbl_dev_state = None
 
         self._i18n_widgets = []
         self._choices_widgets = []
@@ -94,11 +92,10 @@ class SettingsPage(tk.Frame):
         for key, _text in SETTINGS_PAGES:
             self.areas[key] = ScrollArea(self.stack, height=420, bg=bg)
 
-        # ---- 基本设置: 配置期, 开发者模式, 以及整个程序的外观 (语言 / 字号 / 主题) ----
+        # ---- 基本设置: 配置期, 以及整个程序的外观 (语言 / 字号 / 主题) ----
         self.area = self.areas["basic"]
         body = self.area.inner
         self._build_setup_card(body)
-        self._build_dev_mode(body)
         self._build_page_items("basic")
         self._build_update_card(body)
         # 作者的话: 为什么设置要等 48 小时 (MECHANICS.md 1.1)
@@ -161,8 +158,6 @@ class SettingsPage(tk.Frame):
             return tr("⚡ 配置期内即时"), COLORS["success"]
         if tag == "free":
             return tr("⚡ 这一次修改免等待"), COLORS["success"]
-        if tag == "dev":
-            return tr("⚡ 开发者模式: 即时"), COLORS["warn"]
         return "", COLORS["text_dim"]
 
     # ---- 一个模块页: 选项 / 开关在上, 数值在下 ----
@@ -261,6 +256,12 @@ class SettingsPage(tk.Frame):
         row = self._num_rows[key]
         value = self.sm.from_ui_number(key, row["var"].get())
         status, msg = self.sm.stage(key, value)
+        if status == "dev":
+            # 开发者模式开 / 关: 不是真的修改, 填写框恢复成当前值, 不提示
+            self._sync_num(key, force=True)
+            if self.on_dev_mode:
+                self.on_dev_mode(config.dev_mode_enabled())
+            return status, msg
         if status == "invalid":
             if not quiet:
                 toast.warn(msg)
@@ -355,41 +356,6 @@ class SettingsPage(tk.Frame):
             show_pack(self.btn_update_now, side="left", padx=(8, 0))
         else:
             hide_pack(self.btn_update_now)
-
-    def _build_dev_mode(self, body):
-        if not config.dev_mode_defined():
-            return
-        card = COLORS["bg_card"]
-        fr = tk.Frame(body, bg=card, highlightbackground=COLORS["border"],
-                      highlightthickness=1)
-        fr.pack(fill="x", pady=(2, 8))
-        row = tk.Frame(fr, bg=card)
-        row.pack(fill="x", padx=12, pady=(10, 2))
-        self._track(tk.Label(
-            row, text=tr("🛠  开发者模式"), bg=card, fg=COLORS["text"],
-            font=config.font("body", bold=True)), "🛠  开发者模式").pack(side="left")
-        self.sw_dev = Switch(row, value=bool(getattr(config, "DEV_MODE", False)),
-                             command=self._on_dev_switch, bg=card)
-        self.sw_dev.pack(side="right")
-        self.lbl_dev_state = tk.Label(
-            fr, text="", bg=card, fg=COLORS["text_dim"],
-            font=config.font("small"), anchor="w"
-        )
-        self.lbl_dev_state.pack(fill="x", padx=12, pady=(0, 10))
-        self.area.bind_children()
-
-    def _on_dev_switch(self, enabled):
-        enabled = bool(enabled)
-        if enabled and not toast.ask(
-            tr("开启后不再断网."),
-            title=tr("开发者模式确认")
-        ):
-            self.sw_dev.set(False)
-            return
-        config.DEV_MODE = enabled
-        if self.on_dev_mode:
-            self.on_dev_mode(enabled)
-        self.refresh()
 
     def _build_row(self, body, spec, area):
         key, kind = spec["key"], spec["kind"]
@@ -649,14 +615,6 @@ class SettingsPage(tk.Frame):
                     self.setup_card.pack(fill="x", pady=(2, 8), **kw)
             else:
                 hide_pack(self.setup_card)
-        if self.sw_dev is not None:
-            dev = bool(getattr(config, "DEV_MODE", False))
-            if self.sw_dev.get() != dev:
-                self.sw_dev.set(dev)
-            cfg(self.lbl_dev_state,
-                text=tr("已开启 —— 网络不受限制") if dev else tr("已关闭(正常模式)"),
-                fg=COLORS["danger"] if dev else COLORS["text_dim"]
-            )
 
         self._syncing = True
         try:

@@ -89,7 +89,7 @@ fun RulesScreen(go: (String) -> Unit) {
                 tr("过滤名单模式") + ": " + core.settings.display("FILTER_MODE"),
                 color = o.text, fontWeight = FontWeight.Bold)
             if (adapter) {
-                Dim(tr("屏蔽全部时名单不起作用."), color = o.warn)
+                Dim(tr("全屏蔽时名单不起作用."), color = o.warn)
                 PlainButton(tr("去设置里切换断网方式"), modifier = Modifier.padding(top = 6.dp)) { go("settings:net") }
             }
             Dim(tr("本次运行: 放行 {a} · 拦截 {b}", "a" to BlockLog.allowed, "b" to BlockLog.blocked), size = 13)
@@ -118,6 +118,7 @@ fun RulesScreen(go: (String) -> Unit) {
         val (dk, ak) = RuleKeys.forMode(view)
         RulePanel(dk)
         RulePanel(ak)
+        LockPermissions()
 
         Heading(tr("⏳  等待生效的改动"))
         if (core.rules.pending.isEmpty()) Dim(tr("没有"))
@@ -141,6 +142,31 @@ fun RulesScreen(go: (String) -> Unit) {
     PageColumn { SyncCard() }
     if (aiSettings) AiSettingsDialog { aiSettings = false }
     if (aiSuggest) AiSuggestDialog(view) { aiSuggest = false }
+}
+
+/** 应用名单靠锁定生效 (MECHANICS 14.6): 缺权限时才显示, 带去授予的按钮. */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun LockPermissions() {
+    val o = LocalOit.current
+    val ctx = LocalContext.current
+    val usage = com.obliphur.oit.service.AppUsage.permitted(ctx)
+    val overlay = com.obliphur.oit.service.AppLock.canOverlay(ctx)
+    if (usage && overlay) return
+    Dim(tr("锁定应用需要: ") + listOfNotNull(
+        if (usage) null else tr("使用情况访问权限"), if (overlay) null else tr("显示在其他应用上层")).joinToString(" · "),
+        size = 13, color = o.warn)
+    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (!usage) PlainButton(tr("使用情况访问权限")) {
+            runCatching { ctx.startActivity(Intent(android.provider.Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+        }
+        if (!overlay) PlainButton(tr("显示在其他应用上层")) {
+            runCatching {
+                ctx.startActivity(Intent(android.provider.Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    android.net.Uri.parse("package:${ctx.packageName}")))
+            }
+        }
+    }
 }
 
 // ════════════════ 设备同步 (MECHANICS 15) ════════════════

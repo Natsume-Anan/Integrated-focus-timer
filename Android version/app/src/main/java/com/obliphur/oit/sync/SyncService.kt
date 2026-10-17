@@ -138,6 +138,8 @@ class SyncService(
     private val pool = Executors.newCachedThreadPool()
     private val wake = Object()
     @Volatile private var woken = false
+    /** 正在和哪些设备同步 (同一台设备不同时跑两轮). */
+    private val busy = HashSet<String>()
     private val state: JSONObject = load()
 
     init {
@@ -409,9 +411,16 @@ class SyncService(
             o.name = d.optString("name", "?")
             o.state = "waiting"
             val deadline = System.currentTimeMillis() + PAIR_TIMEOUT_MS
+            var misses = 0
             while (System.currentTimeMillis() < deadline && o.state == "waiting" && !dead) {
                 Thread.sleep(1500)
-                val (_, r) = http(o.addr, o.port, "GET", "/oit/v1/pair/$token", null, 4000)
+                // Wi-Fi 偶尔丢一两个包: 等对方确认的这两分钟里, 连续几次连不上才算失败
+                val r = try {
+                    http(o.addr, o.port, "GET", "/oit/v1/pair/$token", null, 4000).second.also { misses = 0 }
+                } catch (e: java.io.IOException) {
+                    if (++misses >= 5) throw e
+                    continue
+                }
                 when (r.optString("state")) {
                     "rejected" -> { o.state = "rejected"; return }
                     "accepted" -> {
@@ -420,8 +429,7 @@ class SyncService(
                         val mother = if (motherIsMe) myId else peerId
                         runner.call { addPeer(peerId, d.optString("name", "?"), d.optString("platform", "?"), o.addr, o.port, k, mother) }
                         o.state = "accepted"
-                        if (mother != myId) syncWith(peerId, init = true)
-                        syncNow()
+                        if (mother != myId) initAfterAccept(peerId)
                         return
                     }
                 }
@@ -483,9 +491,22 @@ class SyncService(
         if (!accept) { r.state = "rejected"; return true }
         addPeer(r.id, r.name, r.platform, r.addr, r.port, r.key, r.mother)
         r.state = "accepted"
-        if (r.mother != myId) pool.execute { syncWith(r.id, init = true) }
-        syncNow()
+        // 本机是子端: 主动向母端要初始化的内容. 本机是母端: 等子端来要 —— 这时发起方 (子端) 可能还没
+        // 查到"已接受", 马上同步过去只会得到 401 (以前会显示"同步失败: unpaired")
+        if (r.mother != myId) pool.execute { initAfterAccept(r.id) }
         return true
+    }
+
+    /** 本机是子端, 刚接受了绑定: 向母端要初始化的内容.
+     *  发起方要等下一次查询 (每 1.5 秒) 才知道已经接受, 在那之前它还不认识本机, 会回 401 ——
+     *  以前只试一次, 失败后要等 30 秒的下一轮, 这期间一直显示"同步失败: unpaired". */
+    private fun initAfterAccept(peerId: String) {
+        repeat(12) {
+            if (dead || peerId !in peers()) return
+            if (trySync(peerId, init = true, quiet = true) == true) return
+            Thread.sleep(1500)
+        }
+        trySync(peerId, init = true)             // 还不行就照常记下原因, 交给定时同步
     }
 
     // ---- 解除绑定 ----
@@ -641,9 +662,22 @@ class SyncService(
 
     // ---- 同步 ----
 
-    fun syncWith(peerId: String, init: Boolean = false): Boolean {
+    fun syncWith(peerId: String, init: Boolean = false): Boolean = trySync(peerId, init) != false
+
+    /** true 成功 / false 失败 / null 这次不用算 (正在同步, 或对方子端还在初始化).
+     *  quiet: 失败了也不记原因 (绑定刚完成时的重试). */
+    private fun trySync(peerId: String, init: Boolean = false, quiet: Boolean = false): Boolean? {
         val p = peers()[peerId] ?: return false
-        if (p.optBoolean("init") && !init) return syncWith(peerId, init = true)
+        val first = init || p.optBoolean("init")
+        synchronized(busy) { if (!busy.add(peerId)) return null }
+        try {
+            return syncOnce(peerId, p, first, quiet)
+        } finally {
+            synchronized(busy) { busy.remove(peerId) }
+        }
+    }
+
+    private fun syncOnce(peerId: String, p: JSONObject, init: Boolean, quiet: Boolean): Boolean? {
         val k = SyncCrypto.unhex(p.getString("key"))
         return try {
             val snap = runner.call {
@@ -652,6 +686,8 @@ class SyncService(
             val env = SyncCrypto.seal(k, myId, JSONObject().put("snap", snap).put("init", init))
             val (st, reply) = http(p.getString("addr"), p.getInt("port"), "POST", "/oit/v1/sync", env, 10_000)
             if (st == 401) throw IllegalStateException("unpaired")
+            // 对方是子端, 正在向本机要初始化的内容: 不是出错
+            if (st == 409 && reply.optString("error") == "initializing") return null
             if (st != 200) throw IllegalStateException(reply.optString("error", "HTTP $st"))
             val body = SyncCrypto.unseal(k, reply)
             runner.call { merge(body.optJSONObject("snap"), init) }
@@ -666,7 +702,7 @@ class SyncService(
             save()
             true
         } catch (e: Exception) {
-            lock.withLock {
+            if (!quiet) lock.withLock {
                 state.getJSONObject("peers").optJSONObject(peerId)?.put("last_err", e.message ?: e.javaClass.simpleName)
             }
             false
@@ -676,6 +712,8 @@ class SyncService(
     private fun onSync(env: JSONObject): Pair<Int, JSONObject> {
         if (!runner.call { proxyOk() }) return 409 to JSONObject().put("error", "not-proxy")
         val from = env.optString("from")
+        // 请求体读不出来 (例如超过大小上限): 以前当成"没绑定"回 401, 对方会显示 unpaired
+        if (from.isEmpty()) return 400 to JSONObject().put("error", "bad-request")
         val p = peers()[from] ?: return 401 to JSONObject().put("error", "unpaired")
         if (p.optBoolean("init")) return 409 to JSONObject().put("error", "initializing")
         val k = SyncCrypto.unhex(p.getString("key"))
@@ -716,12 +754,12 @@ class SyncService(
             if (!runner.call { proxyOk() }) continue
             // 母端向子端发请求; 子端只在还没初始化或按了"立即同步"时向母端发
             val targets = peers().filter { (_, p) -> p.optString("mother") == myId || p.optBoolean("init") || wasManual }.keys
-            val failed = targets.filter { !syncWith(it) }
+            val failed = targets.filter { trySync(it) == false }
             // 有设备连不上: 地址可能变了, 广播找一下再试一次
             if (failed.isNotEmpty() && System.currentTimeMillis() - lastDiscover > 60_000) {
                 lastDiscover = System.currentTimeMillis()
                 runCatching { discover(1500) }
-                failed.forEach { syncWith(it) }
+                failed.forEach { trySync(it) }
             }
         }
     }

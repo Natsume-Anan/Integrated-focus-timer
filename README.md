@@ -60,4 +60,4 @@ python main.py
 
 ## 开发
 
-各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`, `python -m netproxy.selftest`, `python window_guard.py`, `python devsync.py`, `python uninstall.py --selftest`.
+各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`...

@@ -26,6 +26,12 @@ interface Host {
     fun hourPrompt(slot: LocalDateTime, silent: Boolean)
     /** 当前前台应用的包名; "" 是空白 (桌面 / 系统界面 / 锁屏); null 是不计入 (屏幕关闭或没有权限). */
     fun foregroundApp(): String?
+    /** 锁定前台的这个应用 (盖一层"已锁定"并回到桌面); why: blacklist-app / not-whitelisted. 每秒都可能调用. */
+    fun lockApp(pkg: String, why: String)
+    /** 前台已经不是被锁定的应用了: 撤掉那一层. */
+    fun unlockApp()
+    /** 永远不锁的应用 (设置, 电话, 权限确认 …); whitelist: 白名单模式下系统自带的应用也不锁. */
+    fun lockExempt(pkg: String, whitelist: Boolean): Boolean
     fun openPage(page: String)
     fun scheduleWake(seconds: Double)
 }
@@ -34,11 +40,9 @@ interface Host {
 sealed class VpnPlan {
     /** 不断网 (开发者模式 / 重置中). */
     object None : VpnPlan()
-    /** 全部流量进 VPN 后丢弃; exclude 里的应用绕过 VPN. keepLan: 局域网地址不进 VPN (设备同步要用). */
-    data class BlockAll(val exclude: Set<String>, val keepLan: Boolean = false) : VpnPlan()
-    /** 只有 include 里的应用的流量进 VPN 后丢弃, 其余应用不受影响. */
-    data class BlockOnly(val include: Set<String>) : VpnPlan()
-    /** 只接管 DNS: filter=true 时按名单拦截域名 (和发起查询的应用), 否则全部放行. */
+    /** 全部流量进 VPN 后丢弃. keepLan: 局域网地址不进 VPN (设备同步要用). */
+    data class BlockAll(val keepLan: Boolean = false) : VpnPlan()
+    /** 只接管 DNS: filter=true 时按网站名单拦截域名, 否则全部放行. */
     data class Dns(val filter: Boolean, val rulesVersion: Long, val blockAll: Boolean = false) : VpnPlan()
 }
 
@@ -147,6 +151,7 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
             timer.check()
             checkSetupPeriod()
         }
+        checkAppLock()
         if (m - lastAppSample >= Cfg.APP_FOCUS_EVERY) {
             lastAppSample = m
             sampleApp()
@@ -196,6 +201,31 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
 
     fun previewChime() = host.playChime {}
 
+    // ---- 应用名单: 锁定前台应用 (MECHANICS 14.6, 对应桌面版 4.7) ----
+
+    /** 此刻被锁定的应用. */
+    var lockedApp: String? = null
+        private set
+
+    private fun checkAppLock() {
+        // 和网络限制一样: 开发者模式 / 重置中 / 全屏蔽 (名单不起作用) 时不锁
+        val active = !dm.resetting && !settings.devMode && settings.str("NET_MODE") == "proxy"
+        val app = if (active) host.foregroundApp() else ""
+        if (app == null) return                                  // 屏幕关闭 / 没有权限: 维持原样
+        val mode = settings.str("FILTER_MODE")
+        val why = if (app.isEmpty() || app == "OIT" || host.lockExempt(app, mode == RuleKeys.WHITELIST)) null
+        else rules.snap.appAllowed(app, net.online, mode).takeIf { !it.first }?.second
+        if (why == null) {
+            if (lockedApp != null) { lockedApp = null; host.unlockApp() }
+            return
+        }
+        if (lockedApp != app) {
+            lockedApp = app
+            Store.append(File(dir, "window_guard.log"), "LOCK     $why  $app")
+        }
+        host.lockApp(app, why)
+    }
+
     private fun sampleApp() {
         if (!settings.bool("WINDOW_FOCUS_ENABLED")) return
         val app = host.foregroundApp() ?: return
@@ -237,6 +267,11 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
     }
 
     fun stageSetting(key: String, value: Any?): Pair<StageResult, String> {
+        // 开 / 关开发者模式: 不是真的修改, 不排队, 不写文件, 不记流水, 不提示
+        if (isDevToggle(key, value)) {
+            setDevMode(!settings.devMode)
+            return StageResult.NOCHANGE to ""
+        }
         val r = settings.stage(key, value)
         if (r.first == StageResult.INSTANT) afterSettingsApplied(listOf(key))
         changed()
@@ -278,7 +313,6 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
 
     fun setDevMode(enabled: Boolean) {
         settings.devMode = enabled
-        logNotice(if (enabled) "DEV_MODE on — network cut-off disabled" else "DEV_MODE off — fail-closed restored")
         net.devChanged()
         checkPendingSettings()
         changed()
@@ -367,25 +401,22 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
 
     // ---- 断网方式 ----
 
-    /** installed: 这个包名在本机上装着吗 (没装的应用不能加进 VPN 的应用名单).
-     *  self: OIT 自己的包名 —— Proxy 模式下不管名单怎么写, OIT 自己连其他设备的局域网通道都要保留 (MECHANICS 15). */
-    fun vpnPlan(installed: (String) -> Boolean, self: String = ""): VpnPlan {
+    /** 联网只看网站名单, 应用名单只管锁定应用 (checkAppLock). 局域网通道在每种计划里都保留 (MECHANICS 15). */
+    fun vpnPlan(): VpnPlan {
         if (dm.resetting || net.dead || settings.devMode) return VpnPlan.None
         val online = net.online
         val snap = rules.snap
-        // 代理 - 屏蔽全部 (设置里的 Adapter): 离线时接管 DNS, 所有域名一律拦截; 联网中全部放行
+        // 代理-全屏蔽 (Proxy block-all) (设置里的 Adapter): 离线时接管 DNS, 所有域名一律拦截; 联网中全部放行
         if (settings.str("NET_MODE") == "adapter")
             return if (online) VpnPlan.Dns(false, 0) else VpnPlan.Dns(true, 0, blockAll = true)
+        // 联网中两种名单模式都全部放行 (MECHANICS 4.1)
+        if (online) return VpnPlan.Dns(false, 0)
         if (settings.str("FILTER_MODE") == RuleKeys.WHITELIST) {
-            if (online) return VpnPlan.Dns(false, 0)
-            if (snap.lists[RuleKeys.WHITE_DOMAINS]!!.isEmpty())
-                return VpnPlan.BlockAll(snap.lists[RuleKeys.WHITE_APPS]!!.filter(installed).toSet(), keepLan = true)
+            // 网站白名单为空 = 什么网站都不能上: 全部流量进 VPN (比按 DNS 拦更彻底)
+            if (snap.lists[RuleKeys.WHITE_DOMAINS]!!.isEmpty()) return VpnPlan.BlockAll(keepLan = true)
             return VpnPlan.Dns(true, snap.version)
         }
-        if (snap.lists[RuleKeys.BLACK_DOMAINS]!!.isEmpty()) {
-            val apps = snap.lists[RuleKeys.BLACK_APPS]!!.filter { it != self && installed(it) }.toSet()
-            return if (apps.isEmpty()) VpnPlan.Dns(false, 0) else VpnPlan.BlockOnly(apps)
-        }
+        if (snap.lists[RuleKeys.BLACK_DOMAINS]!!.isEmpty()) return VpnPlan.Dns(false, 0)
         return VpnPlan.Dns(true, snap.version)
     }
 

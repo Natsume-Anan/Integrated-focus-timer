@@ -139,14 +139,26 @@ def run():
         r = _http_get(port, "http://bad.example/")
         assert r.startswith(b"HTTP/1.1 403") and b"blacklist-domain" in r, r
 
-        # 联网会话中同样
+        # 联网会话中: 黑名单模式也全部放行 (MECHANICS 4.1)
         state["online"] = True
         r = _http_get(port, "http://other.example/")
         assert r.startswith(b"HTTP/1.1 200"), r
         r = _http_get(port, "http://bad.example/")
-        assert r.startswith(b"HTTP/1.1 403") and b"blacklist-domain" in r, r
-        st, _ = _connect(port, "bad.example:443")
-        assert b" 403" in st
+        assert r.startswith(b"HTTP/1.1 200"), r
+        p.targets["bad-tls.example"] = echo_port
+        rules.add(BLACK_DOMAINS, "bad-tls.example")
+        st, body = _connect(port, "bad-tls.example:443")
+        assert b" 200" in st and body == b"PING", (st, body)
+
+        # 代理-全屏蔽 (Proxy block-all): 离线全部拦截 (403 页面写明原因), 联网全部放行
+        state["mode"], state["online"] = "blockall", False
+        r = _http_get(port, "http://school.example/")
+        assert r.startswith(b"HTTP/1.1 403") and b"blockall" in r, r
+        assert "全屏蔽".encode("utf-8") in r, r
+        state["online"] = True
+        r = _http_get(port, "http://school.example/")
+        assert r.startswith(b"HTTP/1.1 200"), r
+        state["mode"] = "blacklist"
         st, _ = _connect(port, f"127.0.0.1:{port}")
         assert b" 403" in st, "不允许经代理回环到代理自身"
 
@@ -187,6 +199,29 @@ def run():
         except OSError:
             cut = True
         assert cut and time.monotonic() - t0 < 4, "新加入黑名单后,已打开的连接没有被掐断"
+        s.close()
+
+        # 联网中打开的黑名单网站: 联网会话结束后约 1 秒内被掐断
+        state["online"] = True
+        s = socket.create_connection(("127.0.0.1", port), timeout=5)
+        s.sendall(b"CONNECT later.example:443 HTTP/1.1\r\nHost: later.example:443\r\n\r\n")
+        head = b""
+        while b"\r\n\r\n" not in head:
+            head += s.recv(4096)
+        assert b" 200" in head.split(b"\r\n", 1)[0], head
+        s.sendall(b"hi")
+        assert s.recv(16) == b"HI"
+        state["online"] = False
+        t0 = time.monotonic()
+        cut = False
+        try:
+            while True:
+                if not s.recv(16):
+                    cut = True
+                    break
+        except OSError:
+            cut = True
+        assert cut and time.monotonic() - t0 < 4, "联网结束后, 黑名单网站的连接没有被掐断"
         s.close()
     finally:
         p.stop()

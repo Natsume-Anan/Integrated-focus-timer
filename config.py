@@ -87,7 +87,7 @@ def daily_quota(day) -> float:
 
 
 APP_NAME = "Obliphur's Integrated Terminal"
-APP_VERSION = "1.0.1"                         # 和 GitHub 上发布的版本号比较 (见 updater.py)
+APP_VERSION = "1.0.5"                         # 和 GitHub 上发布的版本号比较 (见 updater.py)
 UPDATE_CHECK = 1                              # 打开程序时检查更新
 UPDATE_AUTO = 1                               # 发现新版本时自动下载安装
 OLD_APP_DIR = "mrsTimer"
@@ -96,7 +96,7 @@ AUTO_TEXT = "Sleeping"
 HOUR_LOG_ENABLED = True                       
 CHIME_WAV = ""
 LANGUAGE = "zh"
-NET_MODE = "proxy"                            # "adapter" 禁用网卡 / "proxy" 本地代理过滤 / "proxy_all" 代理 - 屏蔽全部
+NET_MODE = "proxy"                            # "adapter" 禁用网卡 / "proxy" 本地代理过滤 / "proxy_all" 代理-全屏蔽 (Proxy block-all)
 FILTER_MODE = "blacklist"                     # proxy 模式下生效的名单:"blacklist" / "whitelist"
 
 # 任务栏窗口数上限: 每 WINDOW_CHECK_EVERY 秒数一次任务栏上的窗口 (同一程序的多个窗口各算一个),
@@ -178,9 +178,16 @@ def dev_mode_defined() -> bool:
 
 
 def dev_mode_enabled() -> bool:
-    if not dev_mode_defined():
+    if "config" not in sys.modules:
         return False
     return bool(getattr(sys.modules["config"], "DEV_MODE", False))
+
+
+def toggle_dev_mode() -> bool:
+    """开 / 关开发者模式, 返回新的状态."""
+    mod = sys.modules["config"]
+    mod.DEV_MODE = not dev_mode_enabled()
+    return mod.DEV_MODE
 
 
 # ---- 配置期: 第一次打开软件时开始, 期间所有设置与名单的修改立即生效 ----
@@ -205,6 +212,10 @@ try:
     from config_local import *  # noqa: F401,F403
 except ImportError:
     pass
+
+# 开发者模式: 只能在"每日联网额度"里填 325799 开 / 关 (settings_manager.DEV_TOGGLE_CODE), 只在内存里;
+# 每次启动都是关的, 不管 config_local 里写了什么. 界面上不显示.
+DEV_MODE = False
 
 
 DEFAULT_SETTINGS = {

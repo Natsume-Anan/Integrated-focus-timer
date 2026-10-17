@@ -11,6 +11,7 @@ OIT 的 Android 版. 各项功能按照仓库根目录的 `MECHANICS.md` 实现;
 | 断网 | `VpnService` (本地 VPN, 不经过任何服务器) |
 | 常驻 | 前台服务, 每秒推进一次; 设备睡眠时用闹钟按时叫醒 |
 | 应用使用时间 | `UsageStatsManager` |
+| 锁定应用 (应用名单) | 使用情况访问 + 显示在其他应用上层 (盖层 + 回到桌面) |
 | API Key 加密 | Android Keystore (AES-GCM) |
 | 第三方依赖 | 只有 AndroidX / Compose / kotlinx-coroutines |
 
@@ -28,8 +29,8 @@ Rules 页的 🔗 设备同步可以和同一局域网里的另一台手机或�
 
 ```bash
 cd "Android version"
-./gradlew assembleDebug        # 调试版 (带开发者模式开关)
-./gradlew assembleRelease      # 正式版 (没有开发者模式)
+./gradlew assembleDebug        # 调试版
+./gradlew assembleRelease      # 正式版
 ./gradlew testDebugUnitTest    # 核心逻辑的单元测试
 ```
 

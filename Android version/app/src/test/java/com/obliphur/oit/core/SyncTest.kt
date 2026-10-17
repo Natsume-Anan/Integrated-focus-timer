@@ -120,6 +120,9 @@ class SyncTest {
             runner.call { sb.answerPairing(req.token, true) }
             waitFor { sa.outgoing?.state == "accepted" && lb.cleared == 1 && sb.peers()[sa.myId]?.optBoolean("init") == false }
             assertEquals(0, la.cleared)
+            // 绑定刚完成时的先后顺序不能变成"同步失败" (以前子端先同步过去会得到 401 unpaired)
+            assertEquals("", sb.peers()[sa.myId]!!.optString("last_err"))
+            assertEquals("", sa.peers()[sb.myId]!!.optString("last_err"))
             assertEquals(3600.0, (lb.docs["settings"]!!["DAILY_LIMIT"] as JSONObject).getDouble("value"), 0.0)
             assertEquals(mapOf("2026-01-01/9" to "学习"), lb.docs["hours"]!!.toMap())
             assertFalse("子端的旧数据不能传给母端", la.docs["hours"]!!.containsKey("2026-01-01/10"))

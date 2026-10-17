@@ -206,6 +206,8 @@ class SyncService:
         self._httpd = None
         self._udp = None
         self._wake = threading.Event()
+        self._busy = set()        # 正在和哪些设备同步 (同一台设备不同时跑两轮)
+        self.firewall = None      # 本机防火墙检查的结果 (firewall.check, 由 app 在后台填)
         self.state = self._load()
         if not self.state.get("device"):
             self.state["device"] = {"id": secrets.token_hex(6),
@@ -345,14 +347,19 @@ class SyncService:
                 p["addr"], p["port"] = ip, info["port"]
 
     def _broadcast_targets(self):
+        """255.255.255.255 加上每块网卡所在网段的广播地址.
+        Windows 只把 255.255.255.255 从一块网卡发出去 (装了虚拟网卡 / VPN 时常常不是 Wi-Fi 那块),
+        所以每个网段还要单独发一次. 以前一律按 /24 猜, 10.x / 172.x 这类更大的局域网里找不到对方."""
         targets = {"255.255.255.255"}
-        try:
-            for fam, _t, _p, _c, sa in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-                parts = sa[0].split(".")
-                if len(parts) == 4 and not sa[0].startswith("127."):
-                    targets.add(".".join(parts[:3] + ["255"]))
-        except OSError:
-            pass
+        for addr, mask in _ipv4_nets():
+            if addr.startswith("127.") or addr.startswith("169.254.") or mask == "255.255.255.255":
+                continue
+            try:
+                a = int.from_bytes(socket.inet_aton(addr), "big")
+                m = int.from_bytes(socket.inet_aton(mask), "big")
+            except OSError:
+                continue
+            targets.add(socket.inet_ntoa(((a & m) | (~m & 0xFFFFFFFF)).to_bytes(4, "big")))
         return targets
 
     def discover(self, wait: float = 2.0) -> list:
@@ -439,9 +446,18 @@ class SyncService:
             token = str(d["token"])
             o.update(state="waiting", code=pair_code(k), name=str(d.get("name") or "?"))
             deadline = time.time() + PAIR_TIMEOUT
+            misses = 0
             while time.time() < deadline and o["state"] == "waiting" and not self.dead:
                 time.sleep(1.5)
-                st, r = self._http(addr, port, "GET", f"/oit/v1/pair/{token}", timeout=4.0)
+                try:
+                    st, r = self._http(addr, port, "GET", f"/oit/v1/pair/{token}", timeout=4.0)
+                    misses = 0
+                except OSError:
+                    # Wi-Fi 偶尔丢一两个包: 等对方确认的这两分钟里, 连续几次连不上才算失败
+                    misses += 1
+                    if misses >= 5:
+                        raise
+                    continue
                 state = r.get("state")
                 if state == "rejected":
                     o["state"] = "rejected"
@@ -454,8 +470,7 @@ class SyncService:
                     self.runner.call(lambda: self._add_peer(peer_id, d, addr, port, k, mother))
                     o["state"] = "accepted"
                     if mother != self.my_id:
-                        self._sync_with(peer_id, init=True)
-                    self._wake.set()
+                        self._init_after_accept(peer_id)
                     return
             if o["state"] == "waiting":
                 o["state"] = "timeout"
@@ -523,11 +538,23 @@ class SyncService:
             return True
         self._add_peer(r["id"], r, r["addr"], r["port"], r["key"], r["mother"])
         r["state"] = "accepted"
+        # 本机是子端: 主动向母端要初始化的内容. 本机是母端: 等子端来要 —— 这时发起方 (子端) 可能还没
+        # 查到"已接受", 马上同步过去只会得到 401 (以前会显示"同步失败: unpaired")
         if r["mother"] != self.my_id:
-            threading.Thread(target=self._sync_with, args=(r["id"],), kwargs={"init": True},
-                             daemon=True).start()
-        self._wake.set()
+            threading.Thread(target=self._init_after_accept, args=(r["id"],), daemon=True).start()
         return True
+
+    def _init_after_accept(self, peer_id: str):
+        """本机是子端, 刚接受了绑定: 向母端要初始化的内容.
+        发起方要等下一次查询 (每 1.5 秒) 才知道已经接受, 在那之前它还不认识本机, 会回 401 ——
+        以前只试一次, 失败后要等 30 秒的下一轮, 这期间一直显示"同步失败: unpaired"."""
+        for _ in range(12):
+            if self.dead or peer_id not in self.peers():
+                return
+            if self._sync_with(peer_id, init=True, quiet=True):
+                return
+            time.sleep(1.5)
+        self._sync_with(peer_id, init=True)          # 还不行就照常记下原因, 交给定时同步
 
     # ---- 解除绑定 ----
 
@@ -647,12 +674,25 @@ class SyncService:
 
     # ---- 同步 ----
 
-    def _sync_with(self, peer_id: str, init: bool = False) -> bool:
+    def _sync_with(self, peer_id: str, init: bool = False, quiet: bool = False):
+        """True 成功 / False 失败 / None 这次不用算 (正在同步, 或对方子端还在初始化).
+        quiet: 失败了也不记原因 (绑定刚完成时的重试)."""
         p = self.peers().get(peer_id)
         if not p:
             return False
         if p.get("init") and not init:
-            return self._sync_with(peer_id, init=True)
+            init = True
+        with self.lock:
+            if peer_id in self._busy:
+                return None
+            self._busy.add(peer_id)
+        try:
+            return self._sync_once(peer_id, p, init, quiet)
+        finally:
+            with self.lock:
+                self._busy.discard(peer_id)
+
+    def _sync_once(self, peer_id: str, p: dict, init: bool, quiet: bool):
         k = bytes.fromhex(p["key"])
         try:
             if init:
@@ -664,6 +704,8 @@ class SyncService:
             st, reply = self._http(p["addr"], p["port"], "POST", "/oit/v1/sync", env, timeout=10.0)
             if st == 401:
                 raise RuntimeError("unpaired")
+            if st == 409 and reply.get("error") == "initializing":
+                return None             # 对方是子端, 正在向本机要初始化的内容: 不是出错
             if st != 200:
                 raise RuntimeError(reply.get("error") or f"HTTP {st}")
             body = unseal(k, reply)
@@ -680,15 +722,19 @@ class SyncService:
             self._save()
             return True
         except Exception as e:      # noqa: BLE001 —— 记下来显示
-            with self.lock:
-                q = self.state["peers"].get(peer_id)
-                if q:
-                    q["last_err"] = str(e) or type(e).__name__
+            if not quiet:
+                with self.lock:
+                    q = self.state["peers"].get(peer_id)
+                    if q:
+                        q["last_err"] = str(e) or type(e).__name__
             return False
 
     def _on_sync(self, env: dict):
         if not self.proxy_ok():
             return 409, {"error": "not-proxy"}
+        if not env.get("from"):
+            # 请求体读不出来 (例如超过大小上限): 以前当成"没绑定"回 401, 对方会显示 unpaired
+            return 400, {"error": "bad-request"}
         p = self.peers().get(str(env.get("from")))
         if not p:
             return 401, {"error": "unpaired"}
@@ -742,7 +788,7 @@ class SyncService:
             # 母端向子端发请求; 子端只在还没初始化或按了"立即同步"时向母端发
             peers = {pid: p for pid, p in self.peers().items()
                      if p.get("mother") == self.my_id or p.get("init") or manual}
-            failed = [pid for pid in peers if not self._sync_with(pid)]
+            failed = [pid for pid in peers if self._sync_with(pid) is False]
             # 有设备连不上: 地址可能变了 (DHCP), 广播找一下再试一次
             if failed and time.time() - last_discover > 60:
                 last_discover = time.time()
@@ -792,6 +838,43 @@ class SyncService:
         with self.lock:
             return [dict(v, id=k, name=(self.state["ledgers"].get(k) or {}).get("name", "?"))
                     for k, v in self.state["status"].items() if k != self.my_id]
+
+
+def _ipv4_nets() -> list:
+    """[(地址, 掩码)] 本机各网卡的 IPv4. Windows 用 GetIpAddrTable 取真实掩码; 其他平台按 /24 猜."""
+    out = []
+    if os.name == "nt":
+        try:
+            import ctypes
+            import struct
+
+            class Row(ctypes.Structure):
+                _fields_ = [("addr", ctypes.c_uint32), ("index", ctypes.c_uint32),
+                            ("mask", ctypes.c_uint32), ("bcast", ctypes.c_uint32),
+                            ("reasm", ctypes.c_uint32), ("unused", ctypes.c_ushort),
+                            ("type", ctypes.c_ushort)]
+            iphlpapi = ctypes.WinDLL("iphlpapi")
+            size = ctypes.c_ulong(0)
+            iphlpapi.GetIpAddrTable(None, ctypes.byref(size), False)
+            buf = ctypes.create_string_buffer(size.value + 64)
+            if iphlpapi.GetIpAddrTable(buf, ctypes.byref(size), False) == 0:
+                n = ctypes.c_ulong.from_buffer(buf).value
+                rows = (Row * n).from_buffer(buf, ctypes.sizeof(ctypes.c_ulong))
+                for r in rows:
+                    if r.type & (0x0008 | 0x0040):         # 已断开 / 已删除的地址
+                        continue
+                    out.append((socket.inet_ntoa(struct.pack("<I", r.addr)),
+                                socket.inet_ntoa(struct.pack("<I", r.mask))))
+            if out:
+                return out
+        except Exception:
+            out = []
+    try:
+        for _f, _t, _p, _c, sa in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            out.append((sa[0], "255.255.255.0"))
+    except OSError:
+        pass
+    return out
 
 
 def peer_net(ledgers, date: str) -> dict:
@@ -933,6 +1016,8 @@ def _selftest():
     assert pair_code(bytes(range(32))) == "338005"
     assert dh_shared(5, format(pow(2, 7, P), "x")).hex() ==         "0d2c6ab660f97893d7b57f47872f0ac4b773568d34c7596a216691d2ed4dcc93"
     assert pow(2, P - 1, P) == 1
+    nets = _ipv4_nets()
+    assert all(socket.inet_aton(a) and socket.inet_aton(m) for a, m in nets), nets
 
     # 两个实例在本机互相绑定 (A 是母端), 然后同步
     import tempfile
@@ -990,6 +1075,11 @@ def _selftest():
         assert lb.docs_["settings"]["DAILY_LIMIT"]["value"] == 3600.0
         assert lb.docs_["hours"] == {"2026-01-01/9": "学习"}, lb.docs_["hours"]
         assert sa.my_id in sb.peers() and sb.my_id in sa.peers()
+        # 绑定刚完成时的先后顺序不能变成"同步失败" (以前子端先同步过去会得到 401 unpaired)
+        assert not sb.peers()[sa.my_id]["last_err"], sb.peers()[sa.my_id]
+        assert not sa.peers()[sb.my_id]["last_err"], sa.peers()[sb.my_id]
+        # 母端向还在初始化的子端同步: 不算出错
+        assert sa._sync_with(sb.my_id) in (True, None)
 
         # 之后: 新的修改覆盖旧的, 账互相转交
         time.sleep(0.01)
@@ -1018,6 +1108,27 @@ def _selftest():
                 break
             time.sleep(0.05)
         assert not sa.peers() and not sb.peers()
+
+        # 反过来: B 发起, 选 A 为母端 —— 发起方是子端, 拿到"已接受"后马上初始化
+        lb.cleared = 0
+        sb.start_pairing("127.0.0.1", sa.port, mother_is_me=False)
+        for _ in range(100):
+            if la.requests and sb.outgoing["state"] == "waiting":
+                break
+            time.sleep(0.05)
+        req = la.requests[-1]
+        assert req["mother"] == sa.my_id and req["code"] == sb.outgoing["code"]
+        runner.call(lambda: sa.answer_pairing(req["token"], True))
+        for _ in range(200):
+            if sb.outgoing["state"] == "accepted" and not sb.peers().get(sa.my_id, {}).get("init", True):
+                break
+            time.sleep(0.05)
+        assert sb.outgoing["state"] == "accepted" and lb.cleared == 1, (sb.outgoing, lb.cleared)
+        assert not sb.peers()[sa.my_id]["last_err"] and not sa.peers()[sb.my_id]["last_err"]
+        assert sa.peers()[sb.my_id]["last_ok"], "子端初始化时母端也记下了这次同步"
+        runner.call(lambda: sa.unpair(sb.my_id))
+        # 请求体读不出来 (例如太大): 回 400, 不再冒充"没绑定"
+        assert sa._on_sync({})[0] == 400
     finally:
         stop.set()
         sa.stop()

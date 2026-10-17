@@ -18,7 +18,9 @@
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
-    <!-- 规则页选择应用 / 认出发起 DNS 查询的应用: 需要看到本机所有应用 -->
+    <!-- 锁定应用: 盖住被锁定的应用, 并从后台回到桌面 (MECHANICS 14.6) -->
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <!-- 规则页选择应用 / 拦截记录里认出发起 DNS 查询的应用: 需要看到本机所有应用 -->
     <uses-permission
         android:name="android.permission.QUERY_ALL_PACKAGES"
         tools:ignore="QueryAllPackagesPermission" />

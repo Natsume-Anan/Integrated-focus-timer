@@ -56,8 +56,14 @@ class NetGuard:
         self._last_enforce = time.monotonic()
         if self.dev_mode:
             self.ensure_online()
+        elif self.net_mode == "proxy":
+            # 上次可能是 Adapter 方式关闭的, 或者代理起不来退回过禁用网卡 (fail-closed 时网卡一直禁用着):
+            # 过滤代理就位后把网卡打开 —— Proxy 方式下网卡保持开启 (MECHANICS 3.2)
+            self.q.put(self._enter_proxy)
         else:
             self.block()
+            # 上次是 Proxy 方式关闭的: 系统代理还指向已经退出的过滤代理, 联网时也连不上. 还原掉
+            self.q.put(lambda: self.proxy.stop(restore=True))
 
 
     def _day(self, offset: int = 0):
@@ -154,7 +160,7 @@ class NetGuard:
 
     @property
     def net_mode(self) -> str:
-        # proxy_all (代理 - 屏蔽全部) 和 proxy 用同一个后端 (本地过滤代理), 只是不看名单
+        # proxy_all (代理-全屏蔽 (Proxy block-all)) 和 proxy 用同一个后端 (本地过滤代理), 只是不看名单
         return "proxy" if getattr(config, "NET_MODE", "adapter") in ("proxy", "proxy_all") else "adapter"
 
     @property
@@ -405,7 +411,7 @@ class NetGuard:
     def borrow(self, minutes: int, reason: str):
         """紧急借贷: 立即给今天加额度, 代价是明天扣两倍. 不联网, 联网仍需申请."""
         if self.dev_mode:
-            return False, "Developer mode is ON — the network is already unrestricted."
+            return False, "Already online."
         minutes = int(minutes)
         ok, msg = self.can_borrow(minutes)
         if not ok:
@@ -433,7 +439,7 @@ class NetGuard:
     def request(self, minutes: int, reason: str, quick: bool = False,
                 cooldown_rate: float = 1.0):
         if self.dev_mode:
-            return False, "Developer mode is ON — the network is already unrestricted."
+            return False, "Already online."          # 开发者模式在界面上不显示
         if self.online:
             return False, "Already online."
         if self.pending:
@@ -766,7 +772,7 @@ def _selftest():
         assert n.mode == "dev" and n.online, "开发者模式下网络应视为一直可用"
         assert n.block() is None
         ok, msg = n.request(30, "x")
-        assert not ok and "Developer mode" in msg, msg
+        assert not ok and "Already online" in msg, msg
         assert n.tick(100.0) is None and n.used == 0.0, "开发者模式不计时"
         n.pending = {"minutes": 5, "at": time.time() - 1, "reason": "x", "loan": False}
         n.tick(0.0)

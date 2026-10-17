@@ -22,7 +22,8 @@ IDLE_TIMEOUT = 300.0
 RECHECK_EVERY = 1.0          # 已建立的连接每隔多久重新过一遍规则
 
 _REASON_ZH = {
-    "offline": "当前离线,只放行白名单",
+    "offline": "当前离线,只放行网站白名单",
+    "blockall": "当前离线,全屏蔽",
     "blacklist-app": "该应用在黑名单中",
     "blacklist-domain": "该网站在黑名单中",
     "self": "禁止回环到代理自身",
@@ -164,7 +165,9 @@ class FilterProxy:
         """到目标的 TCP 通道:有上游代理就用 CONNECT 穿过去,否则直连."""
         up = self.upstream()
         if not up:
-            return self._dial(host, port)
+            s = self._dial(host, port)
+            s.settimeout(None)      # 10 秒只管建立连接; 之后和客户端一侧一样阻塞, 由 _relay 管空闲
+            return s
         s = self._dial(up[0], up[1])
         try:
             hp = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"

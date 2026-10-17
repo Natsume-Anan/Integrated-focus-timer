@@ -7,7 +7,8 @@ OIT 卸载程序
   1. 结束正在运行的 OIT —— 否则它会马上把网断回去 (关闭程序本身就会断网, 见 NetGuard.shutdown)
   2. 还原系统代理: 按 sysproxy_backup.json 还原; 备份丢了但代理仍指向 OIT 时直接关掉
   3. 重新启用被禁用的物理网卡 (和 NetGuard.ensure_online 一样: Get-NetAdapter -Physical)
-  4. 删除数据目录, 旧版本 mrsTimer 目录, 旧版本的卸载次数文件 (和 Reset 页的范围相同)
+  4. 删除数据目录, 旧版本 mrsTimer 目录, 旧版本的卸载次数文件 (和 Reset 页的范围相同),
+     以及设备同步加的两条防火墙规则 (firewall.py)
   5. (可选, 默认不勾) 删除程序文件夹本身: 卸载程序退出后由一个后台 PowerShell 删除
 
 1 ~ 4 一定会做: 和 Reset 一样, 立即恢复网络的代价是全部数据. 没有"只恢复网络, 保留数据"的选项.
@@ -35,6 +36,7 @@ import i18n
 from i18n import tr
 from netproxy.sysproxy import SystemProxy, parse_proxy_server
 from netproxy.server import DEFAULT_PORT
+import firewall
 
 
 CONFIRM_WORD = "UNINSTALL"
@@ -326,7 +328,7 @@ def detect_state(paths: Paths, ps=powershell, backend=None) -> dict:
 
 
 def run_uninstall(paths: Paths, remove_program: bool, log,
-                  ps=powershell, backend=None, kill_run=None, spawn=None) -> bool:
+                  ps=powershell, backend=None, kill_run=None, spawn=None, fw_run=None) -> bool:
     """按顺序执行; log(文本, 级别) 级别为 info / ok / warn. 返回网络是否已完全恢复."""
     ok = True
 
@@ -374,6 +376,10 @@ def run_uninstall(paths: Paths, remove_program: bool, log,
         log(tr("   删不掉 (可能被占用): {p}", p=p), "warn")
     if not left:
         log(tr("   数据已全部删除."), "ok")
+    # 设备同步的防火墙规则 (firewall.py) 也是 OIT 留下的
+    fw_left = firewall.remove(fw_run) if fw_run else firewall.remove()
+    for name in fw_left:
+        log(tr("   防火墙规则删不掉: {name}", name=name), "warn")
 
     if remove_program:
         log(tr("⑤ 删除程序文件夹…"), "info")
@@ -762,11 +768,17 @@ def _selftest():
     killed = []
     spawned = []
     logs = []
+    fw_calls = []
+
+    def fw_fake(args, timeout=30):              # 不碰真的防火墙: 规则都不在
+        fw_calls.append(args)
+        return 1, ""
     be = MemoryBackend({"ProxyEnable": 1, "ProxyServer": "127.0.0.1:17890"})
     ok = run_uninstall(p, True, lambda t, lv: logs.append((lv, t)), ps=fake_ps,
                        backend=be, kill_run=lambda a: killed.append(a) or 0,
-                       spawn=spawned.append)
+                       spawn=spawned.append, fw_run=fw_fake)
     assert ok, logs
+    assert fw_calls and all(c[:3] == ["netsh", "advfirewall", "firewall"] for c in fw_calls)
     assert killed and killed[0][:3] == ["taskkill", "/PID", "4321"] and "/T" in killed[0]
     assert not proxy_points_to_oit(be.read())
     assert nic == {"以太网": False, "WLAN": False}
@@ -780,7 +792,7 @@ def _selftest():
     # ── 数据一定会删 (没有保留数据的选项)
     p = fresh()
     ok = run_uninstall(p, False, lambda t, lv: None, ps=fake_ps,
-                       backend=MemoryBackend({"ProxyEnable": 0}), kill_run=lambda a: 0)
+                       backend=MemoryBackend({"ProxyEnable": 0}), kill_run=lambda a: 0, fw_run=fw_fake)
     assert ok and not os.path.exists(p.data_dir) and os.path.isdir(prog)
     p = fresh()
 
@@ -792,7 +804,7 @@ def _selftest():
             return 0, "以太网"
         return 1, "denied"
     ok = run_uninstall(p, False, lambda t, lv: None, ps=stuck_ps,
-                       backend=MemoryBackend({}), kill_run=lambda a: 1)
+                       backend=MemoryBackend({}), kill_run=lambda a: 1, fw_run=fw_fake)
     assert not ok
 
     # ── 数据目录名字不对时不删 (环境变量异常的保护)

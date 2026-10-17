@@ -18,7 +18,7 @@ import java.time.LocalDateTime
 class AndroidLocal(private val app: OitApp) : SyncLocal {
     private val core get() = app.core
 
-    /** 手机上两种断网方式都是代理 (屏蔽全部 / 规则过滤), 局域网都保留, 所以都可以同步. */
+    /** 手机上两种断网方式都是代理 (全屏蔽 / 规则过滤), 局域网都保留, 所以都可以同步. */
     override fun netMode() = "proxy"
     override fun autoText() = core.settings.str("AUTO_TEXT")
     override fun changed() = core.changed()

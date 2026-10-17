@@ -186,7 +186,7 @@ class NetGuard(
 
     /** 紧急借贷: 立即给今天加额度, 代价是明天扣 LOAN_RATE 倍. 不联网. */
     fun borrow(minutes: Int, reason: String): String? {
-        if (devMode) return tr("开发者模式已开启:不断网,不计时.")
+        if (devMode) return tr("已经在联网中.")          // 开发者模式在界面上不显示
         canBorrow(minutes.toDouble())?.let { return it }
         val add = minutes * 60.0
         bonus += add
@@ -208,7 +208,7 @@ class NetGuard(
     }
 
     fun request(minutes: Int, reason: String, quick: Boolean = false, cooldownRate: Double = 1.0): String? {
-        if (devMode) return tr("开发者模式已开启:不断网,不计时.")
+        if (devMode) return tr("已经在联网中.")
         if (online) return tr("已经在联网中.")
         if (pending != null) return tr("已经有一个申请在等待中.")
         if (minutes < 1) return tr("最少 1 分钟.")

@@ -110,7 +110,7 @@ class OitApp : Application(), Host {
     }
 
     override fun applyNet(force: Boolean) {
-        val plan = core.vpnPlan(::installed, packageName)
+        val plan = core.vpnPlan()
         if (plan == VpnPlan.None) {
             OitVpnService.stop(this)
             return
@@ -132,12 +132,6 @@ class OitApp : Application(), Host {
         }
     }
 
-    private fun installed(pkg: String): Boolean = try {
-        packageManager.getPackageInfo(pkg, 0); true
-    } catch (e: Exception) {
-        false
-    }
-
     fun vpnFailed() {
         val need = VpnService.prepare(this) != null
         if (need && !vpnNeedsPermission && !foreground) Notifier.vpnPermission(this)
@@ -155,6 +149,12 @@ class OitApp : Application(), Host {
     }
 
     override fun foregroundApp(): String? = AppUsage.current(this)
+
+    override fun lockApp(pkg: String, why: String) = com.obliphur.oit.service.AppLock.lock(this, pkg, why).let {}
+
+    override fun unlockApp() = com.obliphur.oit.service.AppLock.unlock().let {}
+
+    override fun lockExempt(pkg: String, whitelist: Boolean) = com.obliphur.oit.service.AppLock.exempt(this, pkg, whitelist)
 
     override fun openPage(page: String) {
         navRequests.tryEmit(page)

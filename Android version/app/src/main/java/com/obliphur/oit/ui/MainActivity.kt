@@ -107,7 +107,7 @@ class MainActivity : ComponentActivity() {
     /** VPN 被别的 VPN 应用顶掉或停了: 重新申请 / 重新打开. */
     private fun ensureVpn() {
         if (asking || app.core.settings.devMode) return
-        if (app.core.vpnPlan({ true }, packageName) == com.obliphur.oit.core.VpnPlan.None) return
+        if (app.core.vpnPlan() == com.obliphur.oit.core.VpnPlan.None) return
         if (VpnService.prepare(this) != null) requestVpn()
         else if (com.obliphur.oit.service.OitVpnService.instance == null || com.obliphur.oit.service.OitVpnService.plan == null) app.applyNet(true)
     }
@@ -215,8 +215,7 @@ fun Root(act: MainActivity, pageRequest: MutableStateFlow<String?>) {
             val o = LocalOit.current
             fun navLabel(key: String, base: String): String = when (key) {
                 "log" -> if (!core.dm.hourEnabled) "$base  (off)" else base + if (core.dm.awaitingSlot() != null) " ●" else ""
-                "settings" -> base + (if (core.settings.pending.isNotEmpty()) "  ⏳${core.settings.pending.size}" else "") +
-                    (if (core.settings.devMode) "  🛠" else "")
+                "settings" -> base + (if (core.settings.pending.isNotEmpty()) "  ⏳${core.settings.pending.size}" else "")
                 else -> base
             }
             ModalNavigationDrawer(drawerState = drawer, drawerContent = {

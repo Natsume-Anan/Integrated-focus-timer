@@ -3,8 +3,11 @@
 ────────────────────────────────────
 语义:过滤方式二选一,只有当前方式对应的名单会生效.
 
-    黑名单模式   默认放行,只拦黑名单里的域名 / 应用(与是否联网无关)
-    白名单模式   默认拦截,离线时只放行白名单;联网会话中全部放行(联网申请就是为了解除限制)
+    黑名单模式   默认放行,离线时只拦黑名单里的域名 / 应用;联网会话中全部放行
+    白名单模式   默认拦截,离线时只放行网站白名单里的域名 (不管是哪个程序发起的);联网会话中全部放行.
+                 应用白名单只决定哪些程序的窗口能开着 (app_allowed, MECHANICS 4.7), 不给联网开后门 ——
+                 以前应用白名单里的程序可以连任何网站, 把浏览器放进去 (否则窗口会被关掉) 就等于不拦网站了
+    (两种模式下联网申请都是为了解除限制, 见 MECHANICS 4.1)
 
 名单改动的等待规则(黑 / 白名单相同):
     任何加入和删除都要等 CHANGE_DELAY_HOURS 小时才生效.
@@ -27,7 +30,7 @@ LIST_KEYS = (WHITE_DOMAINS, WHITE_APPS, BLACK_DOMAINS, BLACK_APPS)
 
 MODE_BLACKLIST = "blacklist"
 MODE_WHITELIST = "whitelist"
-# 代理 - 屏蔽全部 (断网方式 proxy_all): 不看名单, 离线时除本机地址外全部拦截, 联网会话中全部放行
+# 代理-全屏蔽 (Proxy block-all) (断网方式 proxy_all): 不看名单, 离线时除本机地址外全部拦截, 联网会话中全部放行
 MODE_BLOCKALL = "blockall"
 
 CHANGE_DELAY_HOURS = 48
@@ -300,8 +303,8 @@ class RuleStore:
 
 
     def decide(self, host: str, exe: str, online: bool, mode: str = MODE_BLACKLIST):
-        """(放行?, 原因).原因: local / blacklist-app / blacklist-domain / default-allow /
-        online / whitelist-app / whitelist-domain / offline"""
+        """(放行?, 原因).原因: local / blockall / online / blacklist-app / blacklist-domain /
+        default-allow / whitelist-domain / offline"""
         host = (host or "").lower().strip('.')
         exe = (exe or "").lower()
         s = self._snap
@@ -309,11 +312,9 @@ class RuleStore:
             return True, "local"
         if mode == MODE_BLOCKALL:
             return (True, "online") if online else (False, "blockall")
+        if online:
+            return True, "online"           # 联网会话中两种名单模式都全部放行 (MECHANICS 4.1)
         if mode == MODE_WHITELIST:
-            if online:
-                return True, "online"
-            if exe and exe in s[WHITE_APPS]:
-                return True, "whitelist-app"
             for r in s[WHITE_DOMAINS]:
                 if domain_match(host, r):
                     return True, "whitelist-domain"
@@ -378,26 +379,27 @@ def _selftest():
 
     assert w("www.school.edu.cn", "chrome.exe", False) == (True, "whitelist-domain")
     assert w("zhihu.com", "chrome.exe", False) == (False, "offline")
-    assert w("zhihu.com", "code.exe", False) == (True, "whitelist-app")
+    assert w("zhihu.com", "code.exe", False) == (False, "offline"), "应用白名单不放行网站"
+    assert w("www.school.edu.cn", "code.exe", False) == (True, "whitelist-domain")
     assert w("www.bilibili.com", "chrome.exe", True) == (True, "online"), "白名单模式联网时不看黑名单"
     assert d("www.school.edu.cn", "chrome.exe", False) == (True, "default-allow"), "黑名单模式默认放行"
     assert d("zhihu.com", "code.exe", False) == (True, "default-allow")
     assert d("www.bilibili.com", "chrome.exe", False) == (False, "blacklist-domain"), "离线也拦黑名单"
     assert d("zhihu.com", "steam.exe", False) == (False, "blacklist-app")
-    assert d("zhihu.com", "chrome.exe", True) == (True, "default-allow")
-    assert d("www.bilibili.com", "chrome.exe", True) == (False, "blacklist-domain")
-    assert d("zhihu.com", "steam.exe", True) == (False, "blacklist-app")
+    assert d("zhihu.com", "chrome.exe", True) == (True, "online")
+    assert d("www.bilibili.com", "chrome.exe", True) == (True, "online"), "黑名单模式联网时全部放行"
+    assert d("zhihu.com", "steam.exe", True) == (True, "online")
     for fn in (d, w):
         assert fn("localhost", "", False) == (True, "local")
         assert fn("127.0.0.1", "", False) == (True, "local")
-    assert d("notbilibili.com", "", True) == (True, "default-allow")
+    assert d("notbilibili.com", "", False) == (True, "default-allow")
     empty = RuleStore(os.path.join(tempfile.mkdtemp(), "e.json"))
     assert empty.decide("anything.com", "x.exe", False, MODE_BLACKLIST) == (True, "default-allow"), \
         "黑名单为空时必须什么都不拦"
     assert empty.decide("anything.com", "x.exe", False, MODE_WHITELIST) == (False, "offline"), \
         "白名单为空时离线全拦"
     assert keys_for_mode(MODE_WHITELIST) == (WHITE_DOMAINS, WHITE_APPS)
-    # 屏蔽全部: 名单不起作用
+    # 全屏蔽: 名单不起作用
     assert rs.decide("www.school.edu.cn", "code.exe", False, MODE_BLOCKALL) == (False, "blockall")
     assert rs.decide("zhihu.com", "chrome.exe", True, MODE_BLOCKALL) == (True, "online")
     assert rs.decide("localhost", "", False, MODE_BLOCKALL) == (True, "local")
@@ -414,8 +416,8 @@ def _selftest():
     assert rs.remove(WHITE_APPS, "code.exe")[0] == "staged"
     assert rs.remove(WHITE_APPS, "code.exe")[0] == "staged", "重复删除不重复排队"
     assert len(rs.pending) == 2
-    assert d("bilibili.com", "", True)[0] is False, "删除要等冷静期"
-    assert w("x.com", "code.exe", False)[0] is True
+    assert d("bilibili.com", "", False)[0] is False, "删除要等冷静期"
+    assert rs.app_allowed("code.exe", False, MODE_WHITELIST)[0] is True, "删除要等冷静期"
     # 等待中再加回 = 取消排队中的删除
     assert rs.add(BLACK_DOMAINS, "bilibili.com")[0] == "cancelled"
     assert len(rs.pending) == 1

@@ -14,6 +14,7 @@ import i18n
 import toast
 import window_guard
 import devsync
+import firewall
 import updater
 import shortcut
 from sync_local import PcLocal
@@ -200,6 +201,8 @@ class BreakTimerApp:
         except Exception as e:
             self._log_window(f"ERROR    sync start {type(e).__name__}: {e}")
         self._pump_sync()
+        # 防火墙放行同步端口, 否则别的设备找不到本机 / 连不进来 (MECHANICS 15.3). netsh 较慢, 放到后台
+        threading.Thread(target=self._check_firewall, daemon=True).start()
         if getattr(config, "UPDATE_CHECK", 1):
             self.root.after(3000, lambda: self.check_update(auto=True))
 
@@ -1417,6 +1420,7 @@ class BreakTimerApp:
         if self.shutting_down:
             return
         self.check_pending_settings()
+        self._check_rule_changes()
         self._check_focus()
         self._check_idle_nudge()
         self._check_setup_period()
@@ -1461,6 +1465,12 @@ class BreakTimerApp:
                       n=n, x=limit, k=len(closed), titles="\n".join(lines)))
 
     # ---- 设备同步 (MECHANICS 15) ----
+
+    def _check_firewall(self):
+        try:
+            self.sync.firewall = firewall.check()
+        except Exception as e:
+            self.sync.firewall = {"added": [], "blockers": [], "error": f"{type(e).__name__}: {e}"}
 
     def _pump_sync(self):
         """后台线程交过来的改动在这里 (界面线程) 执行."""
@@ -1660,7 +1670,7 @@ class BreakTimerApp:
         if self.dm.resetting or self.net.dev_mode or self.net.net_mode != "proxy":
             return
         if getattr(config, "NET_MODE", "") == "proxy_all":
-            return                          # 屏蔽全部只管网络, 不看名单
+            return                          # 全屏蔽只管网络, 不看名单
         rules = self.net.proxy.rules
         mode = getattr(config, "FILTER_MODE", "blacklist")
         online = self.net.online
@@ -1806,6 +1816,21 @@ class BreakTimerApp:
         self._log_notice(f"SETTINGS applied: {', '.join(due)}")
         return due
 
+    def _check_rule_changes(self):
+        """名单里到期的改动: 以前只在打开 Rules 页时才生效, 不看那一页时过滤代理一直用旧名单."""
+        try:
+            due = self.net.proxy.rules.promote_due()
+        except Exception as e:
+            self._log_window(f"ERROR    rules promote {type(e).__name__}: {e}")
+            return
+        if not due:
+            return
+        if "rules" in self.pages:
+            self.pages["rules"].refresh(force=True)
+        toast.success(tr("名单改动已生效:") + "\n" + "\n".join(
+            f"{'+' if p['op'] == 'add' else '−'} {p['item']}" for p in due[:8]))
+        self._log_notice("RULES applied: " + ", ".join(f"{p['op']} {p['list']} {p['item']}" for p in due))
+
     def _sync_hour_log_setting(self):
         want = bool(self.settings.value("HOUR_LOG_ENABLED"))
         if want != self.dm.hour_enabled:
@@ -1842,6 +1867,8 @@ class BreakTimerApp:
         self.end_break_early(silent=True)
         self._cancel_jobs()
         self.sync.stop()
+        # 关闭程序时开发者模式自动关掉, 否则 shutdown 不断网 (fail-closed 失效)
+        config.DEV_MODE = False
         self.net.shutdown()
         self.root.destroy()
 
@@ -1884,23 +1911,18 @@ class BreakTimerApp:
         staged = self.settings.staged_count()
         if staged:
             mark += f"  ⏳{staged}"
-        if config.dev_mode_enabled():
-            mark += "  🛠"
         cfg(b, text=self.nav_labels["settings"] + mark)
 
 
     def on_dev_mode_changed(self, enabled: bool):
-        if not config.dev_mode_defined():
-            return
+        """在"每日联网额度"里填 325799 开 / 关 (settings_manager.DEV_TOGGLE_CODE). 不是设置改动, 不记流水."""
         if enabled:
             self.net.release_restrictions()
-            self._log_notice("DEV_MODE on — network cut-off disabled")
         else:
             try:
                 self.net.block(sync=True)
             except Exception:
                 pass
-            self._log_notice("DEV_MODE off — fail-closed restored")
         self.update_settings_badge()
         self.refresh_net(force=True)
         self.pages["settings"].refresh()
@@ -2144,6 +2166,8 @@ class BreakTimerApp:
         self.refresh_net(force=True)
 
     def _net_set_status(self, text: str, color: str):
+        # 状态后面写上当前的断网方式, 一眼能看出是不是"代理-全屏蔽 (Proxy block-all)"
+        text = f"{text}  ·  {tr(self.settings.display('NET_MODE'))}"
         cfg(self.net_lbl_status, text=text)
         if self.net_dot_canvas.itemcget(self.net_dot_id, "fill") != color:
             self.net_dot_canvas.itemconfig(self.net_dot_id, fill=color)
@@ -2161,22 +2185,8 @@ class BreakTimerApp:
 
     def refresh_net(self, force: bool = False):
         n = self.net
-        mode = n.mode
-        if mode == "dev":
-
-
-            self._net_set_status("Developer mode — network unrestricted", COLORS["warn"])
-            cfg(self.net_lbl_time, text="DEV")
-            cfg(self.net_lbl_sub, text=tr("开发者模式已开启:不断网,不计时."))
-            hide_pack(self.net_form)
-            hide_pack(self.net_ctrl)
-            self._net_bar_set(n)
-            cfg(self.net_lbl_quota,
-                text=f"Used today: {fmt_hm(n.quota_used)} / {fmt_hm(n.today_total)}"
-                     f"     (developer mode — not counting)"
-            )
-            cfg(self.net_lbl_debt, text="")
-            return
+        # 开发者模式在界面上不显示: 照常显示成离线
+        mode = "offline" if n.mode == "dev" else n.mode
 
         if mode != self._net_view or force:
             self._net_view = mode

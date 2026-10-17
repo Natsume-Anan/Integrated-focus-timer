@@ -116,28 +116,26 @@ fun NetScreen() {
     var minutes by rememberSaveable { mutableStateOf("15") }
     var reason by rememberSaveable { mutableStateOf("") }
     var ask by rememberSaveable { mutableStateOf("") }      // quick / loan / upgrade
+    // 状态后面写上当前的断网方式 (代理-全屏蔽 (Proxy block-all) / 代理 - 规则过滤)
+    val mode = "  ·  " + core.settings.display("NET_MODE")
     PageColumn {
         OitCard {
+            // 开发者模式在界面上不显示: 照常显示成离线
             when (n.mode) {
-                "dev" -> {
-                    StatusRow("Developer mode — network unrestricted", o.warn)
-                    BigText("DEV")
-                    Dim(tr("开发者模式已开启:不断网,不计时."))
-                }
                 "pending" -> {
                     val p = n.pending!!
-                    StatusRow(tr("冷静期中 —— 仍可取消"), o.warn)
+                    StatusRow(tr("冷静期中 —— 仍可取消") + mode, o.warn)
                     BigText(fmtMs((p.at - System.currentTimeMillis()) / 1000.0))
                     val at = LocalDateTime.ofInstant(Instant.ofEpochMilli(p.at), ZoneId.systemDefault()).format(Fmt.HM)
                     Dim(tr("已申请 {m} 分钟 · {at} 联网", "m" to p.minutes, "at" to at))
                 }
                 "online" -> {
-                    StatusRow(tr("联网中"), o.success)
+                    StatusRow(tr("联网中") + mode, o.success)
                     BigText(fmtMs(n.grantLeft))
                     if (n.grantQuick) Dim(tr("⚡ 快速访问 ×{a}", "a" to numText(n.grantRate)))
                 }
                 else -> {
-                    StatusRow(tr("离线"), o.dim)
+                    StatusRow(tr("离线") + mode, o.dim)
                     BigText(tr("离线"))
                     if (n.remaining < 60) Dim(tr("今天的额度已用完."))
                 }

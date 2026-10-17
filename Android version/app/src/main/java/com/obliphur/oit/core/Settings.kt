@@ -56,7 +56,7 @@ object Schema {
         num("BREAK_CARRY_RATE", "暂停休息结转比例", "×", 1.0, 0.0, 1.0, false, 0.8, "timer"),
         // ---- 联网 ----
         Spec("NET_MODE", "断网方式", Kind.CHOICE, true, "net", "proxy",
-            choices = listOf("adapter" to "代理 - 屏蔽全部", "proxy" to "代理 - 规则过滤")),
+            choices = listOf("adapter" to "代理-全屏蔽 (Proxy block-all)", "proxy" to "代理 - 规则过滤")),
         num("DAILY_LIMIT", "每日联网额度", "min", 60.0, 0.0, 1440.0, true, 7200.0, "net"),
         num("COOLDOWN", "联网冷静期", "min", 60.0, 0.0, 240.0, true, 300.0, "net"),
         num("ENFORCE_EVERY", "断网复查间隔", "s", 1.0, 5.0, 3600.0, true, 60.0, "net"),
@@ -103,6 +103,15 @@ data class Pending(val value: Any, val requestedAt: String, val applyAt: LocalDa
 
 enum class StageResult { INSTANT, STAGED, NOCHANGE, INVALID, UNKNOWN }
 
+/** 在"每日联网额度"里填这个数 (分钟) 并保存 = 开 / 关开发者模式. 两端相同 (桌面版: settings_manager.DEV_TOGGLE_CODE). */
+const val DEV_TOGGLE_CODE = 325799
+
+fun isDevToggle(key: String, value: Any?): Boolean {
+    if (key != "DAILY_LIMIT") return false
+    val v = (value as? Number)?.toDouble() ?: return false
+    return kotlin.math.abs(v - DEV_TOGGLE_CODE * Schema.BY_KEY[key]!!.scale) < 1e-6
+}
+
 /**
  * 设置与设置冷静期 (MECHANICS 1). 对应桌面版 settings_manager.py.
  * 数值项在内存里是 Double, 其余是 String.
@@ -118,7 +127,7 @@ class Settings(
     val freeNext = HashSet<String>()
     var setupUntil: LocalDateTime? = null
         private set
-    /** 开发者模式 (只在调试版里能打开, 不写文件). */
+    /** 开发者模式: 只能用 DEV_TOGGLE_CODE 开 / 关, 不写文件 (每次启动都是关的), 界面上不显示. */
     var devMode = false
 
     val fresh: Boolean = !file.exists()
@@ -210,12 +219,12 @@ class Settings(
         save()
     }
 
-    /** 修改这一项是否需要等待: instant / dev / setup / free / "" (需要等待). */
+    /** 修改这一项是否需要等待: instant / setup / free / "" (需要等待, 或开发者模式). */
     fun waitTag(key: String): String {
         val spec = Schema.BY_KEY[key] ?: return ""
         return when {
             !spec.delayed -> "instant"
-            devMode -> "dev"
+            devMode -> ""                     // 开发者模式在界面上不显示
             inSetup() -> "setup"
             key in freeNext -> "free"
             else -> ""

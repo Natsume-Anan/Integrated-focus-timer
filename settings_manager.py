@@ -101,9 +101,10 @@ SETTINGS_SCHEMA = [
         "choices": [
             ("adapter", "禁用网卡 (Adapter)"),
             ("proxy", "本地代理过滤 (Proxy)"),
-            ("proxy_all", "代理 - 屏蔽全部"),
+            ("proxy_all", "代理-全屏蔽 (Proxy block-all)"),
         ],
-        "fmt": lambda v: {"proxy": "Proxy", "proxy_all": "Proxy (block all)"}.get(v, "Adapter"),
+        # 显示的就是选项的名字 (界面上再翻译)
+        "fmt": lambda v: {"proxy": "本地代理过滤 (Proxy)", "proxy_all": "代理-全屏蔽 (Proxy block-all)"}.get(v, "禁用网卡 (Adapter)"),
         "desc": "Adapter:离线时直接禁用物理网卡.Proxy:网卡保持开启,由本地代理按 Rules 页的黑白名单放行 / 拦截.",
         "page": "net",
     },
@@ -243,6 +244,19 @@ def page_specs(page: str):
 
 DELAYED_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_DELAY]
 INSTANT_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_INSTANT]
+
+
+# 在"每日联网额度"里填这个数 (分钟) 并保存 = 开 / 关开发者模式. 两端相同 (Android: Settings.kt)
+DEV_TOGGLE_CODE = 325799
+
+
+def is_dev_toggle(key: str, value) -> bool:
+    if key != "DAILY_LIMIT":
+        return False
+    try:
+        return abs(float(value) - DEV_TOGGLE_CODE * SCHEMA_BY_KEY[key]["scale"]) < 1e-6
+    except (TypeError, ValueError, KeyError):
+        return False
 
 
 class SettingsManager:
@@ -413,6 +427,10 @@ class SettingsManager:
         spec = SCHEMA_BY_KEY.get(key)
         if spec is None:
             return "unknown", tr("未知配置项 {key}", key=key)
+        if is_dev_toggle(key, value):
+            # 不是真的修改: 不排队, 不写文件, 不记流水. 调用方负责让网络跟着切换
+            config.toggle_dev_mode()
+            return "dev", ""
         value = self._coerce(key, value)
         ok, msg = self.validate(key, value)
         if not ok:
@@ -503,12 +521,12 @@ class SettingsManager:
 
     def wait_tag(self, key: str) -> str:
         """修改这一项是否需要等待: 'instant' 即时生效 / 'setup' 配置期内即时 /
-        'free' 这一次免等待 / 'dev' 开发者模式下即时 / '' 需要等待."""
+        'free' 这一次免等待 / '' 需要等待 (或开发者模式, 不显示)."""
         spec = SCHEMA_BY_KEY.get(key) or {}
         if spec.get("apply") == APPLY_INSTANT:
             return "instant"
         if config.dev_mode_enabled():
-            return "dev"
+            return ""                   # 开发者模式在界面上不显示
         if config.setup_active():
             return "setup"
         if key in self.free_next:
@@ -671,6 +689,12 @@ def _selftest():
     assert st == "staged" and m.value("DAILY_LIMIT") == DEFAULT_SETTINGS["DAILY_LIMIT"]
     assert 47 * 3600 < m.pending_left_seconds("DAILY_LIMIT") <= 48 * 3600
     assert m.wait_tag("DAILY_LIMIT") == ""
+    # 填 325799 = 开 / 关开发者模式: 不排队, 不改生效值, 排队中的修改原样保留
+    before = (dict(m.pending), dict(m.effective))
+    assert m.stage("DAILY_LIMIT", m.from_ui_number("DAILY_LIMIT", "325799")) == ("dev", "")
+    assert config.dev_mode_enabled() and (dict(m.pending), dict(m.effective)) == before
+    assert m.stage("DAILY_LIMIT", DEV_TOGGLE_CODE * 60)[0] == "dev" and not config.dev_mode_enabled()
+    assert m.stage("COOLDOWN", DEV_TOGGLE_CODE * 60)[0] != "dev", "只认每日联网额度"
 
     st, _ = m.stage("CHIME_WAV", "__builtin__")
     assert st == "instant" and not m.is_staged("CHIME_WAV")

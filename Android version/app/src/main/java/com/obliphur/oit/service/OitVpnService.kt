@@ -2,10 +2,11 @@ package com.obliphur.oit.service
 
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.net.ConnectivityManager
+import android.net.IpPrefix
 import android.net.NetworkCapabilities
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.SystemClock
 import android.system.Os
@@ -17,6 +18,7 @@ import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.net.InetSocketAddress
 import java.time.LocalDateTime
@@ -62,8 +64,9 @@ object BlockLog {
 
 /**
  * 断网的实际执行者 (MECHANICS 14.2). 一个 VpnService, 按 [VpnPlan] 建立接口:
- *  - BlockAll / BlockOnly: 默认路由进 VPN, 读出来的包直接丢掉 = 断网;
- *  - Dns: 只把一个假的 DNS 地址路由进来, 按名单回 NXDOMAIN 或转发给真正的 DNS.
+ *  - BlockAll: 默认路由进 VPN, 读出来的包直接丢掉 = 断网;
+ *  - Dns: 只把一个假的 DNS 地址路由进来, 按网站名单回 NXDOMAIN 或转发给真正的 DNS.
+ * 应用名单不在这里处理 (只管锁定应用, 见 Core.checkAppLock).
  * 换计划时先建好新接口再关旧的, 切换过程中不留空档.
  */
 class OitVpnService : VpnService() {
@@ -129,7 +132,7 @@ class OitVpnService : VpnService() {
                     val n = input.read(buf)
                     if (n <= 0) continue
                     if (plan is VpnPlan.Dns) handle(buf, n, plan)
-                    // BlockAll / BlockOnly: 丢掉
+                    // BlockAll: 丢掉
                 } catch (e: Exception) {
                     if (!alive) break
                     SystemClock.sleep(50)
@@ -143,13 +146,13 @@ class OitVpnService : VpnService() {
             val host = Dns.qname(p.payload) ?: return
             BlockLog.seen(host)
             if (plan.filter) {
-                val pkgs = owner(p)
                 val core = OitApp.instance.core
-                // 屏蔽全部: 除本机地址以外一律拦截; 否则按名单
+                // 全屏蔽: 除本机地址以外一律拦截; 否则按网站名单
                 val ok = if (plan.blockAll) host == "localhost" || host.endsWith(".localhost")
-                else core.rules.snap.decide(host, pkgs, core.net.online, core.settings.str("FILTER_MODE")).first
+                else core.rules.snap.decide(host, core.net.online, core.settings.str("FILTER_MODE")).first
                 if (!ok) {
-                    BlockLog.add(host, pkgs.firstOrNull() ?: "?")
+                    // 发起查询的应用只用来写拦截记录
+                    BlockLog.add(host, owner(p).firstOrNull() ?: "?")
                     Dns.nxdomain(p.payload)?.let { write(Packets.buildReply(p, it)) }
                     return
                 }
@@ -228,6 +231,27 @@ class OitVpnService : VpnService() {
         return list
     }
 
+    /** 当前 Wi-Fi / 有线网络的网段不在 10/8, 172.16/12, 192.168/16 里时 (校园网的公网地址, 运营商级 NAT 100.64/10 …),
+     *  WAN_V4 会把它也放进 VPN 丢掉, 同一网络里的设备同步就连不上. Android 13 起可以把这些网段单独排除. */
+    private fun excludeLocalNets(b: Builder) {
+        if (Build.VERSION.SDK_INT < 33) return
+        val cm = getSystemService(ConnectivityManager::class.java) ?: return
+        @Suppress("DEPRECATION")
+        for (n in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(n) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (!caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) &&
+                !caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)) continue
+            for (la in cm.getLinkProperties(n)?.linkAddresses ?: emptyList()) {
+                val a = la.address as? Inet4Address ?: continue
+                if (a.isSiteLocalAddress || a.isLinkLocalAddress || a.isLoopbackAddress) continue
+                // 太大的网段 (/16 以上) 多半不是局域网, 不排除, 免得白名单模式离线时放走外网
+                if (la.prefixLength < 16) continue
+                runCatching { b.excludeRoute(IpPrefix(a, la.prefixLength)) }
+            }
+        }
+    }
+
     override fun onCreate() {
         super.onCreate()
         instance = this
@@ -242,7 +266,7 @@ class OitVpnService : VpnService() {
         }
         // ACTION_APPLY, 或系统 (始终开启的 VPN) 拉起的
         val app = OitApp.instance
-        val want = app.core.vpnPlan(::installed, packageName)
+        val want = app.core.vpnPlan()
         if (want == VpnPlan.None) {
             teardown(); stopSelf(startId); return START_NOT_STICKY
         }
@@ -256,13 +280,7 @@ class OitVpnService : VpnService() {
         return START_STICKY
     }
 
-    private fun installed(pkg: String): Boolean = try {
-        packageManager.getPackageInfo(pkg, 0); true
-    } catch (e: PackageManager.NameNotFoundException) {
-        false
-    }
-
-    private fun blocking(p: VpnPlan?) = p is VpnPlan.BlockAll || p is VpnPlan.BlockOnly
+    private fun blocking(p: VpnPlan?) = p is VpnPlan.BlockAll
 
     private fun establish(want: VpnPlan, retry: Boolean = true) {
         val p = want
@@ -283,15 +301,10 @@ class OitVpnService : VpnService() {
                     // 除了局域网 / 链路本地 / 组播以外的全部地址 (Proxy 模式下设备同步还要用局域网)
                     for ((a, n) in WAN_V4) b.addRoute(a, n)
                     b.addRoute("2000::", 3)
+                    excludeLocalNets(b)
                 } else {
                     b.addRoute("0.0.0.0", 0); b.addRoute("::", 0)
                 }
-                p.exclude.forEach { runCatching { b.addDisallowedApplication(it) } }
-            }
-            is VpnPlan.BlockOnly -> {
-                b.addRoute("0.0.0.0", 0); b.addRoute("::", 0)
-                val n = p.include.count { runCatching { b.addAllowedApplication(it) }.isSuccess }
-                if (n == 0) return establish(VpnPlan.Dns(false, 0))
             }
             is VpnPlan.Dns -> {
                 b.addDnsServer(V4_DNS); b.addRoute(V4_DNS, 32)
@@ -327,7 +340,6 @@ class OitVpnService : VpnService() {
      */
     private fun verifyBlocked(retry: Boolean = false) {
         val p = plan as? VpnPlan.BlockAll ?: return
-        if (packageName in p.exclude) return
         Thread({
             SystemClock.sleep(1500)
             val leaked = listOf("223.5.5.5", "1.1.1.1").any { ip ->

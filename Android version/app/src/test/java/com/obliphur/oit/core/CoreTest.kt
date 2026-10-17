@@ -102,15 +102,22 @@ class CoreTest {
         val s = rs.snap
         val B = RuleKeys.BLACKLIST
         val W = RuleKeys.WHITELIST
-        assertEquals(true to "whitelist-domain", s.decide("www.school.edu.cn", listOf("x"), false, W))
-        assertEquals(false to "offline", s.decide("zhihu.com", listOf("x"), false, W))
-        assertEquals(true to "whitelist-app", s.decide("zhihu.com", listOf("com.code"), false, W))
-        assertEquals(true to "online", s.decide("www.bilibili.com", listOf("x"), true, W))
-        assertEquals(true to "default-allow", s.decide("www.school.edu.cn", listOf("x"), false, B))
-        assertEquals(false to "blacklist-domain", s.decide("www.bilibili.com", listOf("x"), false, B))
-        assertEquals(false to "blacklist-app", s.decide("zhihu.com", listOf("com.steam"), true, B))
-        assertEquals(true to "local", s.decide("127.0.0.1", emptyList(), false, W))
-        assertEquals(true to "default-allow", s.decide("notbilibili.com", emptyList(), true, B))
+        // 联网只看网站名单, 应用名单不参与 (MECHANICS 4.1 / 14.2)
+        assertEquals(true to "whitelist-domain", s.decide("www.school.edu.cn", false, W))
+        assertEquals(false to "offline", s.decide("zhihu.com", false, W))
+        assertEquals(true to "online", s.decide("www.bilibili.com", true, W))
+        assertEquals(true to "default-allow", s.decide("www.school.edu.cn", false, B))
+        assertEquals(false to "blacklist-domain", s.decide("www.bilibili.com", false, B))
+        assertEquals(true to "online", s.decide("www.bilibili.com", true, B))  // 联网中全部放行
+        assertEquals(true to "local", s.decide("127.0.0.1", false, W))
+        assertEquals(true to "default-allow", s.decide("notbilibili.com", false, B))
+        // 应用名单只管锁定
+        assertEquals(false to "blacklist-app", s.appAllowed("com.steam", false, B))
+        assertEquals(false to "blacklist-app", s.appAllowed("com.steam", true, B))
+        assertEquals(true to "default-allow", s.appAllowed("com.code", false, B))
+        assertEquals(true to "whitelist-app", s.appAllowed("com.code", false, W))
+        assertEquals(false to "not-whitelisted", s.appAllowed("com.steam", false, W))
+        assertEquals(true to "online", s.appAllowed("com.steam", true, W))
         // 删除一律要等; 等待中再加回 = 取消
         assertEquals(RuleResult.STAGED, rs.remove(RuleKeys.BLACK_DOMAINS, "bilibili.com").first)
         assertEquals(RuleResult.STAGED, rs.remove(RuleKeys.BLACK_DOMAINS, "bilibili.com").first)
@@ -222,51 +229,92 @@ class CoreTest {
     }
 
     private object NoHost : Host {
+        var fg: String? = null
+        val locks = mutableListOf<String>()
+        var unlocks = 0
+        override fun lockApp(pkg: String, why: String) { locks.add("$pkg:$why") }
+        override fun unlockApp() { unlocks++ }
+        override fun lockExempt(pkg: String, whitelist: Boolean) = pkg == "com.android.settings"
         override fun toast(t: Toast) {}
         override fun noticesChanged() {}
         override fun changed() {}
         override fun applyNet(force: Boolean) {}
         override fun playChime(done: () -> Unit) = done()
         override fun hourPrompt(slot: LocalDateTime, silent: Boolean) {}
-        override fun foregroundApp(): String? = null
+        override fun foregroundApp(): String? = fg
         override fun openPage(page: String) {}
         override fun scheduleWake(seconds: Double) {}
     }
 
-    /** Proxy 模式下不管名单怎么写, OIT 自己连其他设备的局域网通道都在 (MECHANICS 15). */
+    /** VPN 只看网站名单; 不管名单怎么写, OIT 自己连其他设备的局域网通道都在 (MECHANICS 14.2, 15). */
     @Test
-    fun syncChannelKeptInEveryRulesMode() {
-        val self = "com.obliphur.oit"
+    fun vpnPlanUsesOnlySiteLists() {
         val core = Core(tmp(), NoHost) { 0.0 }       // 第一次打开: 配置期内, 改动立即生效
-        val all = { _: String -> true }
-        fun plan() = core.vpnPlan(all, self)
         fun lanOpen(p: VpnPlan) = when (p) {
             is VpnPlan.Dns -> true                               // 只接管 DNS: 局域网直连
-            is VpnPlan.BlockAll -> p.keepLan || self in p.exclude
-            is VpnPlan.BlockOnly -> self !in p.include
+            is VpnPlan.BlockAll -> p.keepLan
             VpnPlan.None -> true
         }
-        core.rules.add(RuleKeys.BLACK_APPS, self)            // 连 OIT 自己都拉黑
         core.rules.add(RuleKeys.BLACK_APPS, "tv.danmaku.bili")
-        assertEquals(VpnPlan.BlockOnly(setOf("tv.danmaku.bili")), plan())
-        core.rules.add(RuleKeys.BLACK_APPS, "x.y")
+        assertEquals(VpnPlan.Dns(false, 0), core.vpnPlan())         // 应用黑名单不进 VPN, 只锁定
         core.rules.add(RuleKeys.BLACK_DOMAINS, "bilibili.com")
-        assertTrue(lanOpen(plan()))
+        assertTrue(core.vpnPlan() is VpnPlan.Dns && (core.vpnPlan() as VpnPlan.Dns).filter)
         core.stageSetting("FILTER_MODE", RuleKeys.WHITELIST)
-        assertTrue(plan() is VpnPlan.BlockAll && lanOpen(plan()))      // 白名单, 网站白名单为空
+        core.rules.add(RuleKeys.WHITE_APPS, "com.code")
+        assertEquals(VpnPlan.BlockAll(keepLan = true), core.vpnPlan())   // 网站白名单为空: 应用白名单也不放行
         core.rules.add(RuleKeys.WHITE_DOMAINS, "school.edu.cn")
-        assertTrue(plan() is VpnPlan.Dns && lanOpen(plan()))
-        core.rules.remove(RuleKeys.BLACK_APPS, self)
-        core.rules.remove(RuleKeys.BLACK_APPS, "tv.danmaku.bili")
-        core.rules.remove(RuleKeys.BLACK_APPS, "x.y")
-        core.stageSetting("FILTER_MODE", RuleKeys.BLACKLIST)
-        core.rules.remove(RuleKeys.BLACK_DOMAINS, "bilibili.com")
-        core.rules.add(RuleKeys.BLACK_APPS, self)
-        assertEquals(VpnPlan.Dns(false, 0), plan())               // 黑名单里只有 OIT 自己
-        // 代理 - 屏蔽全部: 接管 DNS, 全部拦截, 局域网照样能连
+        assertTrue(core.vpnPlan() is VpnPlan.Dns && lanOpen(core.vpnPlan()))
+        // 代理-全屏蔽 (Proxy block-all): 接管 DNS, 全部拦截, 局域网照样能连
         core.stageSetting("NET_MODE", "adapter")
-        assertEquals(VpnPlan.Dns(true, 0, blockAll = true), plan())
-        assertTrue(lanOpen(plan()))
+        assertEquals(VpnPlan.Dns(true, 0, blockAll = true), core.vpnPlan())
+        assertTrue(lanOpen(core.vpnPlan()))
+    }
+
+    /** 每日联网额度填 325799 = 开 / 关开发者模式: 不是真的修改, 不排队. */
+    @Test
+    fun devToggle() {
+        val core = Core(tmp(), NoHost) { 0.0 }
+        core.endSetupPeriod()
+        val code = DEV_TOGGLE_CODE * 60.0
+        assertEquals(StageResult.NOCHANGE to "", core.stageSetting("DAILY_LIMIT", code))
+        assertTrue(core.settings.devMode)
+        assertTrue(core.settings.pending.isEmpty())
+        assertEquals(VpnPlan.None, core.vpnPlan())
+        assertEquals("", core.settings.waitTag("DAILY_LIMIT"))
+        assertEquals(StageResult.NOCHANGE, core.stageSetting("DAILY_LIMIT", code).first)
+        assertFalse(core.settings.devMode)
+        assertEquals(7200.0, core.settings.num("DAILY_LIMIT"), 0.0)
+        assertEquals(StageResult.INVALID, core.stageSetting("COOLDOWN", code).first)   // 只认每日联网额度
+    }
+
+    /** 应用名单: 前台应用不能用就锁定, 离开后撤掉 (MECHANICS 14.6). */
+    @Test
+    fun appLock() {
+        NoHost.locks.clear(); NoHost.unlocks = 0; NoHost.fg = null
+        val core = Core(tmp(), NoHost) { 0.0 }
+        core.rules.add(RuleKeys.BLACK_APPS, "tv.danmaku.bili")
+        core.stageSetting("NET_MODE", "proxy")
+        NoHost.fg = "tv.danmaku.bili"
+        core.tick()
+        assertEquals(listOf("tv.danmaku.bili:blacklist-app"), NoHost.locks)
+        assertEquals("tv.danmaku.bili", core.lockedApp)
+        NoHost.fg = ""                                           // 回到桌面
+        core.tick()
+        assertEquals(null, core.lockedApp)
+        assertEquals(1, NoHost.unlocks)
+        // 白名单模式: 不在应用白名单里的锁定, 永远不锁的除外; 联网中不锁
+        core.stageSetting("FILTER_MODE", RuleKeys.WHITELIST)
+        core.rules.add(RuleKeys.WHITE_APPS, "com.code")
+        NoHost.locks.clear()
+        for (a in listOf("com.code", "com.android.settings", "OIT")) { NoHost.fg = a; core.tick() }
+        assertTrue(NoHost.locks.isEmpty())
+        NoHost.fg = "com.game"
+        core.tick()
+        assertEquals(listOf("com.game:not-whitelisted"), NoHost.locks)
+        // 全屏蔽时名单不起作用: 撤掉锁定
+        core.stageSetting("NET_MODE", "adapter")
+        core.tick()
+        assertEquals(null, core.lockedApp)
     }
 
     /** 计时器此刻的状态在设备之间切换: 照着切换, 只有操作的那台记录 (MECHANICS 15.2). */
