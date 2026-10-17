@@ -89,6 +89,8 @@ class OitApp : Application(), Host {
             m == null || System.currentTimeMillis() - (s.peers()[m]?.optLong("last_ok") ?: 0L) < com.obliphur.oit.sync.SyncService.FRESH_MS
         }
         core.devChangedHook = { if (s.peers().isNotEmpty()) s.syncNow() }
+        core.offlineSpans = { a, b -> s.offlineSpans(a, b) }
+        core.trackOffline = { s.trackOffline() }
         core.net.peerNet = { com.obliphur.oit.sync.SyncService.peerNet(s.peerLedgers(), core.net.date) }
         core.net.peerUsage = { s.peerLedgers().flatMap { l -> l.optJSONArray("usage")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) } } ?: emptyList() } }
         try {

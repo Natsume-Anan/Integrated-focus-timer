@@ -747,8 +747,9 @@ class BreakTimerApp:
         elif self.state == RUNNING:
             end_wall = datetime.now()
             elapsed_minutes = (time.monotonic() - self.start_mono) / 60.0
-            self.last_t_minutes = elapsed_minutes
-            self.dm.add_study_session(self.start_wall, end_wall, elapsed_minutes)
+            self.last_t_minutes = elapsed_minutes      # 建议休息时长照常按整段专注算
+            off = self._cut_offline(self.start_wall, end_wall)
+            self.dm.add_study_session(self.start_wall, end_wall, max(0.0, elapsed_minutes - off / 60.0))
             self.dm.add_focus_session("study", self.start_wall, end_wall)
             self._close_check_win()
             self.state = READY_BREAK          # 专注已记下: 先清掉文件里的专注状态
@@ -1240,10 +1241,25 @@ class BreakTimerApp:
             seconds = ok + (seconds - ok) * float(config.FOCUS_CHECK_PENALTY)
         end = start + timedelta(seconds=seconds)
         minutes = seconds / 60.0
-        self.dm.add_study_session(start, end, minutes)
+        # 有设备离线的那段记为空闲, 不计入学习时长; 建议休息时长照常按计入前的时长算
+        counted = max(0.0, minutes - self._cut_offline(start, end) / 60.0)
+        self.dm.add_study_session(start, end, counted)
         self.dm.add_focus_session("study", start, end)
         brk = int(round(max(0.0, compute_F(minutes)) * float(config.BREAK_TIME_SCALE) * 60.0))
-        return minutes, brk
+        return counted, brk
+
+    def _cut_offline(self, start: datetime, end: datetime) -> float:
+        """[start, end] 这段专注里有绑定的设备离线的时间段: 记为空闲 (统计里压过专注), 返回一共多少秒."""
+        total = 0.0
+        try:
+            spans = self.sync.offline_spans(start.timestamp() * 1000, end.timestamp() * 1000)
+        except Exception:
+            return 0.0
+        for a, b in spans:
+            self.dm.add_focus_session("idle", datetime.fromtimestamp(a / 1000), datetime.fromtimestamp(b / 1000),
+                                      focus=start)
+            total += (b - a) / 1000.0
+        return total
 
     # ---- 专注中每 1.5 小时: 还在吗 ----
 
@@ -1506,6 +1522,7 @@ class BreakTimerApp:
         self._keep_awake()
         self._check_dev_follow()
         self._maybe_relay()
+        self.sync.track_offline()
         self._check_idle_nudge()
         self._check_setup_period()
         self.apply_job = self.root.after(5000, self._schedule_apply_check)
@@ -1722,11 +1739,14 @@ class BreakTimerApp:
         self.update_settings_badge()
         self.refresh_net(force=True)
 
-    def _peer_line(self) -> str:
+    def _peer_line(self):
+        """Timer 页: 绑定的每台设备此刻的状态; 有设备离线时提醒离线的那段专注不会被记录. 返回 (文字, 有离线吗)."""
         lines = []
-        now = time.time() * 1000
-        for st in self.sync.peer_status():
-            if now - float(st.get("ts", 0)) > 60_000:
+        offline = []
+        for st in self.sync.device_states():
+            if not st["online"]:
+                offline.append(st["name"])
+                lines.append(f"🔗 {st['name']}: {tr('离线')}")
                 continue
             t = {"running": tr("专注中…"), "break": tr("休息中 ☕")}.get(st.get("timer"), tr("准备就绪"))
             if st.get("timer") == "running" and st.get("since"):
@@ -1737,7 +1757,9 @@ class BreakTimerApp:
                     pass
             net = {"online": tr("联网中"), "pending": tr("冷静期中")}.get(st.get("net"), "")
             lines.append(f"🔗 {st.get('name', '?')}: {t}" + (f" · {net}" if net else ""))
-        return "\n".join(lines)
+        if offline:
+            lines.append(tr("⚠ 有设备离线: 离线的这段时间专注不会被记录."))
+        return "\n".join(lines), bool(offline)
 
     # ---- Rules 页的应用名单: 前台窗口的程序被禁用时立即关掉 (MECHANICS 4.7) ----
 
@@ -2511,7 +2533,8 @@ class BreakTimerApp:
             self._update_retry = False
             self.check_update(auto=True)
         if self.current_page == "timer" and hasattr(self, "lbl_peers"):
-            cfg(self.lbl_peers, text=self._peer_line())
+            text, off = self._peer_line()
+            cfg(self.lbl_peers, text=text, fg=COLORS["warn"] if off else COLORS["text_dim"])
         self.net_job = self.root.after(1000, self._net_tick)
 
         if event:

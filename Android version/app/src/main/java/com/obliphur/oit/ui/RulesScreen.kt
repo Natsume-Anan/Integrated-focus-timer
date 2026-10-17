@@ -192,11 +192,13 @@ private fun localIp(): String = try {
     ""
 }
 
-/** 其他设备此刻的状态, 一台一行 (只显示一分钟内同步过的). */
+/** 绑定的每台设备此刻的状态, 一台一行; 2 分钟内没有消息的显示"离线". */
 fun peerLines(): List<String> {
     val s = OitApp.instance.sync ?: return emptyList()
-    val now = System.currentTimeMillis()
-    return s.peerStatus().filter { now - it.third.optLong("ts") < 60_000 }.map { (_, name, st) ->
+    return s.deviceStates().map { d ->
+        val name = d.name
+        val st = d.status
+        if (!d.online) return@map "🔗 $name: " + tr("离线")
         var t = when (st.optString("timer")) {
             "running" -> tr("专注中…")
             "break" -> tr("休息中 ☕")

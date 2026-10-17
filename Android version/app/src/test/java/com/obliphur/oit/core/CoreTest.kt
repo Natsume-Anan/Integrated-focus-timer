@@ -341,6 +341,22 @@ class CoreTest {
         assertEquals(20 * 60.0, total, 5.0)
     }
 
+    /** 有设备离线时: 专注照常, 休息照常算, 但离线的那段记为空闲, 不计入学习时长 (MECHANICS 8.4). */
+    @Test
+    fun offlineStretchIsIdle() {
+        var clock = 1000.0
+        val core = Core(tmp(), NoHost) { clock }
+        core.endSetupPeriod()
+        core.offlineSpans = { a, _ -> listOf(a to a + 20 * 60_000L) }   // 测试里墙上时间不走: 直接给 20 分钟离线
+        core.timer.onAction()
+        clock += 3600.0
+        core.timer.onAction()                                    // 专注 60 分钟, 结束后进入休息
+        assertEquals(TState.ON_BREAK, core.timer.state)
+        assertEquals(40.0 / 60, core.dm.todayHours() + core.dm.yesterdayHours(), 0.02)   // 只计 40 分钟
+        assertTrue(core.timer.countdown > 15 * 60)               // 休息照常按 60 分钟算 (约 16 分钟)
+        assertTrue(core.dm.focus.any { it.kind == "idle" })
+    }
+
     /** 应用名单: 前台应用不能用就锁定, 离开后撤掉 (MECHANICS 14.6). */
     @Test
     fun appLock() {

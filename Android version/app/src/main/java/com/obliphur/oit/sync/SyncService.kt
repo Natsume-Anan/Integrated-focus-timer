@@ -155,6 +155,9 @@ class SyncService(
     @Volatile private var woken = false
     /** 正在和哪些设备同步 (同一台设备不同时跑两轮). */
     private val busy = HashSet<String>()
+    /** 每台设备离线的时间段 {id: [[开始毫秒, 结束毫秒 (-1 = 还在离线)], …]}, 只在内存里 (MECHANICS 8.4). */
+    private val offline = HashMap<String, MutableList<LongArray>>()
+    private val startedMs = System.currentTimeMillis()
     private val state: JSONObject = load()
 
     init {
@@ -976,6 +979,62 @@ class SyncService(
     }
 
     /** 其他设备此刻的状态: (设备 id, 名字, 状态). */
+    class DeviceState(val id: String, val name: String, val online: Boolean, val status: JSONObject, val seen: Long)
+
+    /** 其他设备此刻的状态 (绑定的, 和转交过来的). online: 最近 2 分钟内有它的消息. */
+    fun deviceStates(): List<DeviceState> = lock.withLock {
+        val now = System.currentTimeMillis()
+        val peers = state.getJSONObject("peers")
+        val status = state.getJSONObject("status")
+        val gone = state.getJSONObject("gone")
+        val ledgers = state.getJSONObject("ledgers")
+        val ids = (peers.keys().asSequence() + status.keys().asSequence()).toSet()
+            .filter { it != myId && (peers.has(it) || !gone.has(it)) }
+        ids.map { id ->
+            val st = status.optJSONObject(id) ?: JSONObject()
+            val name = peers.optJSONObject(id)?.optString("name")?.takeIf { it.isNotEmpty() }
+                ?: ledgers.optJSONObject(id)?.optString("name")?.takeIf { it.isNotEmpty() } ?: "?"
+            val seen = st.optLong("ts")
+            DeviceState(id, name, now - seen < FRESH_MS, st, seen)
+        }.sortedBy { it.name }
+    }
+
+    /** 每隔几秒调用一次: 记下每台设备离线的时间段 (从最后一次有它的消息算起, 到重新有消息为止). */
+    fun trackOffline() {
+        val now = System.currentTimeMillis()
+        val states = deviceStates()
+        synchronized(offline) {
+            for (d in states) {
+                val iv = offline.getOrPut(d.id) { mutableListOf() }
+                if (!d.online) {
+                    if (iv.isEmpty() || iv.last()[1] >= 0) iv.add(longArrayOf(minOf(if (d.seen > 0) d.seen else startedMs, now), -1))
+                } else if (iv.isNotEmpty() && iv.last()[1] < 0) {
+                    iv.last()[1] = maxOf(iv.last()[0], d.seen)
+                }
+            }
+            val floor = now - 26 * 3600_000L
+            for (iv in offline.values) iv.removeAll { it[1] in 0..floor }
+        }
+    }
+
+    /** [start, end] 里有任意一台设备离线的时间段 (合并过的). */
+    fun offlineSpans(startMs: Long, endMs: Long): List<Pair<Long, Long>> {
+        val now = System.currentTimeMillis()
+        val spans = synchronized(offline) {
+            offline.values.flatten().mapNotNull {
+                val a = maxOf(it[0], startMs)
+                val b = minOf(if (it[1] < 0) now else it[1], endMs)
+                if (b > a) a to b else null
+            }
+        }.sortedBy { it.first }
+        val out = mutableListOf<Pair<Long, Long>>()
+        for ((a, b) in spans) {
+            if (out.isNotEmpty() && a <= out.last().second) out[out.size - 1] = out.last().first to maxOf(out.last().second, b)
+            else out.add(a to b)
+        }
+        return out
+    }
+
     fun peerStatus(): List<Triple<String, String, JSONObject>> = lock.withLock {
         val s = state.getJSONObject("status")
         val l = state.getJSONObject("ledgers")

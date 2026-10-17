@@ -211,6 +211,9 @@ class SyncService:
         self._udp = None
         self._wake = threading.Event()
         self._busy = set()        # 正在和哪些设备同步 (同一台设备不同时跑两轮)
+        # 每台设备离线的时间段 {id: [[开始毫秒, 结束毫秒或 None], …]}, 只在内存里 (MECHANICS 8.4)
+        self._offline = {}
+        self._started_ms = _now_ms()
         self.firewall = None      # 本机防火墙检查的结果 (firewall.check, 由 app 在后台填)
         self.state = self._load()
         if not self.state.get("device"):
@@ -1009,6 +1012,55 @@ class SyncService:
                     return False
         return True
 
+    def device_states(self) -> list:
+        """其他设备此刻的状态 (绑定的, 和转交过来的): [{id, name, online, timer, net, since}].
+        online: 最近 2 分钟内有它的消息."""
+        now = _now_ms()
+        with self.lock:
+            peers, status = self.state["peers"], self.state["status"]
+            ids = (set(peers) | set(status)) - (set(self.state["gone"]) - set(peers))
+            ids.discard(self.my_id)
+            out = []
+            for i in ids:
+                st = status.get(i) or {}
+                name = (peers.get(i) or {}).get("name") or (self.state["ledgers"].get(i) or {}).get("name") or "?"
+                out.append({"id": i, "name": str(name), "online": now - float(st.get("ts", 0)) < FRESH_MS,
+                            "timer": st.get("timer") or "idle", "net": st.get("net") or "",
+                            "since": st.get("since"), "seen": float(st.get("ts", 0))})
+        return sorted(out, key=lambda d: d["name"])
+
+    def track_offline(self):
+        """每隔几秒调用一次: 记下每台设备离线的时间段 (从最后一次有它的消息算起, 到重新有消息为止)."""
+        now = _now_ms()
+        for d in self.device_states():
+            iv = self._offline.setdefault(d["id"], [])
+            if not d["online"]:
+                if not iv or iv[-1][1] is not None:
+                    iv.append([min(d["seen"] or self._started_ms, now), None])
+            elif iv and iv[-1][1] is None:
+                iv[-1][1] = max(iv[-1][0], d["seen"])
+        floor = now - 26 * 3600_000
+        for k in list(self._offline):
+            self._offline[k] = [v for v in self._offline[k] if v[1] is None or v[1] > floor]
+
+    def offline_spans(self, start_ms: float, end_ms: float) -> list:
+        """[start, end] 里有任意一台设备离线的时间段 (合并过的) [(开始毫秒, 结束毫秒)]."""
+        now = _now_ms()
+        spans = []
+        for iv in self._offline.values():
+            for a, b in iv:
+                a, b = max(a, start_ms), min(b if b is not None else now, end_ms)
+                if b > a:
+                    spans.append([a, b])
+        spans.sort()
+        out = []
+        for a, b in spans:
+            if out and a <= out[-1][1]:
+                out[-1][1] = max(out[-1][1], b)
+            else:
+                out.append([a, b])
+        return [(a, b) for a, b in out]
+
     def peer_status(self) -> list:
         with self.lock:
             return [dict(v, id=k, name=(self.state["ledgers"].get(k) or {}).get("name", "?"))
@@ -1445,6 +1497,21 @@ def _selftest():
         assert sb.my_id not in sc.state["ledgers"], "重置前的旧账不能再传回来"
         sc.merge({"ledgers": {sb.my_id: {"rev": _now_ms() + 10, "name": "B"}}})
         assert sb.my_id in sc.state["ledgers"], "重置之后的新账照常收"
+
+        # 离线的时间段: 从最后一次有消息算起, 到重新有消息为止
+        t0 = _now_ms()
+        sc.state["status"]["dX"] = {"ts": t0 - 10 * 60_000, "timer": "running"}
+        sc.state["ledgers"]["dX"] = {"rev": 1, "name": "X"}
+        states = {d["id"]: d for d in sc.device_states()}
+        assert not states["dX"]["online"] and states["dX"]["name"] == "X"
+        sc.track_offline()
+        assert sc.offline_spans(t0 - 20 * 60_000, t0 - 5 * 60_000) == [(t0 - 10 * 60_000, t0 - 5 * 60_000)]
+        sc.state["status"]["dX"]["ts"] = t0 - 1000          # 又有消息了
+        sc.track_offline()
+        assert {d["id"]: d for d in sc.device_states()}["dX"]["online"]
+        spans = sc.offline_spans(t0 - 20 * 60_000, t0 + 60_000)
+        assert spans == [(t0 - 10 * 60_000, t0 - 1000)], spans
+        assert sc.offline_spans(t0, t0 + 60_000) == [], "重新上线之后不算离线"
         runner.call(lambda: sb.unpair(sa.my_id, notify=False))
         # 请求体读不出来 (例如太大): 回 400, 不再冒充"没绑定"
         assert sa._on_sync({})[0] == 400

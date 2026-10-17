@@ -150,6 +150,7 @@ object EnStrings {
         "上次专注时程序退出了,专注记到 {at} 为止: 计入 {m} 分钟." to "OIT closed during your last focus session. It was recorded up to {at}: {m} minutes.",
         "积攒的休息时间 +{t}." to "Saved break time +{t}.",
         "📤 发给其他设备" to "📤 Send to other devices",
+        "⚠ 有设备离线: 离线的这段时间专注不会被记录." to "⚠ A device is offline: focus during the offline time will not be recorded.",
         "接收新版本失败: {e}" to "Could not receive the new version: {e}",
         "{name} 发来了新版本 {v}." to "{name} sent a new version {v}.",
         "正在发送…" to "Sending…",

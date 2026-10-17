@@ -77,8 +77,10 @@ fun TimerScreen() {
                 Text(tr("今日: {h} h", "h" to f1(core.dm.todayHours())), color = o.accent, fontWeight = FontWeight.Bold)
                 Text(tr("昨日: {h} h", "h" to f1(core.dm.yesterdayHours())), color = o.dim)
             }
-            // 绑定的其他设备此刻的状态 (MECHANICS 15)
+            // 绑定的其他设备此刻的状态 (MECHANICS 15); 有设备离线时提醒离线的那段专注不会被记录 (8.4)
             for (line in peerLines()) Dim(line, Modifier.padding(top = 4.dp), size = 13)
+            if (OitApp.instance.sync?.deviceStates()?.any { !it.online } == true)
+                Dim(tr("⚠ 有设备离线: 离线的这段时间专注不会被记录."), Modifier.padding(top = 4.dp), size = 13, color = o.warn)
         }
         FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             val locked = t.breakLocked

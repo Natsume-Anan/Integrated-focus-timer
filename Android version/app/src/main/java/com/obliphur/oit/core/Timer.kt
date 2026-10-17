@@ -69,8 +69,9 @@ class TimerEngine(private val core: Core, dir: File, private val mono: () -> Dou
             TState.RUNNING -> {
                 val end = LocalDateTime.now()
                 val minutes = (mono() - startMono) / 60.0
-                lastTMinutes = minutes
-                dm.addStudySession(startWall!!, end, minutes)
+                lastTMinutes = minutes                    // 建议休息时长照常按整段专注算
+                val off = cutOffline(startWall!!, end)
+                dm.addStudySession(startWall!!, end, maxOf(0.0, minutes - off / 60.0))
                 dm.addFocusSession("study", startWall, end)
                 closeCheck()
                 state = TState.IDLE          // 专注已记下: 先清掉文件里的专注状态
@@ -408,10 +409,25 @@ class TimerEngine(private val core: Core, dir: File, private val mono: () -> Dou
         }
         val end = start.plusSec(seconds)
         val minutes = seconds / 60.0
-        dm.addStudySession(start, end, minutes)
+        // 有设备离线的那段记为空闲, 不计入学习时长; 建议休息时长照常按计入前的时长算
+        val counted = maxOf(0.0, minutes - cutOffline(start, end) / 60.0)
+        dm.addStudySession(start, end, counted)
         dm.addFocusSession("study", start, end)
         val brk = Math.round(maxOf(0.0, computeF(minutes)) * scale * 60.0).toInt()
-        return minutes to brk
+        return counted to brk
+    }
+
+    /** [start, end] 这段专注里有绑定的设备离线的时间段: 记为空闲 (统计里压过专注), 返回一共多少秒. */
+    private fun cutOffline(start: LocalDateTime, end: LocalDateTime): Double {
+        val z = java.time.ZoneId.systemDefault()
+        var total = 0.0
+        for ((a, b) in core.offlineSpans(start.atZone(z).toInstant().toEpochMilli(), end.atZone(z).toInstant().toEpochMilli())) {
+            if (b <= a) continue
+            dm.addFocusSession("idle", LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(a), z),
+                LocalDateTime.ofInstant(java.time.Instant.ofEpochMilli(b), z), start)
+            total += (b - a) / 1000.0
+        }
+        return total
     }
 
     // ---- 专注中每 1.5 小时: 还在吗 (6.6) ----

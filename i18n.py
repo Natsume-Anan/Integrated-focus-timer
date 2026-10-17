@@ -582,6 +582,7 @@ EN = {
     "对方的版本不比这个旧": "that device is not older than this version",
     "对方是 git 仓库里的开发版本": "that device runs a development checkout (git)",
     "这个发布里没有对方平台的安装包": "this release has no package for that device's platform",
+    "⚠ 有设备离线: 离线的这段时间专注不会被记录.": "⚠ A device is offline: focus during the offline time will not be recorded.",
     "④ 删除数据…": "④ Erasing data…",
     "   已通知 {n} 台绑定的设备删除本机的数据.": "   Told {n} paired device(s) to delete this computer's data.",
     "   防火墙规则删不掉: {name}": "   Could not delete the firewall rule: {name}",

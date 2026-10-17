@@ -69,6 +69,10 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
     var followsMother: () -> Boolean = { false }
     /** 母端最近 2 分钟内同步过吗. */
     var motherFresh: () -> Boolean = { true }
+    /** [开始, 结束] (毫秒) 里有绑定的设备离线的时间段. */
+    var offlineSpans: (Long, Long) -> List<Pair<Long, Long>> = { _, _ -> emptyList() }
+    /** 每 5 秒: 记下设备离线的时间段. */
+    var trackOffline: () -> Unit = {}
     /** 母端的开发者模式变了: 马上同步给子端. */
     var devChangedHook: () -> Unit = {}
     /** 绑定的设备里有没有哪台在这个时刻 (毫秒) 之后同步成功过. */
@@ -160,6 +164,7 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
             checkPendingSettings()
             timer.check()
             checkSetupPeriod()
+            trackOffline()
             // 子端: 母端 2 分钟没同步过了 (关掉了 / 断开了), 开发者模式就关掉
             if (settings.devMode && followsMother() && !motherFresh()) setDevMode(false)
         }
