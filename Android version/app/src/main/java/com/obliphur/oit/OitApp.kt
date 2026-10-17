@@ -83,6 +83,12 @@ class OitApp : Application(), Host {
         core.isLatestActive = { s.isLatestActive() }
         core.hasPeers = { s.peers().isNotEmpty() }
         core.syncedSince = { ms -> s.peers().values.any { it.optLong("last_ok") >= ms } }
+        core.followsMother = { s.motherId()?.let { it != s.myId } == true }
+        core.motherFresh = {
+            val m = s.motherId()
+            m == null || System.currentTimeMillis() - (s.peers()[m]?.optLong("last_ok") ?: 0L) < com.obliphur.oit.sync.SyncService.FRESH_MS
+        }
+        core.devChangedHook = { if (s.peers().isNotEmpty()) s.syncNow() }
         core.net.peerNet = { com.obliphur.oit.sync.SyncService.peerNet(s.peerLedgers(), core.net.date) }
         core.net.peerUsage = { s.peerLedgers().flatMap { l -> l.optJSONArray("usage")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) } } ?: emptyList() } }
         try {
@@ -215,10 +221,80 @@ class OitApp : Application(), Host {
         changed()
     }
 
+    // ---- 安装包直接发给其他设备 (MECHANICS 16) ----
+
+    @Volatile private var relaying = false
+    private val relayed = java.util.Collections.synchronizedSet(HashSet<String>())
+
+    /** 自动更新开着: 绑定的设备版本比 GitHub 上的旧, 就给它下载并发过去 (每台设备每个版本一次). */
+    fun maybeRelay() {
+        if (!core.settings.bool("UPDATE_AUTO") || relaying) return
+        val latest = updater.latest ?: return
+        val s = sync ?: return
+        if (s.peers().any { (id, p) ->
+                val pv = com.obliphur.oit.service.Updater.parseVersion(p.optString("version"))
+                pv != null && com.obliphur.oit.service.Updater.newer(latest, pv) &&
+                    "$id@${com.obliphur.oit.service.Updater.text(latest)}" !in relayed
+            }) relayUpdates(false)
+    }
+
+    fun relayUpdates(manual: Boolean) {
+        val s = sync ?: return
+        if (relaying) {
+            if (manual) toast(Toast(tr("正在发送…"), "info", false))
+            return
+        }
+        val peers = s.peers().filter { it.value.optString("platform") in setOf("windows", "android") }
+        if (peers.isEmpty()) {
+            if (manual) toast(Toast(tr("没有绑定的设备."), "info", false))
+            return
+        }
+        relaying = true
+        if (manual) toast(Toast(tr("正在给其他设备下载新版本…"), "info", false))
+        Thread {
+            val out = mutableListOf<Pair<String, String>>()
+            try {
+                val rel = updater.fetchRelease()
+                val latest = com.obliphur.oit.service.Updater.releaseVersion(rel)!!
+                val vt = com.obliphur.oit.service.Updater.text(latest)
+                for ((id, p) in peers) {
+                    val name = p.optString("name", "?")
+                    val pv = com.obliphur.oit.service.Updater.parseVersion(p.optString("version"))
+                    if (pv != null && !com.obliphur.oit.service.Updater.newer(latest, pv)) { out.add(name to "latest"); continue }
+                    if (pv == null && !manual) continue      // 旧版本的 OIT 不报版本号, 也收不了: 只在手动时试
+                    relayed.add("$id@$vt")
+                    try {
+                        val f = updater.fetchPackage(rel, p.optString("platform"))
+                        out.add(name to s.offerUpdate(id, f, p.optString("platform"), vt))
+                    } catch (e: Exception) {
+                        out.add(name to (e.message ?: e.javaClass.simpleName))
+                    }
+                }
+            } catch (e: Exception) {
+                out.add("GitHub" to (e.message ?: e.javaClass.simpleName))
+            } finally {
+                relaying = false
+            }
+            onMain { reportRelay(out, manual) }
+        }.start()
+    }
+
+    private fun reportRelay(out: List<Pair<String, String>>, manual: Boolean) {
+        val words = mapOf("sent" to tr("已发送, 对方正在接收"), "latest" to tr("已是最新版本"),
+            "platform" to tr("对方不收这个平台的安装包"), "not-newer" to tr("对方的版本不比这个旧"),
+            "dev" to tr("对方是 git 仓库里的开发版本"), "no-package" to tr("这个发布里没有对方平台的安装包"))
+        val sent = out.any { it.second == "sent" }
+        if (out.isEmpty() || (!manual && !sent)) return
+        toast(Toast(tr("📤 发给其他设备") + "\n" + out.joinToString("\n") { (n, st) ->
+            "$n: " + (words[st] ?: com.obliphur.oit.ui.syncErrorText(st)) }, if (sent) "success" else "info", true))
+    }
+
     // ---- 重置 ----
 
     /** 删除全部数据并像第一次安装那样重新开始 (MECHANICS 9). */
     fun resetAll() {
+        // 其他设备上保留的本机数据也删掉 (MECHANICS 9). 不能在界面线程上联网: 放到后台线程, 最多等 3 秒
+        sync?.let { s -> Thread { s.forgetMe() }.apply { start(); join(3500) } }
         sync?.stop()
         core.eraseEverything()
         BlockLog.clear()

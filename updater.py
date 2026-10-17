@@ -96,6 +96,39 @@ def pick_download(rel: dict):
     return rel.get("zipball_url"), True
 
 
+def pick_apk(rel: dict):
+    """发布里的安卓安装包: 优先名字里带 release / android 的 .apk (和手机端 Updater.pickApk 相同)."""
+    apks = [a for a in rel.get("assets") or [] if str(a.get("name") or "").lower().endswith(".apk")]
+    best = next((a for a in apks if any(k in str(a.get("name")).lower() for k in ("release", "android"))),
+                apks[0] if apks else None)
+    return best.get("browser_download_url") if best else None
+
+
+def package_url(rel: dict, platform: str):
+    """给某个平台的设备用的安装包地址: windows → 电脑版 zip (没有就用源码包), android → apk."""
+    if platform == "android":
+        return pick_apk(rel)
+    if platform == "windows":
+        return pick_download(rel)[0]
+    return None
+
+
+def download(url: str, dest: str):
+    """下载到 dest (先写临时文件, 完整了再改名)."""
+    tmp = dest + ".part"
+    with open(tmp, "wb") as f, _open(url, 60) as r:
+        total = 0
+        while True:
+            chunk = r.read(65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > MAX_DOWNLOAD:
+                raise ValueError("download too large")
+            f.write(chunk)
+    os.replace(tmp, dest)
+
+
 def install_zip(zip_path: str, target: str) -> int:
     """把压缩包里的程序文件覆盖到 target. 返回覆盖的文件数. 找不到程序文件时抛 ValueError."""
     tmp = tempfile.mkdtemp(prefix="oit-update-")
@@ -144,6 +177,62 @@ class Updater:
     @property
     def latest_text(self) -> str:
         return vtext(self.latest)
+
+    def fetch_release(self) -> dict:
+        """在当前线程里取 GitHub 上的最新发布 (发更新给其他设备时用), 顺便更新 latest / state."""
+        with _open(API_LATEST, 20) as r:
+            rel = json.loads(r.read(2_000_000).decode("utf-8"))
+        v = release_version(rel)
+        if not v:
+            raise ValueError("no version number in the release")
+        self.release, self.latest = rel, v
+        if self.state in ("idle", "latest", "available", "error"):
+            self.state = "available" if v > self.current else "latest"
+        return rel
+
+    def fetch_package(self, rel: dict, platform: str, cache_dir: str) -> str:
+        """给其他设备下载这个平台的安装包, 存在 cache_dir 里 (同一个版本只下载一次). 返回文件路径."""
+        url = package_url(rel, platform)
+        if not url:
+            raise ValueError("no-package")
+        v = vtext(release_version(rel))
+        ext = ".apk" if platform == "android" else ".zip"
+        os.makedirs(cache_dir, exist_ok=True)
+        dest = os.path.join(cache_dir, f"OIT-{platform}-{v}{ext}")
+        for f in os.listdir(cache_dir):                 # 旧版本的包删掉
+            p = os.path.join(cache_dir, f)
+            if p != dest and os.path.isfile(p):
+                try:
+                    os.remove(p)
+                except OSError:
+                    pass
+        if not (os.path.isfile(dest) and os.path.getsize(dest) > 0):
+            download(url, dest)
+        return dest
+
+    def install_file(self, zip_path: str, done=None):
+        """装其他设备直接发来的电脑版安装包 (已核对过 SHA-256); 完成后调用 done(self)."""
+        if is_dev_checkout():
+            self.state = "dev"
+            if done:
+                done(self)
+            return
+        self.state = "downloading"
+
+        def run():
+            try:
+                install_zip(zip_path, program_dir())
+                self.state, self.error = "installed", ""
+            except Exception as e:      # noqa: BLE001
+                self.state, self.error = "error", str(e) or type(e).__name__
+            finally:
+                try:
+                    os.remove(zip_path)
+                except OSError:
+                    pass
+            if done:
+                done(self)
+        threading.Thread(target=run, daemon=True).start()
 
     def check(self, done=None):
         """后台线程里检查; 完成后在那个线程里调用 done(self)."""
@@ -221,6 +310,11 @@ def _selftest():
                                      {"name": "OIT-windows.zip", "browser_download_url": "b"}],
                           "zipball_url": "z"}) == ("b", False)
     assert pick_download({"assets": [], "zipball_url": "z"}) == ("z", True)
+    rel = {"assets": [{"name": "x.apk", "browser_download_url": "a1"},
+                      {"name": "OIT-release.apk", "browser_download_url": "a2"}], "zipball_url": "z"}
+    assert pick_apk(rel) == "a2" and package_url(rel, "android") == "a2"
+    assert package_url(rel, "windows") == "z" and package_url(rel, "ios") is None
+    assert pick_apk({"assets": []}) is None
     for bad in ("http://api.github.com/x", "https://evil.example.com/x"):
         try:
             _open(bad, 1)

@@ -65,6 +65,12 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
     var isLatestActive: () -> Boolean = { true }
     /** 绑定了其他设备吗. */
     var hasPeers: () -> Boolean = { false }
+    /** 本机是子端 (开发者模式跟着母端, 自己不能开关). */
+    var followsMother: () -> Boolean = { false }
+    /** 母端最近 2 分钟内同步过吗. */
+    var motherFresh: () -> Boolean = { true }
+    /** 母端的开发者模式变了: 马上同步给子端. */
+    var devChangedHook: () -> Unit = {}
     /** 绑定的设备里有没有哪台在这个时刻 (毫秒) 之后同步成功过. */
     var syncedSince: (Long) -> Boolean = { false }
 
@@ -154,6 +160,8 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
             checkPendingSettings()
             timer.check()
             checkSetupPeriod()
+            // 子端: 母端 2 分钟没同步过了 (关掉了 / 断开了), 开发者模式就关掉
+            if (settings.devMode && followsMother() && !motherFresh()) setDevMode(false)
         }
         checkAppLock()
         if (m - lastAppSample >= Cfg.APP_FOCUS_EVERY) {
@@ -273,7 +281,10 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
     fun stageSetting(key: String, value: Any?): Pair<StageResult, String> {
         // 开 / 关开发者模式: 不是真的修改, 不排队, 不写文件, 不记流水, 不提示
         if (isDevToggle(key, value)) {
-            setDevMode(!settings.devMode)
+            if (!followsMother()) {                  // 子端跟着母端, 自己不能开关
+                setDevMode(!settings.devMode)
+                devChangedHook()
+            }
             return StageResult.NOCHANGE to ""
         }
         val r = settings.stage(key, value)
@@ -318,6 +329,12 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
     fun setDevMode(enabled: Boolean) {
         settings.devMode = enabled
         net.devChanged()
+        // 开发者模式: 关掉代理 (VPN), 应用也不再锁定, 可以自由使用
+        host.applyNet(true)
+        if (enabled && lockedApp != null) {
+            lockedApp = null
+            host.unlockApp()
+        }
         checkPendingSettings()
         changed()
     }

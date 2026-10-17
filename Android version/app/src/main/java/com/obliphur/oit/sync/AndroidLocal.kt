@@ -22,6 +22,37 @@ class AndroidLocal(private val app: OitApp) : SyncLocal {
     override fun netMode() = "proxy"
     override fun autoText() = core.settings.str("AUTO_TEXT")
     override fun changed() = core.changed()
+    override fun appVersion(): String = com.obliphur.oit.BuildConfig.VERSION_NAME
+
+    // ---- 开发者模式: 子端跟着母端 ----
+    override fun devMode() = core.settings.devMode
+    override fun setDevMode(on: Boolean) {
+        if (core.settings.devMode != on) core.setDevMode(on)
+    }
+
+    // ---- 其他设备直接发来的安装包 (MECHANICS 16) ----
+    override fun updateWanted(platform: String, version: String): String {
+        if (platform != "android") return "platform"
+        val v = com.obliphur.oit.service.Updater.parseVersion(version) ?: return "not-newer"
+        return if (com.obliphur.oit.service.Updater.newer(v, app.updater.current)) "" else "not-newer"
+    }
+
+    override fun updateDest(version: String): java.io.File {
+        val dir = java.io.File(app.cacheDir, "updates").apply { mkdirs() }
+        dir.listFiles()?.forEach { it.delete() }
+        return java.io.File(dir, "OIT-$version.apk")
+    }
+
+    override fun updateReceived(file: java.io.File, version: String, from: String) {
+        app.updater.acceptFile(file, com.obliphur.oit.service.Updater.parseVersion(version))
+        core.notice(tr("⬆  新版本已下载"), tr("{name} 发来了新版本 {v}.", "name" to from, "v" to version), listOf(
+            NoticeButton(tr("安装"), "install", true), NoticeButton(tr("稍后"), "ok", false))) {
+            if (it == "install") app.updater.install()
+        }
+        core.changed()
+    }
+
+    override fun updateFailed(error: String) = core.toast(tr("接收新版本失败: {e}", "e" to error), "warn")
 
     // ---- 账 ----
 

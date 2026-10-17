@@ -280,12 +280,24 @@ class CoreTest {
         assertEquals(StageResult.NOCHANGE to "", core.stageSetting("DAILY_LIMIT", code))
         assertTrue(core.settings.devMode)
         assertTrue(core.settings.pending.isEmpty())
-        assertEquals(VpnPlan.None, core.vpnPlan())
+        assertEquals(VpnPlan.None, core.vpnPlan())                // 开发者模式: 不断网
         assertEquals("", core.settings.waitTag("DAILY_LIMIT"))
         assertEquals(StageResult.NOCHANGE, core.stageSetting("DAILY_LIMIT", code).first)
         assertFalse(core.settings.devMode)
         assertEquals(7200.0, core.settings.num("DAILY_LIMIT"), 0.0)
         assertEquals(StageResult.INVALID, core.stageSetting("COOLDOWN", code).first)   // 只认每日联网额度
+        // 子端跟着母端, 自己不能开关
+        core.followsMother = { true }
+        core.stageSetting("DAILY_LIMIT", code)
+        assertFalse(core.settings.devMode)
+        // 母端断开 2 分钟后, 子端的开发者模式自动关掉
+        core.followsMother = { false }
+        core.stageSetting("DAILY_LIMIT", code)
+        assertTrue(core.settings.devMode)
+        core.followsMother = { true }
+        core.motherFresh = { false }
+        core.tick()
+        assertFalse(core.settings.devMode)
     }
 
     /** 绑定了其他设备, 共享的专注中 OIT 被关掉: 重开时关掉的这段记为空闲, 专注终止, 总统计里空闲压过专注 (MECHANICS 8.2). */

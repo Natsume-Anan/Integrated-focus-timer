@@ -163,7 +163,11 @@ class CoreService : Service() {
         override fun run() {
             val app = OitApp.instance
             app.core.tick()
-            if (++n % 5 == 0) Notifier.updateStatus(this@CoreService)
+            if (++n % 5 == 0) {
+                Notifier.updateStatus(this@CoreService)
+                holdLocks(app.core.hasPeers())
+                app.maybeRelay()
+            }
             handler.postDelayed(this, 1000)
         }
     }
@@ -185,7 +189,32 @@ class CoreService : Service() {
         super.onTaskRemoved(rootIntent)
     }
 
+    private var wake: PowerManager.WakeLock? = null
+    private var wifi: android.net.wifi.WifiManager.WifiLock? = null
+
+    /** 绑定了其他设备时: 熄屏后 CPU 和 Wi-Fi 也不睡下去, 不然手机上的 OIT 被暂停, 别的设备连进来只会超时 (MECHANICS 15.3). */
+    @Suppress("DEPRECATION")
+    private fun holdLocks(want: Boolean) {
+        if (want == (wake != null)) return
+        if (!want) {
+            runCatching { wake?.release() }
+            runCatching { wifi?.release() }
+            wake = null; wifi = null
+            return
+        }
+        wake = runCatching {
+            getSystemService(PowerManager::class.java).newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "oit:sync")
+                .apply { setReferenceCounted(false); acquire() }
+        }.getOrNull()
+        wifi = runCatching {
+            applicationContext.getSystemService(android.net.wifi.WifiManager::class.java)
+                .createWifiLock(android.net.wifi.WifiManager.WIFI_MODE_FULL_HIGH_PERF, "oit:sync")
+                .apply { setReferenceCounted(false); acquire() }
+        }.getOrNull()
+    }
+
     override fun onDestroy() {
+        holdLocks(false)
         handler.removeCallbacks(loop)
         OitApp.instance.core.saveAll()
         super.onDestroy()

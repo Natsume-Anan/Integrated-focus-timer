@@ -33,6 +33,7 @@ import http.client
 import json
 import os
 import queue
+import re
 import secrets
 import socket
 import threading
@@ -42,7 +43,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 PROTO = 1
 HTTP_PORT = 17930          # 被占用时依次尝试到 17939
 UDP_PORT = 17931
-SYNC_EVERY = 30            # 秒: 母端每隔这么久向每台子端发一次同步请求
+SYNC_EVERY = 10            # 秒: 母端每隔这么久向每台子端发一次同步请求
+UPDATE_MAX = 160 * 1024 * 1024    # 设备之间直接传的安装包最大多少
+OFFER_TTL = 1800                  # 秒: 发出的安装包多久之内可以来取
 FRESH_MS = 120_000         # 毫秒: 这么久之内同步过的设备才算"在线" (比较最后操作时间用)
 PAIR_TIMEOUT = 120         # 秒: 等对方确认绑定
 TS_SKEW = 300              # 秒: 请求里的时间戳允许和本机相差多少
@@ -203,6 +206,7 @@ class SyncService:
         self.incoming = {}        # token -> 别人发来的绑定请求
         self.outgoing = None      # 本机发起的绑定 {state, code, name, …}
         self.found = {}           # id -> 广播找到的设备
+        self.offers = {}          # token -> (文件, 过期时刻): 发给其他设备的安装包, 等对方来取
         self._httpd = None
         self._udp = None
         self._wake = threading.Event()
@@ -223,13 +227,13 @@ class SyncService:
             with open(self.file, "r", encoding="utf-8") as f:
                 d = json.load(f)
             if isinstance(d, dict):
-                for k in ("peers", "track", "ledgers", "status"):
+                for k in ("peers", "track", "ledgers", "status", "gone"):
                     if not isinstance(d.get(k), dict):
                         d[k] = {}
                 return d
         except Exception:
             pass
-        return {"device": None, "peers": {}, "track": {}, "ledgers": {}, "status": {}}
+        return {"device": None, "peers": {}, "track": {}, "ledgers": {}, "status": {}, "gone": {}}
 
     def _save(self):
         if self.dead:
@@ -264,7 +268,8 @@ class SyncService:
 
     def device_info(self) -> dict:
         return {"id": self.my_id, "name": self.my_name, "platform": self.platform,
-                "port": self.port, "net_mode": self.local.net_mode(), "v": PROTO}
+                "port": self.port, "net_mode": self.local.net_mode(), "v": PROTO,
+                "version": _call(self.local, "app_version", "")}
 
     # ---- 启动 / 停止 ----
 
@@ -399,9 +404,11 @@ class SyncService:
     def _http(addr: str, port: int, method: str, path: str, body=None, timeout: float = 6.0):
         conn = http.client.HTTPConnection(addr, int(port), timeout=timeout)
         try:
-            data = json.dumps(body).encode("utf-8") if body is not None else None
+            data = json.dumps(body).encode("utf-8") if body is not None else b""
+            # GET 也写明 Content-Length: 0 —— 旧版手机端没有它时会一直读到连接关闭, 卡到超时 (timed out)
             conn.request(method, path, body=data,
-                         headers={"Content-Type": "application/json", "Connection": "close"})
+                         headers={"Content-Type": "application/json", "Connection": "close",
+                                  "Content-Length": str(len(data))})
             r = conn.getresponse()
             raw = r.read(8_000_000)
             try:
@@ -558,11 +565,14 @@ class SyncService:
 
     # ---- 解除绑定 ----
 
-    def unpair(self, peer_id: str, notify: bool = True):
+    def unpair(self, peer_id: str, notify: bool = True, forget: bool = False):
+        """forget: 对方重置 / 卸载了 —— 它的数据在所有设备上都删掉 (转告其他设备, 见 gone)."""
         with self.lock:
             p = self.state["peers"].pop(peer_id, None)
             self.state["ledgers"].pop(peer_id, None)
             self.state["status"].pop(peer_id, None)
+            if forget:
+                self.state["gone"][peer_id] = _now_ms()
         self._save()
         self.local.changed()
         if p and notify:
@@ -619,7 +629,12 @@ class SyncService:
             status = dict(self.state["status"])
         ledgers[self.my_id] = own
         status[self.my_id] = st
-        return {"v": PROTO, "device": self.device_info(), "ledgers": ledgers,
+        with self.lock:
+            cutoff = _now_ms() - GONE_KEEP_MS
+            self.state["gone"] = {k: v for k, v in self.state["gone"].items() if v >= cutoff}
+            gone = dict(self.state["gone"])
+        return {"v": PROTO, "device": self.device_info(), "ledgers": ledgers, "gone": gone,
+                "dev": bool(_call(self.local, "dev_mode", False)),
                 "docs": docs, "status": status}
 
     def merge(self, snap: dict, init: bool = False):
@@ -629,10 +644,27 @@ class SyncService:
         my = self.my_id
         if init:
             self.local.clear_history()
+        sender = str((snap.get("device") or {}).get("id") or "")
+        if "dev" in snap and sender and sender != my and sender == self.mother_id():
+            _call(self.local, "set_dev_mode", None, bool(snap.get("dev")))    # 子端跟着母端
         with self.lock:
+            for did, ts in (snap.get("gone") or {}).items():
+                if did == my or did in self.state["peers"]:
+                    continue                    # 重新绑定过的设备不算
+                try:
+                    ts = int(ts)
+                except (TypeError, ValueError):
+                    continue
+                if ts > int(self.state["gone"].get(did, 0)):
+                    self.state["gone"][did] = ts
+                self.state["ledgers"].pop(did, None)
+                self.state["status"].pop(did, None)
             for did, led in (snap.get("ledgers") or {}).items():
                 if did == my or not isinstance(led, dict):
                     continue
+                if did in self.state["gone"] and did not in self.state["peers"] \
+                        and int(led.get("rev", 0)) <= int(self.state["gone"][did]):
+                    continue                    # 已经重置 / 卸载的设备留下的旧账
                 if int(led.get("rev", 0)) > int((self.state["ledgers"].get(did) or {}).get("rev", -1)):
                     self.state["ledgers"][did] = led
             for did, st in (snap.get("status") or {}).items():
@@ -719,6 +751,8 @@ class SyncService:
                     dev = (body.get("snap") or {}).get("device") or {}
                     if dev.get("name"):
                         q["name"] = str(dev["name"])
+                    if dev.get("version"):
+                        q["version"] = str(dev["version"])
             self._save()
             return True
         except Exception as e:      # noqa: BLE001 —— 记下来显示
@@ -757,18 +791,132 @@ class SyncService:
             q = self.state["peers"].get(str(env.get("from")))
             if q:
                 q["last_ok"], q["last_err"] = _now_ms(), ""
+                if (snap.get("device") or {}).get("version"):
+                    q["version"] = str(snap["device"]["version"])
         return 200, seal(k, self.my_id, {"snap": mine})
+
+    # ---- 安装包直接发给其他设备 (MECHANICS 16) ----
+
+    def offer_update(self, peer_id: str, path: str, platform: str, version: str) -> str:
+        """把安装包发给一台设备: 先发签名的说明 (平台, 版本, 大小, SHA-256, 取件码), 对方再来取文件,
+        取到后核对大小和 SHA-256. 返回 'sent', 或对方不要的原因 (platform / not-newer / dev …)."""
+        p = self.peers().get(peer_id)
+        if not p:
+            return "unpaired"
+        size = os.path.getsize(path)
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 16), b""):
+                h.update(chunk)
+        token = secrets.token_hex(16)
+        now = time.time()
+        with self.lock:
+            self.offers = {t: v for t, v in self.offers.items() if v[1] > now}
+            self.offers[token] = (path, now + OFFER_TTL)
+        env = seal(bytes.fromhex(p["key"]), self.my_id, {"offer": {
+            "platform": platform, "version": version, "sha256": h.hexdigest(), "size": size,
+            "token": token, "name": os.path.basename(path)}})
+        st, reply = self._http(p["addr"], p["port"], "POST", "/oit/v1/offer", env, timeout=10.0)
+        if st == 401:
+            raise RuntimeError("unpaired")
+        if st != 200:
+            raise RuntimeError(reply.get("error") or f"HTTP {st}")
+        return "sent" if reply.get("ok") else str(reply.get("why") or "declined")
+
+    def offer_file(self, token: str):
+        with self.lock:
+            v = self.offers.get(token)
+        return v[0] if v and v[1] > time.time() and os.path.isfile(v[0]) else None
+
+    def _on_offer(self, env: dict):
+        p = self.peers().get(str(env.get("from")))
+        if not p:
+            return 401, {"error": "unpaired"}
+        try:
+            body = unseal(bytes.fromhex(p["key"]), env)
+            o = body["offer"]
+            size, sha, token = int(o["size"]), str(o["sha256"]), str(o["token"])
+            platform, version = str(o["platform"]), str(o["version"])
+        except SealError as e:
+            return 403, {"error": str(e)}
+        except Exception:
+            return 400, {"error": "bad-request"}
+        if not (0 < size <= UPDATE_MAX) or not re.fullmatch(r"[0-9a-f]{64}", sha) \
+                or not re.fullmatch(r"[0-9a-f]{32}", token):
+            return 400, {"error": "bad-request"}
+        try:
+            why = self.runner.call(lambda: self.local.update_wanted(platform, version))
+        except Exception as e:      # noqa: BLE001
+            return 503, {"error": str(e)}
+        if why:
+            return 200, {"ok": False, "why": why}
+        threading.Thread(target=self._fetch_update, args=(dict(p), dict(o)), daemon=True).start()
+        return 200, {"ok": True}
+
+    def _fetch_update(self, p: dict, o: dict):
+        """后台线程: 到发来说明的那台设备上取安装包, 核对后交给本机安装."""
+        dest = None
+        try:
+            dest = self.runner.call(lambda: self.local.update_dest(str(o["version"])))
+            h, n, size = hashlib.sha256(), 0, int(o["size"])
+            conn = http.client.HTTPConnection(p["addr"], int(p["port"]), timeout=30)
+            try:
+                conn.request("GET", f"/oit/v1/file/{o['token']}",
+                             headers={"Content-Length": "0", "Connection": "close"})
+                r = conn.getresponse()
+                if r.status != 200:
+                    raise RuntimeError(f"HTTP {r.status}")
+                with open(dest, "wb") as f:
+                    while True:
+                        chunk = r.read(1 << 16)
+                        if not chunk:
+                            break
+                        n += len(chunk)
+                        if n > size:
+                            raise ValueError("size mismatch")
+                        h.update(chunk)
+                        f.write(chunk)
+            finally:
+                conn.close()
+            if n != size or h.hexdigest() != o["sha256"]:
+                raise ValueError("checksum mismatch")
+        except Exception as e:      # noqa: BLE001 —— 告诉用户
+            if dest:
+                try:
+                    os.remove(dest)
+                except OSError:
+                    pass
+            err = str(e) or type(e).__name__
+            try:
+                self.runner.call(lambda: self.local.update_failed(err))
+            except Exception:
+                pass
+            return
+        self.runner.call(lambda: self.local.update_received(dest, str(o["version"]), str(p.get("name") or "?")))
 
     def _on_unpair(self, env: dict):
         p = self.peers().get(str(env.get("from")))
         if not p:
             return 200, {}
         try:
-            unseal(bytes.fromhex(p["key"]), env)
+            body = unseal(bytes.fromhex(p["key"]), env)
         except SealError as e:
             return 403, {"error": str(e)}
-        self.runner.call(lambda: self.unpair(str(env.get("from")), notify=False))
+        sender = str(env.get("from"))
+        self.runner.call(lambda: self.unpair(sender, notify=False, forget=bool(body.get("forget"))))
         return 200, {}
+
+    def forget_me(self, timeout: float = 3.0):
+        """重置 / 卸载前: 让每台绑定的设备解除绑定, 并删掉它们保留的本机的数据 (账, 状态);
+        它们再转告各自绑定的设备 (见 gone). 不等结果, 最多等 timeout 秒."""
+        peers = self.peers()
+        threads = [threading.Thread(target=send_forget, args=(self.my_id, p, timeout), daemon=True)
+                   for p in peers.values()]
+        for t in threads:
+            t.start()
+        end = time.time() + timeout
+        for t in threads:
+            t.join(max(0.0, end - time.time()))
 
     def push_final(self, timeout: float = 3.0):
         """界面线程, 程序关闭前: 把本机此刻的内容发给每台设备 (不等回复里的内容, 最多等 timeout 秒).
@@ -904,6 +1052,30 @@ def _ipv4_nets() -> list:
     return out
 
 
+GONE_KEEP_MS = 62 * 86400_000      # 记住"哪台设备已经重置 / 卸载了"多久 (统计只保留本月和上月)
+
+
+def send_forget(my_id: str, peer: dict, timeout: float = 3.0) -> bool:
+    """告诉一台绑定的设备: 本机要重置 / 卸载了, 解除绑定并删掉本机的数据. uninstall.py 也用它."""
+    try:
+        env = seal(bytes.fromhex(peer["key"]), my_id, {"unpair": True, "forget": True})
+        st, _ = SyncService._http(peer["addr"], peer["port"], "POST", "/oit/v1/unpair", env, timeout=timeout)
+        return st == 200
+    except Exception:
+        return False
+
+
+def _call(obj, name: str, default, *args):
+    """本机接口里可选的方法 (测试用的 _FakeLocal 不一定有)."""
+    fn = getattr(obj, name, None)
+    if fn is None:
+        return default
+    try:
+        return fn(*args)
+    except Exception:
+        return default
+
+
 def peer_net(ledgers, date: str) -> dict:
     """其他设备今天的联网额度用量之和 (只算日期是今天的)."""
     out = {"used": 0.0, "bonus": 0.0, "tomorrow_used": 0.0, "debt": 0.0}
@@ -945,6 +1117,8 @@ def _make_handler(svc: SyncService):
                 return {}
 
         def do_GET(self):
+            if self.path.startswith("/oit/v1/file/"):
+                return self._send_file(svc.offer_file(self.path.rsplit("/", 1)[-1]))
             if self.path == "/oit/v1/hello":
                 return self._send(200, svc.device_info())
             if self.path.startswith("/oit/v1/pair/"):
@@ -959,7 +1133,21 @@ def _make_handler(svc: SyncService):
                 return self._send(*svc._on_sync(body))
             if self.path == "/oit/v1/unpair":
                 return self._send(*svc._on_unpair(body))
+            if self.path == "/oit/v1/offer":
+                return self._send(*svc._on_offer(body))
             self._send(404, {"error": "not found"})
+
+        def _send_file(self, path):
+            if not path:
+                return self._send(404, {"error": "not found"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(os.path.getsize(path)))
+            self.send_header("Connection", "close")
+            self.end_headers()
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 16), b""):
+                    self.wfile.write(chunk)
     return H
 
 
@@ -1010,6 +1198,33 @@ class _FakeLocal:
 
     def changed(self):
         pass
+
+    # 开发者模式 / 安装包 (可选的接口)
+    dev = False
+    got = None
+
+    def dev_mode(self):
+        return self.dev
+
+    def set_dev_mode(self, on):
+        self.dev = on
+
+    def app_version(self):
+        return "1.0.0"
+
+    def update_wanted(self, platform, version):
+        return "" if platform == "fake" else "platform"
+
+    def update_dest(self, version):
+        import tempfile
+        return os.path.join(tempfile.mkdtemp(), f"pkg-{version}")
+
+    def update_received(self, path, version, name):
+        with open(path, "rb") as f:
+            self.got = (f.read(), version, name)
+
+    def update_failed(self, err):
+        self.got = ("failed", err)
 
 
 def _selftest():
@@ -1067,6 +1282,25 @@ def _selftest():
         sa.start()
         sb.start()
         assert sa.hello("127.0.0.1", sb.port)["id"] == sb.my_id
+
+        # GET 也必须带 Content-Length (旧版手机端没有它就读到连接关闭, 一直卡到超时)
+        raw = socket.socket()
+        raw.bind(("127.0.0.1", 0))
+        raw.listen(1)
+        head = {}
+
+        def one():
+            c, _ = raw.accept()
+            buf = b""
+            while b"\r\n\r\n" not in buf:
+                buf += c.recv(4096)
+            head["h"] = buf.lower()
+            c.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}")
+            c.close()
+        threading.Thread(target=one, daemon=True).start()
+        SyncService._http("127.0.0.1", raw.getsockname()[1], "GET", "/oit/v1/hello", timeout=3)
+        raw.close()
+        assert b"content-length: 0" in head["h"], head
 
         # B 不是 Proxy 模式: 拒绝
         lb.mode = "adapter"
@@ -1128,6 +1362,32 @@ def _selftest():
         assert sa._sync_with(sb.my_id)
         assert "2026-01-01/9" not in lb.docs_["hours"]
 
+        # 开发者模式跟着母端 (A); 子端 (B) 自己的状态不会传给母端
+        la.dev = True
+        assert sa._sync_with(sb.my_id) and lb.dev is True
+        lb.dev = False
+        assert sb._sync_with(sa.my_id) and la.dev is True and lb.dev is True
+        la.dev = False
+        assert sa._sync_with(sb.my_id) and lb.dev is False
+        assert sa.peers()[sb.my_id].get("version") == "1.0.0", "同步时记下对方的版本"
+
+        # 安装包直接发给 B: B 核对 SHA-256 后交给本机安装; 平台不对的不要
+        pkg = os.path.join(tempfile.mkdtemp(), "OIT-9.9.9.bin")
+        blob = os.urandom(300_000)
+        with open(pkg, "wb") as f:
+            f.write(blob)
+        assert sa.offer_update(sb.my_id, pkg, "fake", "9.9.9") == "sent"
+        for _ in range(200):
+            if lb.got:
+                break
+            time.sleep(0.05)
+        assert lb.got and lb.got[0] == blob and lb.got[1] == "9.9.9" and lb.got[2] == "A", lb.got
+        assert sa.offer_update(sb.my_id, pkg, "android", "9.9.9") == "platform"
+        lb.got = None
+        with sa.lock:                                   # 只有发出去的取件码能取到文件
+            tok = next(iter(sa.offers))
+        assert sa.offer_file(tok) == pkg and sa.offer_file("0" * 32) is None
+
         # 关闭前推送 (push_final): 不等回复里的内容, 对方照样并入
         la.docs_["timer"]["live"] = {"state": "idle", "owner": sa.my_id}
         assert sb.synced_since(0) and not sb.synced_since(_now_ms() + 60_000)
@@ -1163,7 +1423,29 @@ def _selftest():
         assert sb.outgoing["state"] == "accepted" and lb.cleared == 1, (sb.outgoing, lb.cleared)
         assert not sb.peers()[sa.my_id]["last_err"] and not sa.peers()[sb.my_id]["last_err"]
         assert sa.peers()[sb.my_id]["last_ok"], "子端初始化时母端也记下了这次同步"
-        runner.call(lambda: sa.unpair(sb.my_id))
+        # B 重置: 让 A 解除绑定并删掉 A 保留的 B 的数据, A 再转告别的设备 (gone)
+        assert sa._sync_with(sb.my_id)
+        assert sb.my_id in sa.state["ledgers"]
+        sb.forget_me(timeout=3.0)
+        for _ in range(100):
+            if sb.my_id not in sa.peers():
+                break
+            time.sleep(0.05)
+        assert sb.my_id not in sa.peers() and sb.my_id not in sa.state["ledgers"]
+        assert sb.my_id not in sa.state["status"] and sb.my_id in sa.state["gone"]
+        assert sa.snapshot()["gone"].get(sb.my_id)
+        # 第三台设备 C 收到 A 转告的 gone: 删掉 B 的旧账, 之后也不再收旧账
+        lc = _FakeLocal("C")
+        sc = SyncService(tempfile.mkdtemp(), lc, runner, name="C", http_port=17970, udp_port=17971)
+        sc.merge({"ledgers": {sb.my_id: {"rev": 5, "name": "B"}}})
+        assert sb.my_id in sc.state["ledgers"]
+        sc.merge({"gone": {sb.my_id: _now_ms()}})
+        assert sb.my_id not in sc.state["ledgers"]
+        sc.merge({"ledgers": {sb.my_id: {"rev": 5, "name": "B"}}})
+        assert sb.my_id not in sc.state["ledgers"], "重置前的旧账不能再传回来"
+        sc.merge({"ledgers": {sb.my_id: {"rev": _now_ms() + 10, "name": "B"}}})
+        assert sb.my_id in sc.state["ledgers"], "重置之后的新账照常收"
+        runner.call(lambda: sb.unpair(sa.my_id, notify=False))
         # 请求体读不出来 (例如太大): 回 400, 不再冒充"没绑定"
         assert sa._on_sync({})[0] == 400
     finally:

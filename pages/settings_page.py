@@ -17,12 +17,15 @@ class SettingsPage(tk.Frame):
     def __init__(self, master, settings, on_changed=None, on_sound=None,
                  on_dev_mode=None, on_language=None, on_font_scale=None,
                  on_theme=None, on_end_setup=None, updater=None, on_update_check=None,
-                 on_update_install=None):
+                 on_update_install=None, on_update_relay=None, sync=None):
         super().__init__(master, bg=COLORS["bg"])
         self.sm = settings
         self.updater = updater
         self.on_update_check = on_update_check
         self.on_update_install = on_update_install
+        self.on_update_relay = on_update_relay
+        self.sync = sync
+        self.sync_panel = None
         self.update_card = None
         self.on_changed = on_changed
         self.on_sound = on_sound
@@ -92,10 +95,14 @@ class SettingsPage(tk.Frame):
         for key, _text in SETTINGS_PAGES:
             self.areas[key] = ScrollArea(self.stack, height=420, bg=bg)
 
-        # ---- 基本设置: 配置期, 以及整个程序的外观 (语言 / 字号 / 主题) ----
+        # ---- 基本设置: 配置期, 设备同步, 以及整个程序的外观 (语言 / 字号 / 主题) ----
         self.area = self.areas["basic"]
         body = self.area.inner
         self._build_setup_card(body)
+        if self.sync is not None:
+            from .sync_panel import SyncPanel
+            self.sync_panel = SyncPanel(body, self.sync)
+            self.sync_panel.pack(fill="x")
         self._build_page_items("basic")
         self._build_update_card(body)
         # 作者的话: 为什么设置要等 48 小时 (MECHANICS.md 1.1)
@@ -325,6 +332,11 @@ class SettingsPage(tk.Frame):
         self.btn_update_now = self._track(ttk.Button(
             btns, text=tr("立即更新"), style="Accent.TButton",
             command=lambda: self.on_update_install and self.on_update_install()), "立即更新")
+
+        # 给绑定的其他设备下载安装包, 直接从局域网发过去 (对方不用自己去 GitHub 下载)
+        self._track(ttk.Button(btns, text=tr("📤 发给其他设备"),
+                               command=lambda: self.on_update_relay and self.on_update_relay()),
+                    "📤 发给其他设备").pack(side="left", padx=(8, 0))
 
         def open_page():
             import webbrowser
@@ -599,6 +611,11 @@ class SettingsPage(tk.Frame):
         else:
             widget.set(path)
 
+
+    def refresh_sync(self):
+        """设备同步那一块单独刷新 (每秒一次, 只在看着基本设置时)."""
+        if self.sync_panel is not None and self._tab == "basic":
+            self.sync_panel.refresh()
 
     def refresh(self):
         self._refresh_update_card()

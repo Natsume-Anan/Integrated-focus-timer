@@ -327,8 +327,23 @@ def detect_state(paths: Paths, ps=powershell, backend=None) -> dict:
     }
 
 
+def forget_peers(paths: Paths, send=None) -> int:
+    """读 sync_state.json, 告诉每台绑定的设备删掉本机的数据. 返回成功通知了几台."""
+    try:
+        with open(os.path.join(paths.data_dir, "sync_state.json"), "r", encoding="utf-8") as f:
+            st = json.load(f)
+        my_id = st["device"]["id"]
+        peers = [p for p in (st.get("peers") or {}).values() if isinstance(p, dict) and p.get("key")]
+    except Exception:
+        return 0
+    if send is None:
+        import devsync
+        send = devsync.send_forget
+    return sum(1 for p in peers if send(my_id, p))
+
+
 def run_uninstall(paths: Paths, remove_program: bool, log,
-                  ps=powershell, backend=None, kill_run=None, spawn=None, fw_run=None) -> bool:
+                  ps=powershell, backend=None, kill_run=None, spawn=None, fw_run=None, forget=None) -> bool:
     """按顺序执行; log(文本, 级别) 级别为 info / ok / warn. 返回网络是否已完全恢复."""
     ok = True
 
@@ -371,6 +386,10 @@ def run_uninstall(paths: Paths, remove_program: bool, log,
         log(tr("   没有被禁用的物理网卡."), "ok")
 
     log(tr("④ 删除数据…"), "info")
+    # 先让绑定的设备删掉它们保留的本机数据 (网络这时已经恢复)
+    told = forget_peers(paths, forget)
+    if told:
+        log(tr("   已通知 {n} 台绑定的设备删除本机的数据.", n=told), "ok")
     left = delete_data(paths)
     for p in left:
         log(tr("   删不掉 (可能被占用): {p}", p=p), "warn")
@@ -816,6 +835,16 @@ def _selftest():
     assert not looks_like_program_dir(tmp)
     assert not looks_like_program_dir(os.path.abspath(os.sep))
     assert not schedule_folder_removal(tmp, spawn=lambda a: None)
+
+    # ── 卸载前通知绑定的设备删掉本机的数据 (读 sync_state.json)
+    p = fresh()
+    with open(os.path.join(p.data_dir, "sync_state.json"), "w", encoding="utf-8") as f:
+        json.dump({"device": {"id": "me"}, "peers": {"a": {"key": "00", "addr": "x", "port": 1},
+                                                     "b": {"key": "01", "addr": "y", "port": 2}}}, f)
+    sent = []
+    assert forget_peers(p, lambda mid, peer: sent.append((mid, peer["addr"])) or peer["addr"] == "x") == 1
+    assert sent == [("me", "x"), ("me", "y")]
+    assert forget_peers(Paths(os.path.join(tmp, "none"), prog), lambda *a: True) == 0
 
     shutil.rmtree(tmp, ignore_errors=True)
     return "uninstall selftest OK"

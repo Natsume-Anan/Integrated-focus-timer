@@ -139,7 +139,6 @@ fun RulesScreen(go: (String) -> Unit) {
                 if (e.count > 1) "  ×${e.count}" else "", fontSize = 12.sp, color = o.dim)
         }
     }
-    PageColumn { SyncCard() }
     if (aiSettings) AiSettingsDialog { aiSettings = false }
     if (aiSuggest) AiSuggestDialog(view) { aiSuggest = false }
 }
@@ -171,6 +170,20 @@ private fun LockPermissions() {
 
 // ════════════════ 设备同步 (MECHANICS 15) ════════════════
 
+/** 同步 / 绑定出错的原因, 换成看得懂的话. */
+fun syncErrorText(err: String?): String {
+    val e = err ?: ""
+    val low = e.lowercase()
+    return when {
+        e == "not-proxy" -> tr("本机不是 Proxy 断网方式")
+        e == "peer-not-proxy" -> tr("对方不是 Proxy 断网方式")
+        e == "unpaired" -> tr("对方已经解除了绑定 (或重置过), 在这里解除绑定后重新绑定")
+        "timed out" in low || "timeout" in low -> tr("对方没有响应: 对方的 OIT 可能没在运行, 或者熄屏后被系统暂停了 (手机上打开 OIT 再试)")
+        "refused" in low -> tr("对方没有在等连接: OIT 没在运行, 或者端口不对")
+        else -> e
+    }
+}
+
 private fun localIp(): String = try {
     java.net.NetworkInterface.getNetworkInterfaces().toList().filter { it.isUp && !it.isLoopback }
         .flatMap { it.inetAddresses.toList() }.firstOrNull { it is java.net.Inet4Address && it.isSiteLocalAddress }
@@ -197,9 +210,10 @@ fun peerLines(): List<String> {
     }
 }
 
+/** 设备同步 (MECHANICS 15), 显示在 设置 → 基本设置. */
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun SyncCard() {
+fun SyncCard() {
     val o = LocalOit.current
     val app = OitApp.instance
     val s = app.sync ?: return
@@ -230,7 +244,7 @@ private fun SyncCard() {
                         val d = s.hello(host, port)
                         s.noteFound(d, host)
                     } catch (e: Exception) {
-                        withContext(Dispatchers.Main) { core.toast(tr("连接失败: {e}", "e" to (e.message ?: e)), "warn") }
+                        withContext(Dispatchers.Main) { core.toast(tr("连接失败: {e}", "e" to syncErrorText(e.message ?: e.toString())), "warn") }
                     }
                 }
             }) { Text(tr("按地址连接"), color = o.accent) }
@@ -254,11 +268,7 @@ private fun SyncCard() {
                 "rejected" -> tr("对方拒绝了绑定.")
                 "timeout" -> tr("对方没有在 2 分钟内确认.")
                 "cancelled" -> tr("已取消.")
-                else -> tr("绑定失败: {e}", "e" to when (og.error) {
-                    "not-proxy" -> tr("本机不是 Proxy 断网方式")
-                    "peer-not-proxy" -> tr("对方不是 Proxy 断网方式")
-                    else -> og.error
-                })
+                else -> tr("绑定失败: {e}", "e" to syncErrorText(og.error))
             }
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Text(text, color = o.accent, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
@@ -278,7 +288,7 @@ private fun SyncCard() {
             val err = p.optString("last_err")
             val okAt = p.optLong("last_ok")
             val whenText = when {
-                err.isNotEmpty() -> tr("同步失败: {e}", "e" to err)
+                err.isNotEmpty() -> tr("同步失败: {e}", "e" to syncErrorText(err))
                 okAt > 0 -> tr("上次同步 {t}", "t" to java.time.Instant.ofEpochMilli(okAt).atZone(java.time.ZoneId.systemDefault())
                     .toLocalTime().withNano(0).toString())
                 else -> tr("还没同步过")

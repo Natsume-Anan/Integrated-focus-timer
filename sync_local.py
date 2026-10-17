@@ -3,12 +3,15 @@
 所有方法都在界面线程里调用 (devsync.MainRunner 负责转过来).
 """
 
+import tempfile
 from datetime import datetime
 
+import config
 import toast
 from i18n import tr
 from settings_manager import SCHEMA_BY_KEY
 import devsync
+import os
 
 
 def _norm_setting(key: str, value):
@@ -33,6 +36,33 @@ class PcLocal:
 
     def net_mode(self) -> str:
         return self.app.net.net_mode
+
+    def app_version(self) -> str:
+        return config.APP_VERSION
+
+    # ---- 开发者模式: 子端跟着母端 ----
+
+    def dev_mode(self) -> bool:
+        return config.dev_mode_enabled()
+
+    def set_dev_mode(self, on: bool):
+        self.app.follow_dev_mode(bool(on))
+
+    # ---- 其他设备直接发来的安装包 (MECHANICS 16) ----
+
+    def update_wanted(self, platform: str, version: str) -> str:
+        return self.app.update_wanted(platform, version)
+
+    def update_dest(self, version: str) -> str:
+        fd, path = tempfile.mkstemp(prefix=f"oit-{version}-", suffix=".zip")
+        os.close(fd)
+        return path
+
+    def update_received(self, path: str, version: str, name: str):
+        self.app.on_update_received(path, version, name)
+
+    def update_failed(self, err: str):
+        toast.warn(tr("接收新版本失败: {e}", e=err))
 
     def auto_text(self) -> str:
         return self.app.dm.auto_text

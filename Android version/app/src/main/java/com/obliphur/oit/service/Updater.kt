@@ -48,6 +48,17 @@ class Updater(private val ctx: Context) {
 
         fun text(v: List<Int>?) = v?.joinToString(".") ?: "?"
 
+        /** 发布里的电脑版安装包: 名字带 windows / win / pc / python 的 .zip, 没有就用源码包 (同 updater.pick_download). */
+        fun pickWindows(rel: JSONObject): String? {
+            val assets = rel.optJSONArray("assets")
+            if (assets != null) for (i in 0 until assets.length()) {
+                val a = assets.optJSONObject(i) ?: continue
+                val n = a.optString("name").lowercase()
+                if (n.endsWith(".zip") && listOf("windows", "win", "pc", "python").any { it in n }) return a.optString("browser_download_url")
+            }
+            return rel.optString("zipball_url").ifEmpty { null }
+        }
+
         /** 发布里的安卓安装包: 优先名字里带 release / android 的 .apk. */
         fun pickApk(rel: JSONObject): String? {
             val assets = rel.optJSONArray("assets") ?: return null
@@ -129,6 +140,62 @@ class Updater(private val ctx: Context) {
             }
             done()
         }.start()
+    }
+
+    /** 在当前线程里取 GitHub 上的最新发布 (给其他设备发更新时用). */
+    fun fetchRelease(): JSONObject {
+        val c = open(API_LATEST, 20_000)
+        val rel = c.inputStream.use { JSONObject(it.readBytes().toString(Charsets.UTF_8)) }
+        c.disconnect()
+        val v = releaseVersion(rel) ?: throw IllegalStateException("no version number in the release")
+        release = rel
+        latest = v
+        if (state in setOf("idle", "latest", "available", "noapk", "error"))
+            state = if (!newer(v, current)) "latest" else if (pickApk(rel) == null) "noapk" else "available"
+        return rel
+    }
+
+    private fun downloadTo(url: String, f: File) {
+        val part = File(f.path + ".part")
+        val c = open(url, 60_000)
+        var total = 0L
+        c.inputStream.use { inp ->
+            part.outputStream().use { out ->
+                val buf = ByteArray(65536)
+                while (true) {
+                    val n = inp.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > MAX_DOWNLOAD) throw IllegalStateException("download too large")
+                    out.write(buf, 0, n)
+                }
+            }
+        }
+        c.disconnect()
+        if (!part.renameTo(f)) throw IllegalStateException("cannot save the download")
+    }
+
+    /** 给其他设备下载这个平台的安装包 (同一个版本只下载一次). 在后台线程里调用. */
+    fun fetchPackage(rel: JSONObject, platform: String): File {
+        val url = when (platform) {
+            "android" -> pickApk(rel)
+            "windows" -> pickWindows(rel)
+            else -> null
+        } ?: throw IllegalStateException("no-package")
+        val dir = File(ctx.cacheDir, "relay").apply { mkdirs() }
+        val f = File(dir, "OIT-$platform-${text(releaseVersion(rel))}" + if (platform == "android") ".apk" else ".zip")
+        dir.listFiles()?.forEach { if (it != f) it.delete() }
+        if (f.length() > 0) return f
+        downloadTo(url, f)
+        return f
+    }
+
+    /** 其他设备直接发来的安装包 (已核对过 SHA-256): 和自己下载好的一样, 等用户点安装. */
+    fun acceptFile(f: File, v: List<Int>?) {
+        apk = f
+        if (v != null) latest = v
+        error = ""
+        state = "ready"
     }
 
     fun download(done: () -> Unit) {

@@ -57,6 +57,14 @@ class SyncTest {
         override fun status(): JSONObject = JSONObject().put("timer", "idle").put("net", "offline")
         override fun pairRequest(req: PairRequest) { synchronized(requests) { requests.add(req) } }
         override fun changed() {}
+        @Volatile var dev = false
+        @Volatile var got: Pair<ByteArray, String>? = null
+        override fun appVersion() = "1.0.0"
+        override fun devMode() = dev
+        override fun setDevMode(on: Boolean) { dev = on }
+        override fun updateWanted(platform: String, version: String) = if (platform == "fake") "" else "platform"
+        override fun updateDest(version: String): java.io.File = Files.createTempFile("pkg", version).toFile()
+        override fun updateReceived(file: java.io.File, version: String, from: String) { got = file.readBytes() to "$version/$from" }
     }
 
     private fun waitFor(ms: Long = 10_000, cond: () -> Boolean) {
@@ -112,6 +120,13 @@ class SyncTest {
         try {
             sa.start(); sb.start()
             assertEquals(sb.myId, sa.hello("127.0.0.1", sb.port).getString("id"))
+            // 电脑发来的 GET 不带 Content-Length: 也要马上回复, 不能读到连接关闭 (以前绑定时一直 timed out)
+            java.net.Socket("127.0.0.1", sb.port).use { s ->
+                s.soTimeout = 3000
+                s.getOutputStream().write("GET /oit/v1/hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n".toByteArray())
+                val reply = String(s.getInputStream().readBytes())
+                assertTrue(reply, reply.startsWith("HTTP/1.1 200") && reply.contains(sb.myId))
+            }
             // B 是子端 (A 为母端)
             sa.startPairing("127.0.0.1", sb.port, true)
             waitFor { synchronized(lb.requests) { lb.requests.isNotEmpty() } && sa.outgoing?.state == "waiting" }
@@ -141,9 +156,33 @@ class SyncTest {
             runner.call { la.apply("hours", mapOf("2026-01-01/9" to null)) }
             assertTrue(sa.syncWith(sb.myId))
             assertFalse(lb.docs["hours"]!!.containsKey("2026-01-01/9"))
-            // 解除绑定: 对方也解除
-            runner.call { sa.unpair(sb.myId) }
-            waitFor { sb.peers().isEmpty() }
+            // 开发者模式跟着母端 (A); 子端 (B) 自己的状态不会传给母端
+            la.dev = true
+            assertTrue(sa.syncWith(sb.myId)); assertTrue(lb.dev)
+            lb.dev = false
+            assertTrue(sb.syncWith(sa.myId)); assertTrue(la.dev); assertTrue(lb.dev)
+            la.dev = false
+            assertTrue(sa.syncWith(sb.myId)); assertFalse(lb.dev)
+            assertEquals("1.0.0", sa.peers()[sb.myId]!!.optString("version"))
+            // 安装包直接发给 B, B 核对 SHA-256 后交给本机安装; 平台不对的不要
+            val pkg = Files.createTempFile("oit", ".bin").toFile()
+            val blob = ByteArray(300_000) { (it * 31 % 251).toByte() }
+            pkg.writeBytes(blob)
+            assertEquals("sent", sa.offerUpdate(sb.myId, pkg, "fake", "9.9.9"))
+            waitFor { lb.got != null }
+            assertTrue(lb.got!!.first.contentEquals(blob))
+            assertEquals("9.9.9/A", lb.got!!.second)
+            assertEquals("platform", sa.offerUpdate(sb.myId, pkg, "android", "9.9.9"))
+            // B 重置: A 解除绑定并删掉保留的 B 的数据, 之后也不再收 B 重置前的旧账
+            assertTrue(sa.peerLedgersById().containsKey(sb.myId))
+            sb.forgetMe()
+            waitFor { sa.peers().isEmpty() }
+            assertFalse(sa.peerLedgersById().containsKey(sb.myId))
+            val gone = runner.call { sa.snapshot() }.getJSONObject("gone")
+            assertTrue(gone.has(sb.myId))
+            runner.call { sa.merge(JSONObject().put("ledgers", JSONObject().put(sb.myId, JSONObject().put("rev", 5)))) }
+            assertFalse(sa.peerLedgersById().containsKey(sb.myId))
+            runner.call { sb.unpair(sa.myId, notify = false) }
         } finally {
             sa.stop(); sb.stop(); main.shutdownNow()
         }

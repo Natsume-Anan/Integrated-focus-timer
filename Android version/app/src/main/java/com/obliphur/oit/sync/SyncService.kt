@@ -32,6 +32,15 @@ interface SyncLocal {
     fun status(): JSONObject
     fun pairRequest(req: PairRequest)
     fun changed()
+    fun appVersion(): String = ""
+    /** 开发者模式: 子端跟着母端. */
+    fun devMode(): Boolean = false
+    fun setDevMode(on: Boolean) {}
+    /** 其他设备直接发来的安装包 (MECHANICS 16): "" = 要, 否则是不要的原因. */
+    fun updateWanted(platform: String, version: String): String = "platform"
+    fun updateDest(version: String): File? = null
+    fun updateReceived(file: File, version: String, from: String) {}
+    fun updateFailed(error: String) {}
 }
 
 /** 在界面线程里执行, 等它做完 (同 devsync.MainRunner). post=null 时直接在当前线程执行 (测试用). */
@@ -72,6 +81,9 @@ class Found(val id: String, val name: String, val platform: String, val addr: St
 /**
  * 设备同步 (MECHANICS 15). 和桌面版 devsync.py 的协议完全一样, 可以互相绑定.
  */
+/** 记住"哪台设备已经重置 / 卸载了"多久 (统计只保留本月和上月). */
+private const val GONE_KEEP_MS = 62L * 86_400_000
+
 class SyncService(
     dir: File,
     private val local: SyncLocal,
@@ -86,7 +98,10 @@ class SyncService(
         const val HTTP_PORT = 17930
         const val UDP_PORT = 17931
         /** 母端每隔这么久向每台子端发一次同步请求. */
-        const val SYNC_EVERY_MS = 30_000L
+        const val SYNC_EVERY_MS = 10_000L
+        /** 设备之间直接传的安装包最大多少; 发出的安装包多久之内可以来取. */
+        const val UPDATE_MAX = 160L * 1024 * 1024
+        const val OFFER_TTL_MS = 1_800_000L
         /** 这么久之内同步过的设备才算"在线" (比较最后操作时间用). */
         const val FRESH_MS = 120_000L
         const val PAIR_TIMEOUT_MS = 120_000L
@@ -154,7 +169,7 @@ class SyncService(
 
     private fun load(): JSONObject {
         val d = try { JSONObject(file.readText()) } catch (e: Exception) { JSONObject() }
-        for (k in listOf("peers", "track", "ledgers", "status")) if (d.optJSONObject(k) == null) d.put(k, JSONObject())
+        for (k in listOf("peers", "track", "ledgers", "status", "gone")) if (d.optJSONObject(k) == null) d.put(k, JSONObject())
         return d
     }
 
@@ -181,6 +196,7 @@ class SyncService(
     private fun proxyOk() = try { local.netMode() == "proxy" } catch (e: Exception) { false }
 
     fun deviceInfo(): JSONObject = JSONObject().put("id", myId).put("name", myName).put("platform", platform)
+        .put("version", local.appVersion())
         .put("port", port).put("net_mode", local.netMode()).put("v", PROTO)
 
     private fun info(): JSONObject = runner.call { deviceInfo() }
@@ -299,7 +315,10 @@ class SyncService(
         return sb.toString()
     }
 
-    private fun readMessage(i: InputStream): Triple<String, Map<String, String>, ByteArray> {
+    /** request=true: 读的是请求. 请求没有 Content-Length 时请求体长度是 0 —— 以前一律读到连接关闭,
+     *  电脑发来的 GET (不带 Content-Length) 就卡到超时, 绑定时一直显示 timed out.
+     *  响应没有 Content-Length 时才读到连接关闭. */
+    private fun readMessage(i: InputStream, request: Boolean = false): Triple<String, Map<String, String>, ByteArray> {
         val first = readLine(i)
         val headers = HashMap<String, String>()
         while (true) {
@@ -308,7 +327,7 @@ class SyncService(
             val c = l.indexOf(':')
             if (c > 0) headers[l.substring(0, c).trim().lowercase()] = l.substring(c + 1).trim()
         }
-        val n = headers["content-length"]?.toIntOrNull() ?: -1
+        val n = headers["content-length"]?.toIntOrNull() ?: if (request) 0 else -1
         val body = if (n >= 0) {
             if (n > 8_000_000) throw IllegalStateException("too large")
             val b = ByteArray(n)
@@ -353,18 +372,23 @@ class SyncService(
         c.use {
             try {
                 c.soTimeout = 10_000
-                val (first, _, raw) = readMessage(BufferedInputStream(c.getInputStream()))
+                val (first, _, raw) = readMessage(BufferedInputStream(c.getInputStream()), request = true)
                 val parts = first.split(" ")
                 val method = parts.getOrNull(0) ?: ""
                 val path = parts.getOrNull(1) ?: ""
                 val body = try { if (raw.isEmpty()) JSONObject() else JSONObject(String(raw, Charsets.UTF_8)) } catch (e: Exception) { JSONObject() }
                 val ip = c.inetAddress.hostAddress ?: ""
+                if (method == "GET" && path.startsWith("/oit/v1/file/")) {
+                    serveFile(c, offerFile(path.substringAfterLast('/')))
+                    return@use
+                }
                 val (code, out) = when {
                     method == "GET" && path == "/oit/v1/hello" -> 200 to info()
                     method == "GET" && path.startsWith("/oit/v1/pair/") -> pairStatus(path.substringAfterLast('/'))
                     method == "POST" && path == "/oit/v1/pair" -> onPair(body, ip)
                     method == "POST" && path == "/oit/v1/sync" -> onSync(body)
                     method == "POST" && path == "/oit/v1/unpair" -> onUnpair(body)
+                    method == "POST" && path == "/oit/v1/offer" -> onOffer(body)
                     else -> 404 to JSONObject().put("error", "not found")
                 }
                 val data = out.toString().toByteArray(Charsets.UTF_8)
@@ -378,6 +402,117 @@ class SyncService(
             } catch (_: Exception) {
             }
         }
+    }
+
+    // ---- 安装包直接发给其他设备 (MECHANICS 16) ----
+
+    private val offers = java.util.concurrent.ConcurrentHashMap<String, Pair<File, Long>>()
+
+    private fun offerFile(token: String): File? =
+        offers[token]?.takeIf { it.second > System.currentTimeMillis() && it.first.isFile }?.first
+
+    private fun serveFile(c: Socket, f: File?) {
+        val out = c.getOutputStream()
+        if (f == null) {
+            val d = "{\"error\":\"not found\"}".toByteArray()
+            out.write(("HTTP/1.1 404 Error\r\nContent-Type: application/json\r\nContent-Length: ${d.size}\r\n" +
+                "Connection: close\r\n\r\n").toByteArray())
+            out.write(d)
+            out.flush()
+            return
+        }
+        c.soTimeout = 60_000
+        out.write(("HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: ${f.length()}\r\n" +
+            "Connection: close\r\n\r\n").toByteArray())
+        f.inputStream().use { it.copyTo(out, 65536) }
+        out.flush()
+    }
+
+    /** 把安装包发给一台设备: 先发签名的说明 (平台, 版本, 大小, SHA-256, 取件码), 对方再来取文件, 取到后核对.
+     *  返回 "sent", 或对方不要的原因. 在后台线程里调用. */
+    fun offerUpdate(peerId: String, file: File, platform: String, version: String): String {
+        val p = peers()[peerId] ?: return "unpaired"
+        val md = MessageDigest.getInstance("SHA-256")
+        file.inputStream().use { inp ->
+            val buf = ByteArray(65536)
+            while (true) {
+                val n = inp.read(buf)
+                if (n < 0) break
+                md.update(buf, 0, n)
+            }
+        }
+        val token = SyncCrypto.hex(ByteArray(16).also { SecureRandom().nextBytes(it) })
+        val now = System.currentTimeMillis()
+        offers.entries.removeAll { it.value.second < now }
+        offers[token] = file to (now + OFFER_TTL_MS)
+        val env = SyncCrypto.seal(SyncCrypto.unhex(p.getString("key")), myId, JSONObject().put("offer", JSONObject()
+            .put("platform", platform).put("version", version).put("sha256", SyncCrypto.hex(md.digest()))
+            .put("size", file.length()).put("token", token).put("name", file.name)))
+        val (st, reply) = http(p.getString("addr"), p.getInt("port"), "POST", "/oit/v1/offer", env, 10_000)
+        if (st == 401) throw IllegalStateException("unpaired")
+        if (st != 200) throw IllegalStateException(reply.optString("error", "HTTP $st"))
+        return if (reply.optBoolean("ok")) "sent" else reply.optString("why", "declined")
+    }
+
+    private fun onOffer(env: JSONObject): Pair<Int, JSONObject> {
+        val bad = 400 to JSONObject().put("error", "bad-request")
+        val p = peers()[env.optString("from")] ?: return 401 to JSONObject().put("error", "unpaired")
+        val body = try { SyncCrypto.unseal(SyncCrypto.unhex(p.getString("key")), env) } catch (e: SealError) {
+            return 403 to JSONObject().put("error", e.message)
+        }
+        val o = body.optJSONObject("offer") ?: return bad
+        val size = o.optLong("size")
+        if (size <= 0 || size > UPDATE_MAX || !Regex("[0-9a-f]{64}").matches(o.optString("sha256")) ||
+            !Regex("[0-9a-f]{32}").matches(o.optString("token"))) return bad
+        val why = try { runner.call { local.updateWanted(o.optString("platform"), o.optString("version")) } } catch (e: Exception) {
+            return 503 to JSONObject().put("error", e.message)
+        }
+        if (why.isNotEmpty()) return 200 to JSONObject().put("ok", false).put("why", why)
+        pool.execute { fetchUpdate(p, o) }
+        return 200 to JSONObject().put("ok", true)
+    }
+
+    /** 后台线程: 到发来说明的那台设备上取安装包, 核对大小和 SHA-256 后交给本机安装. */
+    private fun fetchUpdate(p: JSONObject, o: JSONObject) {
+        var dest: File? = null
+        try {
+            val d = runner.call { local.updateDest(o.optString("version")) } ?: throw IllegalStateException("no place to save")
+            dest = d
+            val size = o.optLong("size")
+            val md = MessageDigest.getInstance("SHA-256")
+            var n = 0L
+            Socket().use { s ->
+                s.connect(InetSocketAddress(p.getString("addr"), p.getInt("port")), 6000)
+                s.soTimeout = 30_000
+                s.getOutputStream().apply {
+                    write("GET /oit/v1/file/${o.optString("token")} HTTP/1.1\r\nHost: oit\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".toByteArray())
+                    flush()
+                }
+                val inp = BufferedInputStream(s.getInputStream())
+                val status = readLine(inp)
+                while (readLine(inp).isNotEmpty()) { /* 跳过响应头 */ }
+                if (status.split(" ").getOrNull(1) != "200") throw IllegalStateException(status)
+                d.outputStream().use { out ->
+                    val buf = ByteArray(65536)
+                    while (true) {
+                        val r = inp.read(buf)
+                        if (r < 0) break
+                        n += r
+                        if (n > size) throw IllegalStateException("size mismatch")
+                        md.update(buf, 0, r)
+                        out.write(buf, 0, r)
+                    }
+                }
+            }
+            if (n != size || SyncCrypto.hex(md.digest()) != o.optString("sha256")) throw IllegalStateException("checksum mismatch")
+        } catch (e: Exception) {
+            dest?.delete()
+            val err = e.message ?: e.javaClass.simpleName
+            runCatching { runner.call { local.updateFailed(err) } }
+            return
+        }
+        val got = dest ?: return
+        runCatching { runner.call { local.updateReceived(got, o.optString("version"), p.optString("name", "?")) } }
     }
 
     fun hello(addr: String, port: Int = HTTP_PORT): JSONObject {
@@ -511,10 +646,12 @@ class SyncService(
 
     // ---- 解除绑定 ----
 
-    fun unpair(peerId: String, notify: Boolean = true) {
+    /** forget: 对方重置 / 卸载了 —— 它的数据在所有设备上都删掉 (转告其他设备, 见 gone). */
+    fun unpair(peerId: String, notify: Boolean = true, forget: Boolean = false) {
         val p = lock.withLock {
             state.getJSONObject("ledgers").remove(peerId)
             state.getJSONObject("status").remove(peerId)
+            if (forget) state.getJSONObject("gone").put(peerId, System.currentTimeMillis())
             state.getJSONObject("peers").remove(peerId) as? JSONObject
         }
         save()
@@ -530,11 +667,28 @@ class SyncService(
     private fun onUnpair(env: JSONObject): Pair<Int, JSONObject> {
         val from = env.optString("from")
         val p = peers()[from] ?: return 200 to JSONObject()
-        try { SyncCrypto.unseal(SyncCrypto.unhex(p.getString("key")), env) } catch (e: SealError) {
+        val body = try { SyncCrypto.unseal(SyncCrypto.unhex(p.getString("key")), env) } catch (e: SealError) {
             return 403 to JSONObject().put("error", e.message)
         }
-        runner.call { unpair(from, notify = false) }
+        runner.call { unpair(from, notify = false, forget = body.optBoolean("forget")) }
         return 200 to JSONObject()
+    }
+
+    /** 重置 / 卸载前: 让每台绑定的设备解除绑定, 并删掉它们保留的本机的数据 (账, 状态);
+     *  它们再转告各自绑定的设备 (见 gone). 在后台线程里调用, 最多等 timeoutMs. */
+    fun forgetMe(timeoutMs: Int = 3000) {
+        val all = peers().values.toList()
+        val threads = all.map { p ->
+            Thread {
+                runCatching {
+                    val env = SyncCrypto.seal(SyncCrypto.unhex(p.getString("key")), myId,
+                        JSONObject().put("unpair", true).put("forget", true))
+                    http(p.getString("addr"), p.getInt("port"), "POST", "/oit/v1/unpair", env, timeoutMs)
+                }
+            }.apply { isDaemon = true; start() }
+        }
+        val end = System.currentTimeMillis() + timeoutMs
+        for (t in threads) t.join(maxOf(1L, end - System.currentTimeMillis()))
     }
 
     // ---- 文档 ----
@@ -598,7 +752,11 @@ class SyncService(
         return lock.withLock {
             val ledgers = JSONObject(state.getJSONObject("ledgers").toString()).put(myId, own)
             val status = JSONObject(state.getJSONObject("status").toString()).put(myId, st)
+            val gone = state.getJSONObject("gone")
+            val cutoff = System.currentTimeMillis() - GONE_KEEP_MS
+            for (k in gone.keys().asSequence().toList()) if (gone.optLong(k) < cutoff) gone.remove(k)
             JSONObject().put("v", PROTO).put("device", deviceInfo()).put("ledgers", ledgers).put("docs", docs).put("status", status)
+                .put("gone", JSONObject(gone.toString())).put("dev", local.devMode())
         }
     }
 
@@ -608,12 +766,29 @@ class SyncService(
     fun merge(snap: JSONObject?, init: Boolean = false) {
         if (snap == null) return
         if (init) local.clearHistory()
+        // 开发者模式: 子端跟着母端
+        val sender = snap.optJSONObject("device")?.optString("id") ?: ""
+        if (snap.has("dev") && sender.isNotEmpty() && sender != myId && sender == motherId()) local.setDevMode(snap.optBoolean("dev"))
         lock.withLock {
             val led = state.getJSONObject("ledgers")
+            val gone = state.getJSONObject("gone")
+            val paired = state.getJSONObject("peers")
+            // 已经重置 / 卸载的设备: 删掉它的账和状态 (重新绑定过的不算)
+            snap.optJSONObject("gone")?.let { g ->
+                for (did in g.keys()) {
+                    if (did == myId || paired.has(did)) continue
+                    val ts = g.optLong(did)
+                    if (ts > gone.optLong(did, 0)) gone.put(did, ts)
+                    led.remove(did)
+                    state.getJSONObject("status").remove(did)
+                }
+            }
             snap.optJSONObject("ledgers")?.let { r ->
                 for (did in r.keys()) {
                     if (did == myId) continue
                     val l = r.optJSONObject(did) ?: continue
+                    // 重置 / 卸载之前的旧账不再收
+                    if (gone.has(did) && !paired.has(did) && l.optLong("rev") <= gone.optLong(did)) continue
                     if (l.optLong("rev") > (led.optJSONObject(did)?.optLong("rev", -1) ?: -1)) led.put(did, l)
                 }
             }
@@ -697,6 +872,9 @@ class SyncService(
                     if (init) q.put("init", false)
                     body.optJSONObject("snap")?.optJSONObject("device")?.optString("name")?.takeIf { it.isNotEmpty() }
                         ?.let { q.put("name", it) }
+                    // 对方的版本 (给它发更新用)
+                    body.optJSONObject("snap")?.optJSONObject("device")?.optString("version")?.takeIf { it.isNotEmpty() }
+                        ?.let { q.put("version", it) }
                 }
             }
             save()
@@ -729,6 +907,7 @@ class SyncService(
         }
         lock.withLock {
             state.getJSONObject("peers").optJSONObject(from)?.put("last_ok", System.currentTimeMillis())?.put("last_err", "")
+                ?.let { q -> snap.optJSONObject("device")?.optString("version")?.takeIf { it.isNotEmpty() }?.let { q.put("version", it) } }
         }
         return 200 to SyncCrypto.seal(k, myId, JSONObject().put("snap", mine))
     }

@@ -77,6 +77,7 @@ fun SettingsScreen(tab: String, setTab: (String) -> Unit, act: MainActivity) {
                     core.endSetupPeriod()
                 }
             }
+            SyncCard()
         }
 
         val (opts, nums) = Schema.pageSpecs(tab)
@@ -286,6 +287,8 @@ private fun PageExtras(tab: String, act: MainActivity) {
             PlainButton(tr("检查更新"), enabled = u.state != "checking" && u.state != "downloading") { app.checkUpdate(auto = false) }
             if (u.state == "available") AccentButton(tr("立即更新")) { app.downloadUpdate() }
             if (u.state == "ready") AccentButton(tr("安装")) { u.install() }
+            // 给绑定的其他设备下载安装包, 直接从局域网发过去 (对方不用自己去 GitHub 下载)
+            if (app.sync?.peers()?.isNotEmpty() == true) PlainButton(tr("📤 发给其他设备")) { app.relayUpdates(true) }
             PlainButton(tr("发布页")) { runCatching { u.openReleasePage() } }
         }
     }
