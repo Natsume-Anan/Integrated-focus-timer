@@ -120,6 +120,9 @@ class BreakTimerApp:
         self._focus_ok = 0.0          # 最后一次确认 (关掉提醒窗) 时已专注的秒数
         self._check_win = None        # 当前开着的"还在吗"提醒窗
         self._focus_saved = 0.0       # 上一次把专注状态写进文件的时刻 (monotonic)
+        # 绑定了其他设备, 上次在共享的专注中 OIT 被关掉了: 等第一次同步后决定要不要终止这段专注 (MECHANICS 8.2)
+        self._close_pending = None
+        self._awake = False           # 正在阻止系统睡眠 (专注 / 休息中, 屏幕可以照常关掉)
         self.last_t_minutes = 0.0
         self.countdown_seconds = 0
         self.update_job = None
@@ -1082,7 +1085,9 @@ class BreakTimerApp:
         return {"start": self.start_wall.isoformat(timespec="seconds"),
                 "alive": datetime.now().isoformat(timespec="seconds"),
                 "checks": int(self._focus_checks),
-                "ok": int(self._focus_ok)}
+                "ok": int(self._focus_ok),
+                # 重开时原样恢复, 同步的计时器状态才不会因为"主人变了"被当成新的改动 (盖掉其他设备更新的状态)
+                "owner": self.timer_owner}
 
     def _save_focus_now(self):
         self.dm.save_window_usage()
@@ -1124,7 +1129,17 @@ class BreakTimerApp:
             self._save_timer_state()
             return
         alive = min(max(alive, start), now)
-        if (now - alive).total_seconds() <= float(config.FOCUS_RESUME_GAP):
+        gap = (now - alive).total_seconds()
+        self.timer_owner = str(rec.get("owner") or "")
+        if self.sync.peers() and gap > float(config.CLOSED_GAP):
+            # 绑定了其他设备, 共享的专注中 OIT 被关掉了: 关掉的这段记为空闲 (总统计里优先级最高),
+            # 专注照常恢复, 等第一次同步看其他设备是不是已经结束了它, 没有就由本机终止 (_check_close_pending)
+            self.dm.add_focus_session("idle", alive, now, focus=start)
+            self._enter_focus(start, time.monotonic() - (now - start).total_seconds(), checks, ok)
+            self._close_pending = {"start": start, "alive": alive, "t": time.monotonic(),
+                                   "ms": int(time.time() * 1000)}
+            return
+        if gap <= float(config.FOCUS_RESUME_GAP):
             self._enter_focus(start, time.monotonic() - (now - start).total_seconds(), checks, ok)
             toast.info(tr("上次专注时程序退出了.已接着计时(从 {at} 开始).").format(
                 at=f"{start:%H:%M}"), timeout=8000)
@@ -1153,6 +1168,63 @@ class BreakTimerApp:
         if brk > 0:
             msg += "\n" + tr("积攒的休息时间 +{t}.").format(t=fmt_ms(brk))
         toast.notice(tr("⏱  上次的专注已记录"), msg)
+
+    def _check_close_pending(self):
+        """上次在共享的专注中 OIT 被关掉了 (_recover_focus): 第一次同步之后 (最多等 CLOSED_DECIDE_WAIT 秒),
+        这段专注还在进行就终止它 —— 专注记到被关掉的时刻为止, 之后的那段已经记为空闲."""
+        p = self._close_pending
+        if not p:
+            return
+        if not self.sync.synced_since(p["ms"]) and \
+                time.monotonic() - p["t"] < float(config.CLOSED_DECIDE_WAIT):
+            return
+        self._close_pending = None
+        if self.state != RUNNING or self.start_wall != p["start"]:
+            return                             # 其他设备已经结束了这段专注, 本机照着切换过了
+        start, alive = p["start"], p["alive"]
+        sec = (alive - start).total_seconds()
+        limit = float(config.FOCUS_CHECK_EVERY) * (self._focus_checks + 1) + float(config.FOCUS_CHECK_GRACE)
+        penalized = sec >= limit
+        if penalized:
+            sec = limit
+        self._close_check_win()
+        self.cancel_update()
+        minutes, brk = self._book_focus(start, sec, self._focus_ok if penalized else None)
+        self._mine()                           # 终止由本机做, 其他设备照着结束
+        self.reset_to_idle()
+        self._set_break_carry(self.break_carry + brk)
+        self.refresh_display()
+        self._refresh_if_visible("stats", "cal")
+        msg = tr("这台设备上的 OIT 在 {at} 被关掉了, 共享的专注已终止.").format(at=f"{alive:%m-%d %H:%M}")
+        msg += "\n" + tr("专注记到被关掉时为止: 计入 {m:.1f} 分钟; 关掉的这段记为空闲.").format(m=minutes)
+        if brk > 0:
+            msg += "\n" + tr("积攒的休息时间 +{t}.").format(t=fmt_ms(brk))
+        toast.notice(tr("⏹  专注已终止"), msg)
+
+    def _end_focus_for_close(self):
+        """绑定了其他设备时关闭程序: 共享的专注就此结束 (记到此刻), 不开始休息, 休息时间存进积攒的休息时间."""
+        start = self.start_wall
+        elapsed = time.monotonic() - self.start_mono
+        self._close_check_win()
+        self.cancel_update()
+        _minutes, brk = self._book_focus(start, elapsed)
+        self._mine()
+        self.reset_to_idle()
+        self.break_carry += brk
+        self._save_timer_state()
+
+    def _keep_awake(self):
+        """专注 / 休息中不让系统自动睡眠 (屏幕照常可以关掉), 计时和同步不会停."""
+        want = self.state in (RUNNING, ON_BREAK)
+        if want == self._awake or sys.platform != "win32":
+            return
+        self._awake = want
+        try:
+            import ctypes
+            # ES_CONTINUOUS | ES_SYSTEM_REQUIRED; 只写 ES_CONTINUOUS = 恢复正常
+            ctypes.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x00000001 if want else 0))
+        except Exception:
+            pass
 
     def _book_focus(self, start: datetime, seconds: float, ok=None):
         """记下一段专注, 返回 (计入的分钟数, 对应的休息秒数).
@@ -1184,6 +1256,8 @@ class BreakTimerApp:
         if self.state != RUNNING or self.start_mono is None:
             self._close_check_win()
             return
+        if self._close_pending:
+            return                             # 先等 _check_close_pending 决定这段专注还要不要
         if self._check_win is not None and not self._check_win.alive():
             self._check_win = None             # 被手动关掉了 = 人还在
             self._mine()
@@ -1206,7 +1280,9 @@ class BreakTimerApp:
                 + tr("请在{at}之前关掉这个窗口,否则专注会自动结束.").format(
                     at=f"{due:%H:%M}", p=float(config.FOCUS_CHECK_PENALTY)),
                 [(tr("还在,继续专注"), None, True), (tr("■  结束专注"), self._end_from_check, False)])
-        if time.monotonic() - self._focus_saved >= float(config.FOCUS_SAVE_EVERY):
+        # 绑定了其他设备时写得勤一些: 被关掉之后才知道是什么时候关的
+        every = float(config.FOCUS_ALIVE_EVERY if self.sync.peers() else config.FOCUS_SAVE_EVERY)
+        if time.monotonic() - self._focus_saved >= every:
             self._save_timer_state()
 
     def _end_from_check(self):
@@ -1421,7 +1497,9 @@ class BreakTimerApp:
             return
         self.check_pending_settings()
         self._check_rule_changes()
+        self._check_close_pending()
         self._check_focus()
+        self._keep_awake()
         self._check_idle_nudge()
         self._check_setup_period()
         self.apply_job = self.root.after(5000, self._schedule_apply_check)
@@ -1863,9 +1941,20 @@ class BreakTimerApp:
 
 
     def on_close(self):
-        self._save_focus_now()      # 专注中关闭: 状态留在文件里, 下次打开时接着算 (见 _recover_focus)
+        # 绑定了其他设备: 关闭程序就结束共享的专注, 并马上告诉其他设备 (MECHANICS 8.2)
+        ended = False
+        if self.state == RUNNING and self.start_mono is not None and self.sync.peers() \
+                and not self.dm.resetting and not self._close_pending:
+            self._end_focus_for_close()
+            ended = True
+        self._save_focus_now()      # 专注中关闭 (没有绑定设备): 状态留在文件里, 下次打开时接着算 (见 _recover_focus)
         self.end_break_early(silent=True)
         self._cancel_jobs()
+        if ended:
+            try:
+                self.sync.push_final()
+            except Exception:
+                pass
         self.sync.stop()
         # 关闭程序时开发者模式自动关掉, 否则 shutdown 不断网 (fail-closed 失效)
         config.DEV_MODE = False

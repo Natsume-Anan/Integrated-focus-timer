@@ -7,6 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.json.JSONObject
 import org.junit.Test
 import java.io.File
 import java.nio.file.Files
@@ -285,6 +286,47 @@ class CoreTest {
         assertFalse(core.settings.devMode)
         assertEquals(7200.0, core.settings.num("DAILY_LIMIT"), 0.0)
         assertEquals(StageResult.INVALID, core.stageSetting("COOLDOWN", code).first)   // 只认每日联网额度
+    }
+
+    /** 绑定了其他设备, 共享的专注中 OIT 被关掉: 重开时关掉的这段记为空闲, 专注终止, 总统计里空闲压过专注 (MECHANICS 8.2). */
+    @Test
+    fun closedDuringSharedFocus() {
+        val dir = tmp()
+        var clock = 1000.0
+        val a = Core(dir, NoHost) { clock }
+        a.myId = { "A" }
+        a.timer.onAction()                                       // 开始专注
+        val start = a.timer.liveState().getString("start")
+        // 模拟: 20 分钟前最后一次写进文件, 之后 OIT 被关掉了
+        val f = File(dir, "timer_state.json")
+        val st = JSONObject(f.readText())
+        val s0 = LocalDateTime.now().minusMinutes(30).withNano(0)
+        val alive = s0.plusMinutes(10)
+        st.getJSONObject("focus").put("start", s0.toString()).put("alive", alive.toString())
+        f.writeText(st.toString())
+        clock = 5000.0
+        val b = Core(dir, NoHost) { clock }
+        b.myId = { "A" }
+        b.hasPeers = { true }
+        b.syncedSince = { false }
+        b.start()
+        assertEquals(TState.RUNNING, b.timer.state)              // 先照常恢复, 等第一次同步
+        assertTrue(b.dm.focus.any { it.kind == "idle" && it.focus == s0.format(Fmt.TS) })
+        b.timer.check()
+        assertEquals(TState.RUNNING, b.timer.state)              // 60 秒内还在等同步
+        clock += 61.0
+        b.timer.check()
+        assertEquals(TState.IDLE, b.timer.state)                 // 没有设备结束它: 本机终止
+        val study = b.dm.focus.filter { it.kind == "study" }
+        assertEquals(1, study.size)
+        assertEquals(alive, study[0].end)                        // 专注记到被关掉的时刻为止
+        assertTrue(start.isNotEmpty())
+        // 别的设备记了整段专注: 总统计里被关掉的那段算空闲
+        b.dm.addFocusSession("study", s0, LocalDateTime.now())
+        val total = listOf(LocalDate.now().minusDays(1), LocalDate.now())
+            .sumOf { d -> b.dm.focusHours(d, null).sumOf { it.first } }
+        // 本机那段 10 分钟 + 别的设备那段去掉空闲后剩下的 10 分钟 (不去掉的话是 40 分钟)
+        assertEquals(20 * 60.0, total, 5.0)
     }
 
     /** 应用名单: 前台应用不能用就锁定, 离开后撤掉 (MECHANICS 14.6). */

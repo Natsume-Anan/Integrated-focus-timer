@@ -81,6 +81,8 @@ class OitApp : Application(), Host {
         core.myId = { s.myId }
         core.peerFresh = { s.isFresh(it) }
         core.isLatestActive = { s.isLatestActive() }
+        core.hasPeers = { s.peers().isNotEmpty() }
+        core.syncedSince = { ms -> s.peers().values.any { it.optLong("last_ok") >= ms } }
         core.net.peerNet = { com.obliphur.oit.sync.SyncService.peerNet(s.peerLedgers(), core.net.date) }
         core.net.peerUsage = { s.peerLedgers().flatMap { l -> l.optJSONArray("usage")?.let { a -> (0 until a.length()).mapNotNull { a.optJSONObject(it) } } ?: emptyList() } }
         try {

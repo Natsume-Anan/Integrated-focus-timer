@@ -509,6 +509,11 @@ EN = {
     "请在{at}之前关掉这个窗口,否则专注会自动结束.": "Close this window before {at}, or focus ends automatically.",
     "没有确认的部分按×{p:g}计入,共计入{m:.1f}分钟.": "Unconfirmed time counts at ×{p:g}; {m:.1f} min counted in total.",
     "积攒的休息时间 +{t}.": "Saved break time +{t}.",
+    "⏹  专注已终止": "⏹  Focus ended",
+    "这台设备上的 OIT 在 {at} 被关掉了, 共享的专注已终止.":
+        "OIT on this device was closed at {at}, so the shared focus has been ended.",
+    "专注记到被关掉时为止: 计入 {m:.1f} 分钟; 关掉的这段记为空闲.":
+        "Focus is counted up to when it was closed: {m:.1f} min; the closed stretch is recorded as idle.",
     "上次专注时程序退出了,专注已按{at}自动结束.": "OIT closed during your last focus session; it ended automatically at {at}.",
     "配置期已结束.": "Setup period ended.",
     "之后的修改都要等 48 小时.": "From now on, changes take 48 hours.",

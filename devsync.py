@@ -770,6 +770,33 @@ class SyncService:
         self.runner.call(lambda: self.unpair(str(env.get("from")), notify=False))
         return 200, {}
 
+    def push_final(self, timeout: float = 3.0):
+        """界面线程, 程序关闭前: 把本机此刻的内容发给每台设备 (不等回复里的内容, 最多等 timeout 秒).
+        例如共享的专注因为本机关闭而结束了, 其他设备要马上照着结束 (MECHANICS 8.2)."""
+        if not self.proxy_ok():
+            return
+        peers = {pid: p for pid, p in self.peers().items() if not p.get("init")}
+        if not peers:
+            return
+        snap = self.snapshot()
+
+        def send(p):
+            try:
+                env = seal(bytes.fromhex(p["key"]), self.my_id, {"snap": snap, "init": False})
+                self._http(p["addr"], p["port"], "POST", "/oit/v1/sync", env, timeout=timeout)
+            except Exception:
+                pass
+        threads = [threading.Thread(target=send, args=(p,), daemon=True) for p in peers.values()]
+        for t in threads:
+            t.start()
+        end = time.time() + timeout
+        for t in threads:
+            t.join(max(0.0, end - time.time()))
+
+    def synced_since(self, ms: int) -> bool:
+        """绑定的设备里有没有哪台在 ms (毫秒时间戳) 之后同步成功过."""
+        return any(int(p.get("last_ok") or 0) >= ms for p in self.peers().values())
+
     def sync_now(self):
         """立即同步一轮; 子端也会主动向母端发一次."""
         self._manual = True
@@ -1100,6 +1127,16 @@ def _selftest():
         del la.docs_["hours"]["2026-01-01/9"]
         assert sa._sync_with(sb.my_id)
         assert "2026-01-01/9" not in lb.docs_["hours"]
+
+        # 关闭前推送 (push_final): 不等回复里的内容, 对方照样并入
+        la.docs_["timer"]["live"] = {"state": "idle", "owner": sa.my_id}
+        assert sb.synced_since(0) and not sb.synced_since(_now_ms() + 60_000)
+        sa.push_final(timeout=3.0)
+        for _ in range(100):
+            if lb.docs_["timer"].get("live") == {"state": "idle", "owner": sa.my_id}:
+                break
+            time.sleep(0.05)
+        assert lb.docs_["timer"].get("live") == {"state": "idle", "owner": sa.my_id}, lb.docs_["timer"]
 
         # 解除绑定: 对方也解除
         runner.call(lambda: sa.unpair(sb.my_id))

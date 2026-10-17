@@ -29,6 +29,11 @@ object Cfg {
     // 专注状态写盘与恢复
     const val FOCUS_SAVE_EVERY = 4 * 60.0
     const val FOCUS_RESUME_GAP = 5 * 60.0
+    /** 绑定了其他设备时 (MECHANICS 8.2): 专注中这么久写一次; OIT 被关掉超过 CLOSED_GAP 再打开, 共享的专注终止,
+     *  关掉的这段记为空闲; 先等 CLOSED_DECIDE_WAIT 秒内的第一次同步, 看其他设备是不是已经结束了这段专注. */
+    const val FOCUS_ALIVE_EVERY = 30.0
+    const val CLOSED_GAP = 2 * 60.0
+    const val CLOSED_DECIDE_WAIT = 60.0
 
     // 连点领取休息时间
     const val BONUS_BREAK_CLICKS = 10

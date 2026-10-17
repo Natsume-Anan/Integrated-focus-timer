@@ -63,6 +63,10 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
     var peerFresh: (String) -> Boolean = { false }
     /** 本机是不是最后有人操作的设备 (整点提示音只在它上面响). */
     var isLatestActive: () -> Boolean = { true }
+    /** 绑定了其他设备吗. */
+    var hasPeers: () -> Boolean = { false }
+    /** 绑定的设备里有没有哪台在这个时刻 (毫秒) 之后同步成功过. */
+    var syncedSince: (Long) -> Boolean = { false }
 
     val notices = mutableListOf<Notice>()
     private var nextNoticeId = 1

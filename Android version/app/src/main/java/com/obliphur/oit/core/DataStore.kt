@@ -56,7 +56,11 @@ fun combineWindow(sources: List<WindowSource>, prefix: String): Map<String, Doub
     return out
 }
 
-data class FocusSeg(val kind: String, val start: LocalDateTime, val end: LocalDateTime)
+/** kind: study 专注 / break 休息 / idle 空闲 (共享专注中本机 OIT 被关掉的那一段; focus 是那段专注的开始时刻, MECHANICS 8.2). */
+data class FocusSeg(val kind: String, val start: LocalDateTime, val end: LocalDateTime, val focus: String = "") {
+    fun json(): JSONObject = JSONObject().put("k", kind).put("s", start.format(Fmt.TS)).put("e", end.format(Fmt.TS))
+        .also { if (kind == "idle") it.put("f", focus) }
+}
 
 /**
  * 学习时长, 整点记录, 专注 / 休息时间段, 应用使用时间. 对应桌面版 data_manager.py.
@@ -153,7 +157,7 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
         arr.objects().mapNotNull { r ->
             val s = runCatching { LocalDateTime.parse(r.optString("s"), Fmt.TS) }.getOrNull()
             val e = runCatching { LocalDateTime.parse(r.optString("e"), Fmt.TS) }.getOrNull()
-            if (s != null && e != null && e.isAfter(s)) FocusSeg(r.optString("k"), s, e) else null
+            if (s != null && e != null && e.isAfter(s)) FocusSeg(r.optString("k"), s, e, r.optString("f")) else null
         }
     }
 
@@ -168,7 +172,7 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
             val s = runCatching { LocalDateTime.parse(r.optString("s"), Fmt.TS) }.getOrNull() ?: continue
             val e = runCatching { LocalDateTime.parse(r.optString("e"), Fmt.TS) }.getOrNull() ?: continue
             val k = r.optString("k")
-            if ((k == "study" || k == "break") && e.isAfter(s)) focus.add(FocusSeg(k, s, e))
+            if ((k == "study" || k == "break" || k == "idle") && e.isAfter(s)) focus.add(FocusSeg(k, s, e, r.optString("f")))
         }
         focus.removeAll { !it.end.isAfter(focusFloor()) }
     }
@@ -176,14 +180,12 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
     private fun saveFocus() {
         if (resetting) return
         focus.removeAll { !it.end.isAfter(focusFloor()) }
-        Store.write(focusFile, JSONObject().put("sessions", JSONArray(focus.map {
-            JSONObject().put("k", it.kind).put("s", it.start.format(Fmt.TS)).put("e", it.end.format(Fmt.TS))
-        })))
+        Store.write(focusFile, JSONObject().put("sessions", JSONArray(focus.map { it.json() })))
     }
 
-    fun addFocusSession(kind: String, start: LocalDateTime?, end: LocalDateTime?) {
+    fun addFocusSession(kind: String, start: LocalDateTime?, end: LocalDateTime?, focusStart: LocalDateTime? = null) {
         if (start == null || end == null || secondsBetween(start, end) < 1) return
-        focus.add(FocusSeg(kind, start.withNano(0), end.withNano(0)))
+        focus.add(FocusSeg(kind, start.withNano(0), end.withNano(0), focusStart?.withNano(0)?.format(Fmt.TS) ?: ""))
         saveFocus()
     }
 
@@ -192,8 +194,13 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
         val d0 = day.atStartOfDay()
         val st = DoubleArray(24)
         val rs = DoubleArray(24)
-        val segs = (focus + peerFocus()).toMutableList()
-        if (live != null) segs.add(FocusSeg(live.first, live.second, LocalDateTime.now()))
+        val all = (focus + peerFocus()).toMutableList()
+        if (live != null) all.add(FocusSeg(live.first, live.second, LocalDateTime.now()))
+        // 空闲的优先级最高: 同一段专注 (开始时刻相同) 里和空闲重叠的部分不算专注 (哪台设备记的都一样)
+        val idle = all.filter { it.kind == "idle" }.groupBy { it.focus }
+        val segs = all.filter { it.kind != "idle" }.flatMap { s ->
+            if (s.kind != "study") listOf(s) else subtract(s, idle[s.start.format(Fmt.TS)] ?: emptyList())
+        }
         for (s in segs) {
             if (!s.end.isAfter(d0) || !s.start.isBefore(d0.plusDays(1))) continue
             for (h in 0 until 24) {
@@ -210,6 +217,16 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
             val a = minOf(3600.0, st[it])
             a to minOf(3600.0 - a, rs[it])
         }
+    }
+
+    /** s 去掉 holes 里各段之后剩下的部分. */
+    private fun subtract(s: FocusSeg, holes: List<FocusSeg>): List<FocusSeg> {
+        var pieces = listOf(s.start to s.end)
+        for (h in holes) pieces = pieces.flatMap { (a, b) ->
+            if (!h.end.isAfter(a) || !h.start.isBefore(b)) listOf(a to b)
+            else listOfNotNull(if (h.start.isAfter(a)) a to h.start else null, if (h.end.isBefore(b)) h.end to b else null)
+        }
+        return pieces.map { FocusSeg(s.kind, it.first, it.second) }
     }
 
     // ---- 应用使用时间: {日期: {包名: 秒}}, "" 是空白 ----

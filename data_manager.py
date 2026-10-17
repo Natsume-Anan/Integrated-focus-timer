@@ -202,6 +202,8 @@ class DataManager:
                 continue
             if r.get("k") in ("study", "break") and en > st:
                 out.append({"k": r["k"], "s": r["s"], "e": r["e"]})
+            elif r.get("k") == "idle" and en > st:
+                out.append({"k": "idle", "s": r["s"], "e": r["e"], "f": str(r.get("f") or "")})
         self.focus_sessions = out
         self._prune_focus()
 
@@ -223,14 +225,17 @@ class DataManager:
         except (IOError, OSError):
             pass
 
-    def add_focus_session(self, kind: str, start: datetime, end: datetime):
-        """kind: 'study' 专注 / 'break' 休息."""
-        if kind not in ("study", "break") or start is None or end is None:
+    def add_focus_session(self, kind: str, start: datetime, end: datetime, focus: datetime = None):
+        """kind: 'study' 专注 / 'break' 休息 / 'idle' 空闲.
+        空闲: 共享专注中本机 OIT 被关掉的那一段; focus 是那段专注的开始时刻 (MECHANICS 8.2)."""
+        if kind not in ("study", "break", "idle") or start is None or end is None:
             return
         if (end - start).total_seconds() < 1:
             return
-        self.focus_sessions.append({
-            "k": kind, "s": start.strftime(self._TS), "e": end.strftime(self._TS)})
+        rec = {"k": kind, "s": start.strftime(self._TS), "e": end.strftime(self._TS)}
+        if kind == "idle":
+            rec["f"] = focus.strftime(self._TS) if focus else ""
+        self.focus_sessions.append(rec)
         self.save_focus_log()
 
     def focus_hours(self, day: datetime, live=None):
@@ -244,15 +249,26 @@ class DataManager:
         recs = list(self.focus_sessions)
         for led in self.peer_ledgers() or []:
             recs += [r for r in (led.get("focus") or []) if isinstance(r, dict)]
+        idle = {}                                  # 专注的开始时刻 → [(空闲开始, 空闲结束)]
         for r in recs:
             try:
-                segs.append((r["k"], datetime.strptime(r["s"], self._TS),
-                             datetime.strptime(r["e"], self._TS)))
+                k, st, en = r["k"], datetime.strptime(r["s"], self._TS), datetime.strptime(r["e"], self._TS)
             except (KeyError, TypeError, ValueError):
                 continue
+            if k == "idle":
+                idle.setdefault(str(r.get("f") or ""), []).append((st, en))
+            else:
+                segs.append((k, st, en))
         if live and live[1] is not None:
             segs.append((live[0], live[1], datetime.now()))
+        # 空闲的优先级最高: 同一段专注 (开始时刻相同) 里和空闲重叠的部分不算专注 (哪台设备记的都一样)
+        cut = []
         for kind, st, en in segs:
+            if kind == "study":
+                cut += [(kind, a, b) for a, b in _subtract(st, en, idle.get(st.strftime(self._TS), []))]
+            else:
+                cut.append((kind, st, en))
+        for kind, st, en in cut:
             for h in range(24):
                 h0 = day0 + timedelta(hours=h)
                 h1 = h0 + timedelta(hours=1)
@@ -499,6 +515,23 @@ def _sum_days(days: dict, prefix: str) -> Dict[str, float]:
                 except (TypeError, ValueError):
                     pass
     return out
+
+
+def _subtract(st: datetime, en: datetime, holes) -> list:
+    """[st, en) 去掉 holes 里的各段之后剩下的 [(开始, 结束)]."""
+    pieces = [(st, en)]
+    for hs, he in holes:
+        nxt = []
+        for a, b in pieces:
+            if he <= a or hs >= b:
+                nxt.append((a, b))
+                continue
+            if hs > a:
+                nxt.append((a, hs))
+            if he < b:
+                nxt.append((he, b))
+        pieces = nxt
+    return pieces
 
 
 def combine_window(sources, prefix: str) -> Dict[str, float]:

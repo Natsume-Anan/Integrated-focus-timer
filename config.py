@@ -50,6 +50,12 @@ FOCUS_CHECK_PENALTY = 0.3
 # 下次打开时: 距最后一次保存不超过 FOCUS_RESUME_GAP 秒就接着计时, 否则记到最后一次保存为止
 FOCUS_SAVE_EVERY = 4 * 60
 FOCUS_RESUME_GAP = 5 * 60
+# 绑定了其他设备时 (MECHANICS 8.2): 专注中每 FOCUS_ALIVE_EVERY 秒就写一次, 以便知道 OIT 是什么时候被关掉的.
+# OIT 关掉超过 CLOSED_GAP 秒 (例如被强行结束; 更新后重启这类很快重开的不算) 再打开时, 共享的专注被终止,
+# 关掉的这一段记为空闲. 先等 CLOSED_DECIDE_WAIT 秒内的第一次同步, 看其他设备是不是已经结束了这段专注
+FOCUS_ALIVE_EVERY = 30
+CLOSED_GAP = 2 * 60
+CLOSED_DECIDE_WAIT = 60
 
 # Timer 页的小按钮: BONUS_BREAK_WINDOW 秒内连点 BONUS_BREAK_CLICKS 次,
 # 获得 BONUS_BREAK_SECONDS 秒休息时间; 每周 (周一 0 点起) 最多 BONUS_BREAK_WEEKLY 秒
@@ -87,7 +93,7 @@ def daily_quota(day) -> float:
 
 
 APP_NAME = "Obliphur's Integrated Terminal"
-APP_VERSION = "1.0.5"                         # 和 GitHub 上发布的版本号比较 (见 updater.py)
+APP_VERSION = "1.0.6"                         # 和 GitHub 上发布的版本号比较 (见 updater.py)
 UPDATE_CHECK = 1                              # 打开程序时检查更新
 UPDATE_AUTO = 1                               # 发现新版本时自动下载安装
 OLD_APP_DIR = "mrsTimer"

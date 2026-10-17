@@ -30,9 +30,7 @@ class AndroidLocal(private val app: OitApp) : SyncLocal {
         val dm = core.dm
         val net = JSONObject().put("date", n.date).put("used", Math.round(n.used * 10) / 10.0).put("bonus", n.bonus)
             .put("tomorrow_used", n.tomorrowUsed).put("debt", n.debt)
-        val focus = JSONArray(dm.focus.map {
-            JSONObject().put("k", it.kind).put("s", it.start.format(Fmt.TS)).put("e", it.end.format(Fmt.TS))
-        })
+        val focus = JSONArray(dm.focus.map { it.json() })
         val window = JSONObject()
         for ((d, day) in dm.windowDays) window.put(d, JSONObject(day.mapValues { Math.round(it.value * 10) / 10.0 }))
         // 电脑那边只认得包名: 顺带发应用名过去

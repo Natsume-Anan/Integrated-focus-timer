@@ -64,6 +64,7 @@ class MainActivity : ComponentActivity() {
     private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
         asking = false
         app.applyNet(true)
+        askBattery()                   // VPN 问完了再问电池优化
     }
     private val notifLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
         asking = false
@@ -109,7 +110,27 @@ class MainActivity : ComponentActivity() {
         if (asking || app.core.settings.devMode) return
         if (app.core.vpnPlan() == com.obliphur.oit.core.VpnPlan.None) return
         if (VpnService.prepare(this) != null) requestVpn()
-        else if (com.obliphur.oit.service.OitVpnService.instance == null || com.obliphur.oit.service.OitVpnService.plan == null) app.applyNet(true)
+        else {
+            if (com.obliphur.oit.service.OitVpnService.instance == null || com.obliphur.oit.service.OitVpnService.plan == null) app.applyNet(true)
+            askBattery()
+        }
+    }
+
+    /** 申请不受电池优化限制: 熄屏后系统也不会停掉 OIT (计时, 同步, 断网照常). 每次启动最多问一次. */
+    private fun askBattery() {
+        if (batteryAsked || asking) return
+        batteryAsked = true
+        val pm = getSystemService(android.os.PowerManager::class.java)
+        if (pm.isIgnoringBatteryOptimizations(packageName)) return
+        runCatching {
+            startActivity(Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                android.net.Uri.parse("package:$packageName")))
+        }
+    }
+
+    companion object {
+        /** 这次启动已经问过电池优化了. */
+        private var batteryAsked = false
     }
 
     override fun onRestart() {
