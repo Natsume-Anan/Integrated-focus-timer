@@ -755,6 +755,20 @@ class SyncService:
 
     # ---- 给本机其他部分用: 其他设备的账 ----
 
+    def peer_ledgers_by_id(self) -> dict:
+        with self.lock:
+            return {k: v for k, v in self.state["ledgers"].items() if k != self.my_id}
+
+    def mother_id(self):
+        """母端的设备 id: 本机是任何一次绑定的母端就是本机, 否则是绑定时选的那台."""
+        peers = self.peers()
+        if any(p.get("mother") == self.my_id for p in peers.values()):
+            return self.my_id
+        for p in peers.values():
+            if p.get("mother"):
+                return p["mother"]
+        return None
+
     def peer_ledgers(self) -> list:
         with self.lock:
             return [v for k, v in self.state["ledgers"].items() if k != self.my_id]

@@ -728,6 +728,18 @@ class SyncService(
 
     // ---- 给本机其他部分用 ----
 
+    fun peerLedgersById(): Map<String, JSONObject> = lock.withLock {
+        val l = state.getJSONObject("ledgers")
+        l.keys().asSequence().filter { it != myId }.mapNotNull { k -> l.optJSONObject(k)?.let { k to it } }.toMap()
+    }
+
+    /** 母端的设备 id: 本机是任何一次绑定的母端就是本机, 否则是绑定时选的那台. */
+    fun motherId(): String? {
+        val p = peers()
+        if (p.values.any { it.optString("mother") == myId }) return myId
+        return p.values.map { it.optString("mother") }.firstOrNull { it.isNotEmpty() }
+    }
+
     fun peerLedgers(): List<JSONObject> = lock.withLock {
         val l = state.getJSONObject("ledgers")
         l.keys().asSequence().filter { it != myId }.mapNotNull { l.optJSONObject(it) }.toList()

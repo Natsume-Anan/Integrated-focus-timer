@@ -6,6 +6,56 @@ import java.io.File
 import java.time.LocalDate
 import java.time.LocalDateTime
 
+/** 应用使用时间线的一段: [s, e) 分钟都在用 app. */
+class WinRun(var s: Int, var e: Int, val app: String)
+
+fun parseRuns(a: JSONArray?): List<WinRun> = if (a == null) emptyList() else (0 until a.length()).mapNotNull { i ->
+    val r = a.optJSONArray(i) ?: return@mapNotNull null
+    if (r.length() < 3) null else WinRun(r.optInt(0), r.optInt(1), r.optString(2))
+}
+
+class WindowSource(val seconds: Map<String, Map<String, Double>>, val runs: Map<String, List<WinRun>>) {
+    companion object {
+        fun fromLedger(l: JSONObject): WindowSource {
+            val sec = HashMap<String, Map<String, Double>>()
+            l.optJSONObject("window")?.let { w ->
+                for (ds in w.keys()) w.optJSONObject(ds)?.let { d -> sec[ds] = d.keys().asSequence().associateWith { d.optDouble(it, 0.0) } }
+            }
+            val runs = HashMap<String, List<WinRun>>()
+            l.optJSONObject("window_runs")?.let { r -> for (ds in r.keys()) runs[ds] = parseRuns(r.optJSONArray(ds)) }
+            return WindowSource(sec, runs)
+        }
+    }
+}
+
+fun sumDays(days: Map<String, Map<String, Double>>, prefix: String): Map<String, Double> {
+    val out = HashMap<String, Double>()
+    for ((ds, day) in days) if (ds.startsWith(prefix)) for ((n, s) in day) out[n] = (out[n] ?: 0.0) + s
+    return out
+}
+
+/** 几台设备的应用时间合在一起 (同桌面版 data_manager.combine_window): sources 按优先级排 (母端在前).
+ *  有时间线的日子按分钟合并, 同一分钟以排在前面的设备为准, 只有它是空白 (或没有记录) 时才看后面的;
+ *  没有时间线的日子 (旧数据) 直接把秒数加起来. */
+fun combineWindow(sources: List<WindowSource>, prefix: String): Map<String, Double> {
+    val dates = sources.flatMap { it.seconds.keys + it.runs.keys }.filter { it.startsWith(prefix) }.toSet()
+    val out = HashMap<String, Double>()
+    for (d in dates) {
+        val minutes = arrayOfNulls<String>(1440)
+        for (src in sources) {
+            val runs = src.runs[d]
+            if (!runs.isNullOrEmpty()) {
+                for (r in runs) for (m in maxOf(0, r.s) until minOf(1440, r.e)) {
+                    val cur = minutes[m]
+                    if (cur == null || (cur.isEmpty() && r.app.isNotEmpty())) minutes[m] = r.app
+                }
+            } else src.seconds[d]?.forEach { (n, s) -> out[n] = (out[n] ?: 0.0) + s }
+        }
+        for (a in minutes) if (a != null) out[a] = (out[a] ?: 0.0) + 60.0
+    }
+    return out
+}
+
 data class FocusSeg(val kind: String, val start: LocalDateTime, val end: LocalDateTime)
 
 /**
@@ -30,6 +80,10 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
     val windowDays = HashMap<String, HashMap<String, Double>>()
     /** 设备同步: 其他设备的账 (MECHANICS 15), 显示合计用. */
     var peers: () -> List<JSONObject> = { emptyList() }
+    var peersById: () -> Map<String, JSONObject> = { emptyMap() }
+    var myId: () -> String = { "" }
+    var motherId: () -> String? = { null }
+    val windowRuns = HashMap<String, MutableList<WinRun>>()
     private var windowDirty = false
 
     init {
@@ -159,10 +213,14 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
     }
 
     // ---- 应用使用时间: {日期: {包名: 秒}}, "" 是空白 ----
+    // 同一份数据按分钟的时间线 windowRuns: {日期: [[开始分钟, 结束分钟, 包名], …]};
+    // 统计页看"全部设备"时用它判断几台设备是不是同时在用 (重叠的分钟以母端为准)
 
     private fun loadWindows() {
         windowDays.clear()
-        val days = Store.readObj(windowFile)?.optJSONObject("days") ?: return
+        windowRuns.clear()
+        val o = Store.readObj(windowFile) ?: return
+        val days = o.optJSONObject("days") ?: JSONObject()
         for (ds in days.keys()) {
             val d = days.optJSONObject(ds) ?: continue
             val m = HashMap<String, Double>()
@@ -172,12 +230,14 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
             }
             if (m.isNotEmpty()) windowDays[ds] = m
         }
+        o.optJSONObject("runs")?.let { r -> for (ds in r.keys()) windowRuns[ds] = parseRuns(r.optJSONArray(ds)).toMutableList() }
         pruneWindows()
     }
 
     private fun pruneWindows() {
         val (a, b) = monthPrefixes()
         windowDays.keys.removeAll { it.take(7) != a && it.take(7) != b }
+        windowRuns.keys.removeAll { it.take(7) != a && it.take(7) != b }
     }
 
     /** 把截止到 end 的这 seconds 秒记给 name; 跨过零点的部分记到前一天. */
@@ -191,21 +251,41 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
             day[name] = (day[name] ?: 0.0) + secondsBetween(start, cut)
             start = cut
         }
+        noteRun(name, end.minusNanos((seconds / 2 * 1e9).toLong()))
         windowDirty = true
     }
 
-    fun windowSeconds(prefix: String): Map<String, Double> {
-        val out = HashMap<String, Double>()
-        for ((ds, day) in windowDays) if (ds.startsWith(prefix))
-            for ((n, s) in day) out[n] = (out[n] ?: 0.0) + s
-        for (l in peers()) {
-            val days = l.optJSONObject("window") ?: continue
-            for (ds in days.keys()) if (ds.startsWith(prefix)) {
-                val d = days.optJSONObject(ds) ?: continue
-                for (n in d.keys()) out[n] = (out[n] ?: 0.0) + d.optDouble(n, 0.0)
+    /** 把 at 所在的这一分钟记给 name (同一分钟里换了应用, 记给最后一个). */
+    fun noteRun(name: String, at: LocalDateTime) {
+        val runs = windowRuns.getOrPut(at.toLocalDate().key()) { mutableListOf() }
+        val m = at.hour * 60 + at.minute
+        val last = runs.lastOrNull()
+        if (last != null) {
+            if (last.app == name && m <= last.e) { last.e = maxOf(last.e, m + 1); return }
+            if (m < last.e - 1) return                // 时间往回走了 (改过系统时间): 不记
+            if (m == last.e - 1) {                    // 这一分钟刚记给了别的应用: 改记给最新的
+                if (last.s >= last.e - 1) runs.removeAt(runs.size - 1) else last.e -= 1
+                val prev = runs.lastOrNull()
+                if (prev != null && prev.app == name && prev.e == m) { prev.e = m + 1; return }
             }
         }
-        return out
+        runs.add(WinRun(m, m + 1, name))
+    }
+
+    /** 统计页可选的设备: (键, 名字); 键 "self" 是本机. */
+    fun windowDevices(): List<Pair<String, String>> =
+        listOf("self" to "") + peersById().map { (id, l) -> id to l.optString("name", id) }
+
+    /** 某个月每个应用的前台时间 (秒); 键 "" 是空白.
+     *  device: "self" 本机 / 某台设备的 id / "all" 全部设备 (同一分钟几台设备都在用时以母端为准). */
+    fun windowSeconds(prefix: String, device: String = "all"): Map<String, Double> {
+        val peers = peersById()
+        if (device == "self" || peers.isEmpty()) return sumDays(windowDays, prefix)
+        peers[device]?.let { return sumDays(WindowSource.fromLedger(it).seconds, prefix) }
+        val mine = myId()
+        val mother = motherId()
+        val ids = (listOf(mine) + peers.keys).sortedBy { if (it == mother) 0 else 1 }
+        return combineWindow(ids.map { if (it == mine) WindowSource(windowDays, windowRuns) else WindowSource.fromLedger(peers[it]!!) }, prefix)
     }
 
     fun saveWindows(force: Boolean = false) {
@@ -217,7 +297,13 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
             for ((n, s) in day) o.put(n, Math.round(s * 10) / 10.0)
             days.put(ds, o)
         }
-        if (Store.write(windowFile, JSONObject().put("days", days))) windowDirty = false
+        if (Store.write(windowFile, JSONObject().put("days", days).put("runs", runsJson()))) windowDirty = false
+    }
+
+    fun runsJson(): JSONObject {
+        val runs = JSONObject()
+        for ((ds, list) in windowRuns) runs.put(ds, JSONArray(list.map { JSONArray().put(it.s).put(it.e).put(it.app) }))
+        return runs
     }
 
     // ---- 整点记录 ----
@@ -313,7 +399,7 @@ class DataStore(val dir: File, private val fillWindow: () -> Double, private val
     fun clearHistoryForSync() {
         study.clear(); saveStudy()
         focus.clear(); saveFocus()
-        windowDays.clear(); saveWindows(force = true)
+        windowDays.clear(); windowRuns.clear(); saveWindows(force = true)
     }
 
     /** 重置: 删除本程序留下的全部数据. */

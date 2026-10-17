@@ -194,6 +194,7 @@ fun StatsScreen() {
     var page by rememberSaveable { mutableStateOf(if (logOn) "log" else "net") }
     if (!logOn && page == "log") page = "net"
     var last by rememberSaveable { mutableStateOf(false) }
+    var device by rememberSaveable { mutableStateOf("all") }      // 应用页看哪台设备
     val modes = remember { mutableStateOf(mapOf<String, String>()) }
     val pct = (modes.value[page] ?: "pct") == "pct"
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp, vertical = 12.dp),
@@ -215,12 +216,18 @@ fun StatsScreen() {
                 modes.value = modes.value + (page to it)
             }
         }
+        // 应用页: 绑定了其他设备时按设备切换 (全部 / 本机 / 每台设备; 全部时重叠的分钟以母端为准)
+        if (page == "window") {
+            val devices = listOf("all" to tr("全部设备")) + core.dm.windowDevices().map { (k, n) -> k to if (k == "self") tr("本机") else n }
+            if (devices.none { it.first == device }) device = "all"
+            if (devices.size > 2) Segmented(devices, device) { device = it }
+        }
         val (thisM, lastM) = monthPrefixes()
         val prefix = if (last) lastM else thisM
         val blank = tr("空白")
         val data: Map<String, Double> = when (page) {
             "log" -> core.dm.hourActivitySeconds(prefix)
-            "window" -> core.dm.windowSeconds(prefix).entries.groupBy({
+            "window" -> core.dm.windowSeconds(prefix, device).entries.groupBy({
                 when (it.key) { "" -> blank; "?" -> tr("未知程序"); "OIT" -> "OIT"; else -> appLabel(ctx, it.key) }
             }, { it.value }).mapValues { it.value.sum() }
             else -> tallyItems(core.net.usageByReason(prefix))

@@ -62,20 +62,56 @@ class MainActivity : ComponentActivity() {
     private val pageRequest = MutableStateFlow<String?>(null)
 
     private val vpnLauncher = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) {
+        asking = false
         app.applyNet(true)
     }
-    private val notifLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
+    private val notifLauncher = registerForActivityResult(ActivityResultContracts.RequestPermission()) {
+        asking = false
+        ensureVpn()                    // 通知权限问完了再问 VPN, 一次只弹一个系统窗口
+    }
+    /** 正在等系统的权限窗口 (同时弹两个系统窗口在部分手机上会卡住界面). */
+    private var asking = false
+    private var flowStarted = false
 
     fun requestVpn() {
         val i = VpnService.prepare(this)
-        if (i != null) vpnLauncher.launch(i) else app.applyNet(true)
+        if (i != null) {
+            asking = true
+            vpnLauncher.launch(i)
+        } else app.applyNet(true)
+    }
+
+    /**
+     * 第一次打开: 欢迎窗口关掉之后再依次问通知权限和 VPN 权限 (由 Root 在欢迎窗口关掉后调用).
+     * 之后每次从后台回到 OIT 也调用 ensureVpn().
+     */
+    fun startPermissionFlow() {
+        if (flowStarted || asking) return
+        flowStarted = true
+        if (Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            asking = true
+            notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else ensureVpn()
+    }
+
+    /** VPN 被别的 VPN 应用顶掉或停了: 重新申请 / 重新打开. */
+    private fun ensureVpn() {
+        if (asking || app.core.settings.devMode) return
+        if (app.core.vpnPlan({ true }, packageName) == com.obliphur.oit.core.VpnPlan.None) return
+        if (VpnService.prepare(this) != null) requestVpn()
+        else if (com.obliphur.oit.service.OitVpnService.instance == null || com.obliphur.oit.service.OitVpnService.plan == null) app.applyNet(true)
+    }
+
+    override fun onRestart() {
+        super.onRestart()
+        // 从后台回到 OIT (再次打开): 断网用的 VPN 不在了就重新启动
+        if (flowStarted) ensureVpn()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         com.obliphur.oit.service.CoreService.start(this)
-        if (Build.VERSION.SDK_INT >= 33) notifLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        if (savedInstanceState == null && !app.core.settings.devMode && VpnService.prepare(this) != null) requestVpn()
         // 每次打开应用时检查更新 (MECHANICS 16)
         if (savedInstanceState == null) app.checkUpdateOnOpen()
         pageRequest.value = intent?.getStringExtra("page")
@@ -111,8 +147,8 @@ class MainActivity : ComponentActivity() {
 }
 
 val PAGES = listOf(
-    "timer" to "⏱  Timer", "net" to "🌐  Network", "rules" to "🛡  Rules", "log" to "📝  Hour Log",
-    "cal" to "📅  Calendar", "stats" to "📊  Statistics", "settings" to "⚙  Settings", "reset" to "🔄  Reset",
+    "timer" to "⏱  计时器", "net" to "🌐  联网", "rules" to "🛡  规则", "log" to "📝  整点记录",
+    "cal" to "📅  日历", "stats" to "📊  统计", "settings" to "⚙  设置", "reset" to "🔄  重置",
 )
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -139,10 +175,27 @@ fun Root(act: MainActivity, pageRequest: MutableStateFlow<String?>) {
     }
     LaunchedEffect(req) { req?.let { go(it); pageRequest.value = null } }
     LaunchedEffect(Unit) { app.navRequests.collect { go(it) } }
+    // 欢迎窗口关掉之后 (或者本来就没有) 再依次申请权限
+    LaunchedEffect(notices.none { it.tag == "welcome" }) {
+        if (notices.none { it.tag == "welcome" }) act.startPermissionFlow()
+    }
     LaunchedEffect(Unit) {
         app.toasts.collect {
             snackKind = it.kind
             launch { snack.showSnackbar(it.text, duration = if (it.long) SnackbarDuration.Long else SnackbarDuration.Short) }
+        }
+    }
+
+    // 换主题 / 字号 / 语言时和电脑版一样盖一层加载页, 界面在它后面换好 (MECHANICS 11)
+    val look = "$theme|$fs|${core.settings.str("LANGUAGE")}"
+    var shownLook by remember { mutableStateOf(look) }
+    var reloading by remember { mutableStateOf(false) }
+    LaunchedEffect(look) {
+        if (look != shownLook) {
+            reloading = true
+            kotlinx.coroutines.delay(700)
+            shownLook = look
+            reloading = false
         }
     }
 
@@ -238,6 +291,20 @@ fun Root(act: MainActivity, pageRequest: MutableStateFlow<String?>) {
                     },
                     containerColor = o.bg,
                 )
+            }
+            if (reloading) {
+                androidx.compose.foundation.layout.Box(
+                    Modifier.fillMaxSize().background(o.bg)
+                        .clickable(enabled = true, onClick = {}),        // 加载中不响应点击
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text(tr("正在重新加载界面…"), color = o.text, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text(tr("请稍候"), color = o.dim, fontSize = 13.sp, modifier = Modifier.padding(top = 6.dp))
+                        androidx.compose.material3.LinearProgressIndicator(color = o.accent, trackColor = o.border,
+                            modifier = Modifier.padding(top = 18.dp).fillMaxWidth(0.6f))
+                    }
+                }
             }
         }
     }

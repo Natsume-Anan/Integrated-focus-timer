@@ -54,6 +54,7 @@ class PcLocal:
             "focus": [dict(r) for r in dm.focus_sessions],
             "usage": [dict(r) for r in n.usage],
             "window": {d: {k: round(v, 1) for k, v in day.items()} for d, day in dm.window_days.items()},
+            "window_runs": {d: [list(r) for r in runs] for d, runs in dm.window_runs.items()},
         }
 
     def clear_history(self):
@@ -64,6 +65,7 @@ class PcLocal:
         dm.focus_sessions = []
         dm.save_focus_log()
         dm.window_days = {}
+        dm.window_runs = {}
         dm.save_window_usage(force=True)
         n.usage = []
         n._session = None

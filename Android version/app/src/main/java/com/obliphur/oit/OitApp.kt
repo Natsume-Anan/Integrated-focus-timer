@@ -75,6 +75,9 @@ class OitApp : Application(), Host {
             defaultName = deviceName())
         sync = s
         core.dm.peers = { s.peerLedgers() }
+        core.dm.peersById = { s.peerLedgersById() }
+        core.dm.myId = { s.myId }
+        core.dm.motherId = { s.motherId() }
         core.myId = { s.myId }
         core.peerFresh = { s.isFresh(it) }
         core.isLatestActive = { s.isLatestActive() }

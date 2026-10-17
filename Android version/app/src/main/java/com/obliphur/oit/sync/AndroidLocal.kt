@@ -34,7 +34,12 @@ class AndroidLocal(private val app: OitApp) : SyncLocal {
         })
         val window = JSONObject()
         for ((d, day) in dm.windowDays) window.put(d, JSONObject(day.mapValues { Math.round(it.value * 10) / 10.0 }))
+        // 电脑那边只认得包名: 顺带发应用名过去
+        val labels = JSONObject()
+        for (day in dm.windowDays.values) for (pkg in day.keys) if (pkg.contains('.') && !labels.has(pkg))
+            labels.put(pkg, com.obliphur.oit.service.appLabel(app, pkg))
         return JSONObject().put("net", net).put("study", JSONObject(dm.study as Map<*, *>)).put("focus", focus)
+            .put("window_runs", dm.runsJson()).put("labels", labels)
             .put("usage", JSONArray(n.usage.map { JSONObject(it.toString()) })).put("window", window)
     }
 

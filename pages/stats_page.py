@@ -41,6 +41,8 @@ class StatsPage(tk.Frame):
         self.page = "log"
         self.mode = {"log": "pct", "net": "pct", "window": "pct"}
         self.month = "this"          # "this" 本月 / "last" 上月
+        self.device = "all"          # 窗口页看哪台设备: "all" 全部 / "self" 本机 / 设备 id
+        self._device_keys = None
         self._tabs_log_on = None
         self._focus_days = []
         self._focus_geom = None
@@ -105,7 +107,12 @@ class StatsPage(tk.Frame):
             tk.Label(self.focus_legend, text=text, bg=bg, fg=COLORS["text_dim"],
                      font=config.font("small")).pack(side="left")
 
-        ttk.Separator(self, orient="horizontal", style="UI.TSeparator").pack(fill="x", padx=26)
+        # 窗口页: 绑定了其他设备时按设备切换 (MECHANICS 15.2)
+        self.device_bar = tk.Frame(self, bg=bg)
+        self.device_btns = {}
+
+        self.sep = ttk.Separator(self, orient="horizontal", style="UI.TSeparator")
+        self.sep.pack(fill="x", padx=26)
 
         body = tk.Frame(self, bg=bg)
         self.pie_body = body
@@ -152,6 +159,40 @@ class StatsPage(tk.Frame):
         self.refresh()
 
     @smooth
+    def _set_device(self, key: str):
+        self.device = key
+        self.refresh()
+
+    def _sync_device_bar(self):
+        """窗口页且绑定了其他设备时显示设备切换: 全部 / 本机 / 每台设备."""
+        devices = [("all", tr("全部设备"))] + [
+            (k, tr("本机") if k == "self" else n) for k, n in self.dm.window_devices()]
+        show = self.page == "window" and len(devices) > 2
+        keys = tuple(devices)
+        if keys != self._device_keys:
+            self._device_keys = keys
+            for b in self.device_btns.values():
+                b.destroy()
+            self.device_btns = {}
+            for k, text in devices:
+                b = tk.Button(self.device_bar, text=text, relief="flat", bd=0, padx=12, pady=5,
+                              font=config.font("small", bold=True), cursor="hand2",
+                              command=lambda kk=k: self._set_device(kk))
+                b.pack(side="left", padx=(0, 4))
+                self.device_btns[k] = b
+        if self.device not in dict(devices):
+            self.device = "all"
+        for k, b in self.device_btns.items():
+            on = k == self.device
+            cfg(b, bg=COLORS["text"] if on else COLORS["bg_card"],
+                fg=COLORS["bg"] if on else COLORS["text"],
+                activebackground=COLORS["border"], activeforeground=COLORS["text"])
+        if show:
+            show_pack(self.device_bar, fill="x", padx=26, pady=(0, 8), before=self.sep)
+        else:
+            hide_pack(self.device_bar)
+
+    @smooth
     def _set_month(self, key: str):
         self.month = key
         self.refresh()
@@ -187,7 +228,16 @@ class StatsPage(tk.Frame):
             return self.dm.hour_activity_seconds(prefix)
         if self.page == "window":
             names = {window_guard.BLANK: tr("空白"), window_guard.UNKNOWN: tr("未知程序")}
-            return {names.get(k, k): v for k, v in self.dm.window_seconds(prefix).items()}
+            # 手机发来的是包名, 有应用名就显示应用名
+            for led in (self.dm.peer_ledgers_by_id() or {}).values():
+                labels = led.get("labels") if isinstance(led.get("labels"), dict) else {}
+                for k, v in labels.items():
+                    names.setdefault(k, str(v))
+            out = {}
+            for k, v in self.dm.window_seconds(prefix, self.device).items():
+                n = names.get(k, k)
+                out[n] = out.get(n, 0.0) + v
+            return out
         return tally_items(self.net.usage_by_reason(prefix))
 
     def _color(self, i: int, name: str) -> str:
@@ -212,6 +262,7 @@ class StatsPage(tk.Frame):
             self.tab_btns["focus"].pack(side="left", padx=(0, 4))
             self.tab_btns["window"].pack(side="left", padx=(0, 4))
         self._style_buttons()
+        self._sync_device_bar()
 
         if self.page == "focus":
             hide_pack(self.month_bar)

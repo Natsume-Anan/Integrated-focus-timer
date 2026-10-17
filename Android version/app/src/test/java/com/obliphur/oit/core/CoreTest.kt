@@ -309,6 +309,23 @@ class CoreTest {
 
     private fun canon(o: org.json.JSONObject) = com.obliphur.oit.sync.SyncService.canon(o)
 
+    /** 应用时间线与多台设备合并 (和桌面版 data_manager 的例子一样). */
+    @Test
+    fun windowTimeline() {
+        val dm = DataStore(tmp(), { 3600.0 }, { "Sleeping" })
+        val t = LocalDateTime.of(2026, 10, 17, 9, 0, 5)
+        for (i in 0 until 12) dm.noteRun("chrome", t.withMinute(i * 10 / 60).withSecond(5 + (i * 10) % 60))
+        dm.noteRun("code", LocalDateTime.of(2026, 10, 17, 9, 1, 58))
+        dm.noteRun("code", LocalDateTime.of(2026, 10, 17, 9, 2, 10))
+        assertEquals(listOf(Triple(540, 541, "chrome"), Triple(541, 543, "code")),
+            dm.windowRuns["2026-10-17"]!!.map { Triple(it.s, it.e, it.app) })
+        val mother = WindowSource(emptyMap(), mapOf("2026-10-17" to listOf(WinRun(540, 600, "chrome"), WinRun(600, 610, ""))))
+        val phone = WindowSource(mapOf("2026-09-30" to mapOf("x" to 5.0)), mapOf("2026-10-17" to listOf(WinRun(590, 620, "tv.danmaku.bili"))))
+        assertEquals(mapOf("chrome" to 3600.0, "tv.danmaku.bili" to 1200.0), combineWindow(listOf(mother, phone), "2026-10"))
+        assertEquals(mapOf("x" to 5.0), combineWindow(listOf(mother, phone), "2026-09"))
+        assertEquals(1800.0, combineWindow(listOf(phone, mother), "2026-10")["tv.danmaku.bili"]!!, 0.0)
+    }
+
     @Test
     fun updateVersionRules() {
         // 和桌面版 updater.py 的自检同样的例子

@@ -421,6 +421,11 @@ class SettingsPage(tk.Frame):
                 values=[lab for _v, lab in self.sm.labeled_values(key, translate=True)]
             )
             widget.pack(side="left")
+            if spec["apply"] == APPLY_INSTANT and kind == "choice":
+                # ⚡ 即时生效的项: 选中就生效 (语言 / 字号 / 主题会显示加载页并重建界面).
+                # 稍后再提交: 重建界面会销毁这个下拉框, 不能在它自己的事件里做
+                widget.bind("<<ComboboxSelected>>",
+                            lambda _e, k=key: self.after(10, lambda: self._stage(k)))
             if kind == "combo":
                 custom_var = tk.StringVar()
                 ttk.Entry(ctrl, textvariable=custom_var, width=24).pack(

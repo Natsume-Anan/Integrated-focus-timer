@@ -53,11 +53,17 @@ class DataManager:
         # 窗口使用时间: {日期: {程序名: 秒}}, 程序名 "" 是空白; 只留本月和上月
         self.window_file = os.path.join(self.data_dir, 'window_usage.json')
         self.window_days: Dict[str, Dict[str, float]] = {}
+        # 同一份数据按分钟的时间线: {日期: [[开始分钟, 结束分钟, 程序名], …]};
+        # 统计页看"全部设备"时用它判断几台设备是不是同时在用 (重叠的分钟以母端为准)
+        self.window_runs: Dict[str, list] = {}
         self._window_dirty = False
 
         self.study_data: Dict[str, float] = {}
         # 设备同步: 其他设备的账 (devsync.SyncService.peer_ledgers), 显示合计用
         self.peer_ledgers = lambda: []
+        self.peer_ledgers_by_id = lambda: {}     # {设备 id: 账}
+        self.my_id = lambda: ""
+        self.mother_id = lambda: None            # 母端的设备 id
         self.hour_days: Dict[str, Dict[str, str]] = {}
         self.hour_cursor: Optional[datetime] = None
 
@@ -268,6 +274,9 @@ class DataManager:
             days = d.get("days", {}) if isinstance(d, dict) else {}
         except Exception:
             days = {}
+        runs = d.get("runs", {}) if isinstance(d, dict) else {}
+        self.window_runs = {str(k): [list(r) for r in v if isinstance(r, list) and len(r) == 3]
+                            for k, v in (runs.items() if isinstance(runs, dict) else ()) if isinstance(v, list)}
         out = {}
         for ds, day in (days.items() if isinstance(days, dict) else ()):
             if not isinstance(day, dict):
@@ -288,6 +297,7 @@ class DataManager:
     def _prune_windows(self):
         keep = month_prefixes()
         self.window_days = {k: v for k, v in self.window_days.items() if k[:7] in keep}
+        self.window_runs = {k: v for k, v in self.window_runs.items() if k[:7] in keep}
 
     def add_window_time(self, name: str, seconds: float, end: datetime = None):
         """把截止到 end 的这 seconds 秒记给程序 name; 跨过零点的部分记到前一天."""
@@ -301,21 +311,53 @@ class DataManager:
             day = self.window_days.setdefault(start.strftime('%Y-%m-%d'), {})
             day[name] = day.get(name, 0.0) + (cut - start).total_seconds()
             start = cut
+        self._note_run(name, end - timedelta(seconds=seconds / 2))
         self._window_dirty = True
 
-    def window_seconds(self, prefix: str) -> Dict[str, float]:
-        """某个月每个程序的前台时间 (秒); 键 "" 是空白."""
-        out: Dict[str, float] = {}
-        sources = [self.window_days] + [led.get("window") or {} for led in self.peer_ledgers() or []]
-        for days in sources:
-            for ds, day in days.items():
-                if str(ds).startswith(prefix) and isinstance(day, dict):
-                    for name, sec in day.items():
-                        try:
-                            out[name] = out.get(name, 0.0) + float(sec)
-                        except (TypeError, ValueError):
-                            pass
+    def _note_run(self, name: str, when: datetime):
+        """把 when 所在的这一分钟记给 name (同一分钟里换了程序, 记给最后一个)."""
+        ds = when.strftime('%Y-%m-%d')
+        m = when.hour * 60 + when.minute
+        runs = self.window_runs.setdefault(ds, [])
+        if runs:
+            s, e, app = runs[-1]
+            if app == name and m <= e:
+                runs[-1][1] = max(e, m + 1)
+                return
+            if m < e - 1:
+                return                       # 时间往回走了 (改过系统时间): 不记
+            if m == e - 1:                   # 这一分钟刚记给了别的程序: 改记给最新的
+                if s >= e - 1:
+                    runs.pop()
+                else:
+                    runs[-1][1] = e - 1
+                if runs and runs[-1][2] == name and runs[-1][1] == m:
+                    runs[-1][1] = m + 1
+                    return
+        runs.append([m, m + 1, name])
+
+    def window_devices(self):
+        """统计页可选的设备: [(键, 名字)]. 没有绑定其他设备时只有本机."""
+        peers = self.peer_ledgers_by_id() or {}
+        out = [("self", None)]
+        out += [(k, str(v.get("name") or k)) for k, v in peers.items()]
         return out
+
+    def window_seconds(self, prefix: str, device: str = "all") -> Dict[str, float]:
+        """某个月每个程序的前台时间 (秒); 键 "" 是空白.
+        device: "self" 本机 / 某台设备的 id / "all" 全部设备 (同一分钟几台设备都在用时以母端为准)."""
+        peers = self.peer_ledgers_by_id() or {}
+        if device == "self" or not peers:
+            return _sum_days(self.window_days, prefix)
+        if device in peers:
+            return _sum_days(peers[device].get("window") or {}, prefix)
+        mine = self.my_id()
+        mother = self.mother_id()
+        ids = sorted([mine] + list(peers), key=lambda i: 0 if i == mother else 1)
+        sources = [{"seconds": self.window_days, "runs": self.window_runs} if i == mine else
+                   {"seconds": peers[i].get("window") or {}, "runs": peers[i].get("window_runs") or {}}
+                   for i in ids]
+        return combine_window(sources, prefix)
 
     def save_window_usage(self, force: bool = False):
         if self.resetting or not (self._window_dirty or force):
@@ -325,7 +367,8 @@ class DataManager:
             tmp = self.window_file + ".tmp"
             with open(tmp, 'w', encoding='utf-8') as f:
                 json.dump({"days": {k: {n: round(v, 1) for n, v in day.items()}
-                                    for k, day in self.window_days.items()}},
+                                    for k, day in self.window_days.items()},
+                       "runs": self.window_runs},
                           f, ensure_ascii=False, indent=1)
             os.replace(tmp, self.window_file)
             self._window_dirty = False
@@ -444,6 +487,54 @@ class DataManager:
             os.remove(self.legacy_uninstall_file)
         except OSError:
             pass
+
+
+def _sum_days(days: dict, prefix: str) -> Dict[str, float]:
+    out: Dict[str, float] = {}
+    for ds, day in (days or {}).items():
+        if str(ds).startswith(prefix) and isinstance(day, dict):
+            for name, sec in day.items():
+                try:
+                    out[name] = out.get(name, 0.0) + float(sec)
+                except (TypeError, ValueError):
+                    pass
+    return out
+
+
+def combine_window(sources, prefix: str) -> Dict[str, float]:
+    """几台设备的窗口 / 应用时间合在一起. sources 按优先级排 (母端在前), 每个是
+    {"seconds": {日期: {程序: 秒}}, "runs": {日期: [[开始分钟, 结束分钟, 程序], …]}}.
+    有时间线的日子按分钟合并: 同一分钟以排在前面的设备为准, 只有它是空白 (或没有记录) 时才看后面的;
+    没有时间线的日子 (旧数据) 直接把秒数加起来."""
+    dates = set()
+    for src in sources:
+        for key in ("seconds", "runs"):
+            dates |= {str(d) for d in (src.get(key) or {}) if str(d).startswith(prefix)}
+    out: Dict[str, float] = {}
+    for d in dates:
+        minutes = [None] * 1440
+        for src in sources:
+            runs = (src.get("runs") or {}).get(d)
+            if runs:
+                for r in runs:
+                    try:
+                        s, e, app = int(r[0]), int(r[1]), str(r[2])
+                    except (TypeError, ValueError, IndexError):
+                        continue
+                    for m in range(max(0, s), min(1440, e)):
+                        cur = minutes[m]
+                        if cur is None or (cur == "" and app != ""):
+                            minutes[m] = app
+            else:
+                for app, sec in ((src.get("seconds") or {}).get(d) or {}).items():
+                    try:
+                        out[app] = out.get(app, 0.0) + float(sec)
+                    except (TypeError, ValueError):
+                        pass
+        for app in minutes:
+            if app is not None:
+                out[app] = out.get(app, 0.0) + 60.0
+    return out
 
 
 def tally_items(pairs) -> Dict[str, float]:

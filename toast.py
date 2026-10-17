@@ -252,9 +252,11 @@ class Notice(tk.Toplevel):
     """只能手动关闭的提醒窗: 不会自动消失, 点窗口本身也不会关, 只能点按钮或右上角 ✕.
 
     置顶但不抢占输入 (不 grab), 不妨碍继续操作主窗口.
-    buttons: [(文字, 回调或 None, 是否强调)], 点任何一个按钮都会先关闭窗口再执行回调."""
+    buttons: [(文字, 回调或 None, 是否强调)], 点任何一个按钮都会先关闭窗口再执行回调.
+    options: [(键, 文字, 默认勾选)] 显示成一列勾选框; 点任何按钮时先把 {键: 是否勾选} 交给 on_options
+    (点 ✕ 关掉时不交)."""
 
-    def __init__(self, master, title: str, message: str, buttons=None):
+    def __init__(self, master, title: str, message: str, buttons=None, options=None, on_options=None):
         super().__init__(master, bg=config.COLORS["bg"],
                          highlightbackground=config.COLORS["accent"], highlightthickness=2)
         self._alive = True
@@ -275,6 +277,18 @@ class Notice(tk.Toplevel):
             wraplength=config.scaled(440)
         )
         self.lbl.pack(anchor="w", fill="x")
+        self._opts = {}
+        self._on_options = on_options
+        if options:
+            box = tk.Frame(body, bg=config.COLORS["bg"])
+            box.pack(anchor="w", fill="x", pady=(config.scaled(12), 0))
+            for key, text, default in options:
+                var = tk.BooleanVar(value=bool(default))
+                tk.Checkbutton(box, text=text, variable=var, bg=config.COLORS["bg"],
+                               fg=config.COLORS["text"], activebackground=config.COLORS["bg"],
+                               selectcolor=config.COLORS["bg_card"], font=font_of("body"),
+                               anchor="w").pack(anchor="w")
+                self._opts[key] = var
 
         btns = tk.Frame(self, bg=config.COLORS["bg"])
         btns.pack(fill="x", padx=config.scaled(22), pady=(0, config.scaled(18)))
@@ -291,7 +305,10 @@ class Notice(tk.Toplevel):
         self.geometry(f"{w}x{h}+{max(0, (sw - w) // 2)}+{max(0, (sh - h) // 3)}")
 
     def _press(self, cb):
+        values = {k: bool(v.get()) for k, v in self._opts.items()}
         self.close()
+        if self._on_options and values:
+            self._on_options(values)
         if cb:
             cb()
 
@@ -311,7 +328,7 @@ class Notice(tk.Toplevel):
             pass
 
 
-def notice(title: str, message: str, buttons=None):
+def notice(title: str, message: str, buttons=None, options=None, on_options=None):
     """弹出一个只能手动关闭的提醒窗, 返回窗口对象 (没有主窗口时返回 None)."""
     root = _root()
     _record(f"[notice] {title}: {message}", "notice")
@@ -320,7 +337,7 @@ def notice(title: str, message: str, buttons=None):
     try:
         if not root.winfo_exists():
             return None
-        return Notice(root, title, message, buttons)
+        return Notice(root, title, message, buttons, options, on_options)
     except Exception:
         return None
 

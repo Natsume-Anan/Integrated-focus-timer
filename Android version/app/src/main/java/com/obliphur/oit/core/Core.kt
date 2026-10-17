@@ -10,7 +10,7 @@ data class NoticeButton(val label: String, val action: String, val primary: Bool
 /** 只能手动关闭的提示窗. 关掉 (按任何按钮, 或 ✕ / 划掉通知) 时调用 onClose(按钮的 action, ✕ 是 null). */
 class Notice(
     val id: Int, val title: String, val message: String, val buttons: List<NoticeButton>,
-    val page: String?, val onClose: (String?) -> Unit,
+    val page: String?, val onClose: (String?) -> Unit, val tag: String = "",
 )
 
 /** 平台相关的部分 (Android 实现见 OitApp.kt). */
@@ -96,8 +96,8 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
     fun changed() = host.changed()
 
     fun notice(title: String, message: String, buttons: List<NoticeButton>, page: String? = null,
-               onClose: (String?) -> Unit = {}): Int {
-        val n = Notice(nextNoticeId++, title, message, buttons, page, onClose)
+               tag: String = "", onClose: (String?) -> Unit = {}): Int {
+        val n = Notice(nextNoticeId++, title, message, buttons, page, onClose, tag)
         notices.add(n)
         host.noticesChanged()
         return n.id
@@ -253,7 +253,7 @@ class Core(val dir: File, val host: Host, val mono: () -> Double) {
             tr("接下来{h}小时是配置期:所有修改立即生效.", "h" to Cfg.SETUP_HOURS) + "\n" +
             tr("之后每次修改都要等 48 小时.")
         notice(tr("👋  欢迎使用 OIT"), msg, listOf(
-            NoticeButton(tr("去设置"), "settings", true), NoticeButton(tr("开始使用"), "ok", false))) {
+            NoticeButton(tr("去设置"), "settings", true), NoticeButton(tr("开始使用"), "ok", false)), tag = "welcome") {
             if (it == "settings") host.openPage("settings:basic")
         }
     }

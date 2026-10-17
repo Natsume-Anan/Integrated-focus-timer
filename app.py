@@ -15,6 +15,7 @@ import toast
 import window_guard
 import devsync
 import updater
+import shortcut
 from sync_local import PcLocal
 from config import (
     COLORS, APP_NAME, IDLE, RUNNING, READY_BREAK, ON_BREAK,
@@ -156,6 +157,9 @@ class BreakTimerApp:
         self.sync_runner = devsync.MainRunner()
         self.sync = devsync.SyncService(self.dm.data_dir, PcLocal(self), self.sync_runner)
         self.dm.peer_ledgers = self.sync.peer_ledgers
+        self.dm.peer_ledgers_by_id = self.sync.peer_ledgers_by_id
+        self.dm.my_id = lambda: self.sync.my_id
+        self.dm.mother_id = self.sync.mother_id
         self.net.peer_net = lambda: devsync.peer_net(self.sync.peer_ledgers(), self.net.date)
         self.net.peer_usage = lambda: [r for led in self.sync.peer_ledgers()
                                        for r in (led.get("usage") or [])]
@@ -416,14 +420,14 @@ class BreakTimerApp:
 
 
         self.nav_labels = {
-            "timer": tr("⏱  Timer"),
-            "net": tr("🌐  Network"),
-            "rules": tr("🛡  Rules"),
-            "log": tr("📝  Hour Log"),
-            "cal": tr("📅  Calendar"),
-            "stats": tr("📊  Statistics"),
-            "settings": tr("⚙  Settings"),
-            "reset": tr("🔄  Reset")
+            "timer": tr("⏱  计时器"),
+            "net": tr("🌐  联网"),
+            "rules": tr("🛡  规则"),
+            "log": tr("📝  整点记录"),
+            "cal": tr("📅  日历"),
+            "stats": tr("📊  统计"),
+            "settings": tr("⚙  设置"),
+            "reset": tr("🔄  重置")
         }
         for key, label in self.nav_labels.items():
             if key == "reset":
@@ -1707,8 +1711,44 @@ class BreakTimerApp:
         msg = (tr("联网要先申请,等过冷静期才连上,每天有额度.")
                + "\n\n" + tr("接下来{h}小时是配置期:所有修改立即生效.").format(h=hours)
                + "\n" + tr("之后每次修改都要等 48 小时."))
+        # 快捷方式的三个选项就放在介绍窗口里, 点"开始使用"或"去设置"时照勾选的做
         toast.notice(tr("👋  欢迎使用 OIT"), msg, [
-            (tr("去设置"), self._open_basic_settings, True), (tr("开始使用"), None, False)])
+            (tr("去设置"), self._open_basic_settings, True), (tr("开始使用"), None, False)],
+            options=[("desktop", tr("创建桌面快捷方式"), True),
+                     ("start", tr("固定到开始菜单"), True),
+                     ("taskbar", tr("固定到任务栏"), False)],
+            on_options=self._make_shortcuts)
+
+    # ---- 第一次打开: 快捷方式 (介绍窗口里勾选) ----
+
+    def _make_shortcuts(self, opts: dict):
+        if not any(opts.values()):
+            return
+
+        def run():
+            res = shortcut.install(opts.get("desktop", False), opts.get("start", False),
+                                   opts.get("taskbar", False), APP_NAME)
+            self._log_notice("SHORTCUT " + ", ".join(f"{k}={'ok' if ok else 'no'}:{info}"
+                                                     for k, (ok, info) in res.items()))
+            self._on_main(lambda: self._report_shortcuts(res))
+        threading.Thread(target=run, daemon=True).start()
+
+    def _report_shortcuts(self, res: dict):
+        names = {"desktop": tr("桌面快捷方式"), "start": tr("开始菜单"), "taskbar": tr("任务栏")}
+        done = [names[k] for k, (ok, _i) in res.items() if ok]
+        failed = [f"{names[k]}: {info}" for k, (ok, info) in res.items()
+                  if not ok and info not in ("manual",)]
+        lines = []
+        if done:
+            lines.append(tr("已完成: {items}", items=", ".join(done)))
+        if "start" in res and res["start"][0]:
+            lines.append(tr("OIT 在开始菜单的\"所有应用\"里; 没有出现在固定列表时, 在开始菜单里右键 OIT → 固定到\"开始\"."))
+        if res.get("taskbar", (True, ""))[1] == "manual":
+            lines.append(tr("Windows 不允许程序自己固定到任务栏. 已在资源管理器里选中 OIT 的快捷方式: 右键 → 显示更多选项 → 固定到任务栏."))
+        if failed:
+            lines.append(tr("失败: {items}", items="; ".join(failed)))
+        if lines:
+            toast.notice(tr("🖥  快捷方式"), "\n\n".join(lines))
 
     def _open_basic_settings(self):
         self.show_page("settings")
