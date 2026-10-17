@@ -121,5 +121,3 @@ obliphur_terminal/
       ├─ ai/Ai.kt        AI 名单建议
       └─ ui/             各页面 (Jetpack Compose)
 ```
-
-本机的数据不在程序文件夹里, 在 `%USERPROFILE%\AppData\LocalLow\Obliphur's Integrated Terminal\` (见 `MECHANICS.md` 第 10 节). `config_local.py` 是本机的覆盖设置, 不上传.
