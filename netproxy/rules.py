@@ -322,6 +322,22 @@ class RuleStore:
         return True, "default-allow"
 
 
+    def app_allowed(self, exe: str, online: bool, mode: str = MODE_BLACKLIST):
+        """前台窗口的程序能不能用 (Rules 页的应用名单, 见 MECHANICS 4.7).
+        (允许?, 原因). 原因: online / whitelist-app / not-whitelisted / blacklist-app / default-allow"""
+        exe = norm_app(exe) if exe else ""
+        s = self._snap
+        if mode == MODE_WHITELIST:
+            if online:
+                return True, "online"
+            if exe and exe in s[WHITE_APPS]:
+                return True, "whitelist-app"
+            return False, "not-whitelisted"
+        if exe and exe in s[BLACK_APPS]:
+            return False, "blacklist-app"
+        return True, "default-allow"
+
+
 def _selftest():
     import tempfile
     assert norm_domain("https://www.Bilibili.com:443/video?x=1") == "www.bilibili.com"
@@ -378,6 +394,12 @@ def _selftest():
         "白名单为空时离线全拦"
     assert keys_for_mode(MODE_WHITELIST) == (WHITE_DOMAINS, WHITE_APPS)
     assert keys_for_mode("whatever") == (BLACK_DOMAINS, BLACK_APPS)
+
+    assert rs.app_allowed("Steam.exe", False, MODE_BLACKLIST) == (False, "blacklist-app")
+    assert rs.app_allowed("chrome.exe", True, MODE_BLACKLIST)[0]
+    assert rs.app_allowed("code.exe", False, MODE_WHITELIST) == (True, "whitelist-app")
+    assert rs.app_allowed("chrome.exe", False, MODE_WHITELIST) == (False, "not-whitelisted")
+    assert rs.app_allowed("chrome.exe", True, MODE_WHITELIST) == (True, "online")
 
     # 删除一律要等
     assert rs.remove(BLACK_DOMAINS, "bilibili.com")[0] == "staged"

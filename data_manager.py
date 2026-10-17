@@ -56,6 +56,8 @@ class DataManager:
         self._window_dirty = False
 
         self.study_data: Dict[str, float] = {}
+        # 设备同步: 其他设备的账 (devsync.SyncService.peer_ledgers), 显示合计用
+        self.peer_ledgers = lambda: []
         self.hour_days: Dict[str, Dict[str, str]] = {}
         self.hour_cursor: Optional[datetime] = None
 
@@ -110,12 +112,21 @@ class DataManager:
         except IOError:
             pass
 
+    def _study_all(self, day: str) -> float:
+        total = self.study_data.get(day, 0.0)
+        for led in self.peer_ledgers() or []:
+            try:
+                total += float((led.get("study") or {}).get(day, 0.0))
+            except (TypeError, ValueError, AttributeError):
+                pass
+        return total
+
     def get_today_hours(self) -> float:
-        return self.study_data.get(self.today_date, 0.0)
+        return self._study_all(self.today_date)
 
     def get_yesterday_hours(self) -> float:
         yesterday = (datetime.strptime(self.today_date, '%Y-%m-%d') - timedelta(days=1)).strftime('%Y-%m-%d')
-        return self.study_data.get(yesterday, 0.0)
+        return self._study_all(yesterday)
 
     def add_study_session(self, wall_start: datetime, wall_end: datetime, duration_minutes: float):
         if duration_minutes <= 0:
@@ -153,7 +164,10 @@ class DataManager:
             self.save_study_data()
 
     def month_study(self, prefix: str) -> Dict[str, float]:
-        return {k: v for k, v in self.study_data.items() if k.startswith(prefix)}
+        days = {k for k in self.study_data if k.startswith(prefix)}
+        for led in self.peer_ledgers() or []:
+            days |= {k for k in (led.get("study") or {}) if str(k).startswith(prefix)}
+        return {k: self._study_all(k) for k in days}
 
 
     # ---- 专注计时: 每一段专注 / 休息的起止时刻 ----
@@ -221,9 +235,15 @@ class DataManager:
         study = [0.0] * 24
         rest = [0.0] * 24
         segs = []
-        for r in self.focus_sessions:
-            segs.append((r["k"], datetime.strptime(r["s"], self._TS),
-                         datetime.strptime(r["e"], self._TS)))
+        recs = list(self.focus_sessions)
+        for led in self.peer_ledgers() or []:
+            recs += [r for r in (led.get("focus") or []) if isinstance(r, dict)]
+        for r in recs:
+            try:
+                segs.append((r["k"], datetime.strptime(r["s"], self._TS),
+                             datetime.strptime(r["e"], self._TS)))
+            except (KeyError, TypeError, ValueError):
+                continue
         if live and live[1] is not None:
             segs.append((live[0], live[1], datetime.now()))
         for kind, st, en in segs:
@@ -286,10 +306,15 @@ class DataManager:
     def window_seconds(self, prefix: str) -> Dict[str, float]:
         """某个月每个程序的前台时间 (秒); 键 "" 是空白."""
         out: Dict[str, float] = {}
-        for ds, day in self.window_days.items():
-            if ds.startswith(prefix):
-                for name, sec in day.items():
-                    out[name] = out.get(name, 0.0) + sec
+        sources = [self.window_days] + [led.get("window") or {} for led in self.peer_ledgers() or []]
+        for days in sources:
+            for ds, day in days.items():
+                if str(ds).startswith(prefix) and isinstance(day, dict):
+                    for name, sec in day.items():
+                        try:
+                            out[name] = out.get(name, 0.0) + float(sec)
+                        except (TypeError, ValueError):
+                            pass
         return out
 
     def save_window_usage(self, force: bool = False):

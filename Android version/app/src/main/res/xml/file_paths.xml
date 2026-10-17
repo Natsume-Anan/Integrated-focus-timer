@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 更新: 下载好的安装包放在缓存目录的 updates/ 里, 交给系统安装界面 -->
+<paths>
+    <cache-path name="updates" path="updates/" />
+</paths>

@@ -1,0 +1,177 @@
+"""
+设备同步: 本机数据 <-> devsync 的文档 / 账 / 状态 (MECHANICS.md 第 15 节).
+所有方法都在界面线程里调用 (devsync.MainRunner 负责转过来).
+"""
+
+from datetime import datetime
+
+import toast
+from i18n import tr
+from settings_manager import SCHEMA_BY_KEY
+import devsync
+
+
+def _norm_setting(key: str, value):
+    """两端的设置值统一成: 数值项是数字, 其余是文字 ("1", "0.9", "blacklist" …)."""
+    spec = SCHEMA_BY_KEY.get(key) or {}
+    if spec.get("kind") == "num":
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+    if isinstance(value, float) and value.is_integer() and spec.get("kind") == "choice":
+        value = int(value)
+    return "" if value is None else str(value)
+
+
+class PcLocal:
+
+    def __init__(self, app):
+        self.app = app
+
+    # ---- 基本 ----
+
+    def net_mode(self) -> str:
+        return self.app.net.net_mode
+
+    def auto_text(self) -> str:
+        return self.app.dm.auto_text
+
+    def changed(self):
+        try:
+            self.app.on_sync_changed()
+        except Exception:
+            pass
+
+    # ---- 账: 本机自己的数据 ----
+
+    def ledger(self) -> dict:
+        dm, n = self.app.dm, self.app.net
+        return {
+            "net": {"date": n.date, "used": round(n.used, 1), "bonus": n.bonus,
+                    "tomorrow_used": n.tomorrow_used, "debt": n.debt},
+            "study": {k: round(v, 4) for k, v in dm.study_data.items()},
+            "focus": [dict(r) for r in dm.focus_sessions],
+            "usage": [dict(r) for r in n.usage],
+            "window": {d: {k: round(v, 1) for k, v in day.items()} for d, day in dm.window_days.items()},
+        }
+
+    def clear_history(self):
+        """子端第一次绑定: 自己的历史换成母端的 (今天已用的联网额度保留)."""
+        dm, n = self.app.dm, self.app.net
+        dm.study_data = {}
+        dm.save_study_data()
+        dm.focus_sessions = []
+        dm.save_focus_log()
+        dm.window_days = {}
+        dm.save_window_usage(force=True)
+        n.usage = []
+        n._session = None
+        n._usage_dirty = True
+        n._save_usage()
+
+    # ---- 状态 ----
+
+    def status(self) -> dict:
+        from config import RUNNING, ON_BREAK
+        a, n = self.app, self.app.net
+        st = {"timer": "idle", "net": n.mode, "last_op": int(a.last_op)}
+        if a.state == RUNNING and a.start_wall:
+            st.update(timer="running", since=a.start_wall.isoformat(timespec="seconds"))
+        elif a.state == ON_BREAK:
+            st.update(timer="break", left=int(a.countdown_seconds))
+        if n.mode == "online":
+            st["net_left"] = int(n.grant_left)
+        return st
+
+    # ---- 文档 ----
+
+    def docs(self) -> dict:
+        a = self.app
+        s = a.settings
+        settings = {}
+        for key, spec in SCHEMA_BY_KEY.items():
+            if key in devsync.LOCAL_SETTINGS:
+                continue
+            p = s.pending.get(key)
+            settings[key] = {
+                "value": _norm_setting(key, s.effective.get(key)),
+                "pending": None if not p else {
+                    "value": _norm_setting(key, p["value"]), "requested_at": p["requested_at"],
+                    "apply_at": p["apply_at"].isoformat(timespec="seconds")},
+            }
+        settings["_setup_until"] = s.setup_until.isoformat(timespec="seconds") if s.setup_until else None
+        settings["_free_next"] = sorted(s.free_next)
+
+        # 规则页的名单不同步 (每台设备自己管, 见 MECHANICS 15.2)
+        hours = {f"{ds}/{h}": t for ds, day in a.dm.hour_days.items() for h, t in day.items() if t}
+
+        d = a._bonus_state()
+        timer = {"break_carry": int(a.break_carry),
+                 "bonus": {"week": d.get("bonus_week") or "", "used": int(d.get("bonus_used", 0) or 0)},
+                 # 此刻的专注 / 休息: 哪台设备最后改动就以哪台为准
+                 "live": a.timer_live()}
+        return {"settings": settings, "hours": hours, "timer": timer}
+
+    def apply(self, doc: str, changes: dict):
+        a = self.app
+        if doc == "settings":
+            s = a.settings
+            for key, val in changes.items():
+                if key == "_setup_until":
+                    s.setup_until = s._parse_dt(val) if val else None
+                elif key == "_free_next":
+                    s.free_next = {k for k in (val or []) if k in SCHEMA_BY_KEY}
+                elif key in SCHEMA_BY_KEY and key not in devsync.LOCAL_SETTINGS and isinstance(val, dict):
+                    s.effective[key] = s._coerce(key, val.get("value"))
+                    p = val.get("pending")
+                    at = s._parse_dt(p.get("apply_at")) if isinstance(p, dict) else None
+                    if at:
+                        s.pending[key] = {"value": s._coerce(key, p.get("value")),
+                                          "requested_at": str(p.get("requested_at") or ""),
+                                          "apply_at": at}
+                    else:
+                        s.pending.pop(key, None)
+                    s.since[key] = f"{datetime.now():%Y-%m-%d %H:%M}"
+            s.save()
+            s.apply_to_config()
+            a.after_sync_settings(set(changes))
+        elif doc == "hours":
+            dm = a.dm
+            for key, val in changes.items():
+                try:
+                    ds, h = key.split("/")
+                    int(h)
+                except ValueError:
+                    continue
+                day = dm.hour_days.setdefault(ds, {})
+                if val:
+                    day[h] = str(val)
+                else:
+                    day.pop(h, None)
+            dm.save_hour_log()
+        elif doc == "timer":
+            if "bonus" in changes and isinstance(changes["bonus"], dict):
+                b = changes["bonus"]
+                a._timer_extra = {"bonus_week": str(b.get("week") or ""),
+                                  "bonus_used": int(b.get("used") or 0)}
+            if "break_carry" in changes and changes["break_carry"] is not None:
+                a._set_break_carry(int(changes["break_carry"]))
+            else:
+                a._save_timer_state()
+            if isinstance(changes.get("live"), dict):
+                a.adopt_timer(changes["live"])
+
+    # ---- 绑定请求 ----
+
+    def pair_request(self, req: dict):
+        svc = self.app.sync
+        mother = tr("对方") if req["mother"] == req["id"] else tr("本机")
+        msg = tr("{name} ({platform}) 请求绑定.", name=req["name"], platform=req["platform"])
+        msg += "\n\n" + tr("配对码: {code}", code=req["code"])
+        msg += "\n" + tr("母端: {who}", who=mother)
+        if req["mother"] == req["id"]:
+            msg += "\n\n" + tr("本机的设置, 名单和记录将被对方的数据替换.")
+        toast.notice(tr("🔗  绑定请求"), msg, [
+            (tr("接受"), lambda t=req["token"]: svc.answer_pairing(t, True), True),
+            (tr("拒绝"), lambda t=req["token"]: svc.answer_pairing(t, False), False)])

@@ -1,0 +1,352 @@
+package com.obliphur.oit.core
+
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.time.LocalDate
+import java.time.LocalDateTime
+
+data class NetRequest(val minutes: Int, val at: Long, val reason: String, val quick: Boolean)
+
+/**
+ * 联网额度与申请 (MECHANICS 2). 对应桌面版 net_guard.py 的额度部分;
+ * 真正断网 / 联网由 [backend] 完成 (Android 上是 VpnService, 见 service/OitVpnService.kt).
+ *
+ * 时间: 申请的冷静期按墙上时间 (System.currentTimeMillis) 算, 联网计时按 tick(dt) 传进来的
+ * 经过秒数算, 每一步最多 TICK_CLAMP 秒.
+ */
+class NetGuard(
+    dir: File,
+    private val settings: Settings,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    /** 状态变了 (联网 / 断网 / 开发者模式) 时调用; force=true 是定期复查. */
+    var backend: (force: Boolean) -> Unit = {}
+    var dead = false
+    /** 设备同步: 其他设备今天的 [used, bonus, tomorrow_used, debt] 之和 (MECHANICS 15). */
+    var peerNet: () -> DoubleArray = { DoubleArray(4) }
+    /** 设备同步: 其他设备的联网会话 (按理由统计用). */
+    var peerUsage: () -> List<JSONObject> = { emptyList() }
+
+    private val stateFile = File(dir, "net_state.json")
+    private val logFile = File(dir, "net_requests.log")
+    private val usageFile = File(dir, "net_usage.json")
+    val usage = mutableListOf<JSONObject>()
+    private var session: JSONObject? = null
+    private var usageDirty = false
+
+    var date: String = LocalDate.now().key()
+        private set
+    var used = 0.0
+    var bonus = 0.0
+    var tomorrowUsed = 0.0
+    var debt = 0.0
+    @Volatile
+    var grantLeft = 0.0
+        private set
+    var grantRate = 1.0
+        private set
+    var grantQuick = false
+        private set
+    var pending: NetRequest? = null
+        private set
+
+    private var sinceSave = 0.0
+    private var sinceEnforce = 0.0
+
+    init {
+        load()
+        loadUsage()
+    }
+
+    private fun day(offset: Long = 0): LocalDate =
+        runCatching { LocalDate.parse(date) }.getOrElse { LocalDate.now() }.plusDays(offset)
+
+    val limit get() = settings.dailyQuota(day())
+    val tomorrowLimit get() = settings.dailyQuota(day(1))
+    val quotaMultiplier get() = settings.quotaMultiplier(day())
+    val cooldown get() = settings.num("COOLDOWN")
+    val enforceEvery get() = maxOf(5.0, settings.num("ENFORCE_EVERY"))
+    val tickClamp get() = settings.num("TICK_CLAMP")
+    private val quickMult get() = settings.num("QUICK_MULTIPLIER")
+    private val loanRate get() = settings.num("LOAN_RATE")
+
+    // 绑定了其他设备时额度是共用的: *All 是所有设备的合计
+    val usedAll get() = used + peerNet()[0]
+    val bonusAll get() = bonus + peerNet()[1]
+    val tomorrowUsedAll get() = tomorrowUsed + peerNet()[2]
+    val debtAll get() = debt + peerNet()[3]
+
+    val todayTotal get() = limit + bonusAll
+    val remaining get() = maxOf(0.0, todayTotal - usedAll - debtAll)
+    val tomorrowRemaining get() = maxOf(0.0, tomorrowLimit - tomorrowUsedAll)
+    val quickLeft get() = remaining / quickMult
+    val loanLeft get() = tomorrowRemaining / loanRate
+    val quotaUsed get() = minOf(todayTotal, usedAll + debtAll)
+
+    val devMode get() = settings.devMode
+    val online: Boolean get() = devMode || grantLeft > 0
+    val mode: String
+        get() = when {
+            devMode -> "dev"
+            online -> "online"
+            pending != null -> "pending"
+            else -> "offline"
+        }
+
+    // ---- 存档 ----
+
+    private fun load() {
+        val d = Store.readObj(stateFile) ?: return
+        val saved = d.optString("date", "")
+        fun num(k: String) = maxOf(0.0, d.dbl(k))
+        if (saved == date) {
+            used = num("used"); bonus = num("bonus")
+            tomorrowUsed = num("tomorrow_used"); debt = num("debt")
+        } else if (saved.isNotEmpty() && saved < date) {
+            // 程序关着跨过了零点: 借贷要还的部分照样变成今天的欠款 (隔了几天也一样)
+            debt = num("tomorrow_used")
+            if (debt > 0) {
+                save()
+                log("LOAN     repay ${(debt / 60).toInt()} min today (borrowed on $saved)")
+            }
+        }
+    }
+
+    fun save() {
+        if (dead) return
+        Store.write(stateFile, JSONObject().put("date", date).put("used", used.toLong())
+            .put("bonus", bonus.toLong()).put("tomorrow_used", tomorrowUsed.toLong()).put("debt", debt.toLong()))
+        saveUsage()
+        sinceSave = 0.0
+    }
+
+    private fun loadUsage() {
+        usage.clear()
+        val arr = Store.readObj(usageFile)?.optJSONArray("sessions") ?: return
+        val (a, b) = monthPrefixes()
+        usage.addAll(arr.objects().filter { it.optString("date").take(7).let { p -> p == a || p == b } })
+    }
+
+    private fun saveUsage() {
+        if (dead || !usageDirty) return
+        val (a, b) = monthPrefixes()
+        usage.removeAll { it.optString("date").take(7).let { p -> p != a && p != b } }
+        if (session != null && usage.none { it === session }) session = null
+        if (Store.write(usageFile, JSONObject().put("sessions", JSONArray(usage)))) usageDirty = false
+    }
+
+    private fun openSession(reason: String, quick: Boolean, minutes: Int, start: LocalDateTime = LocalDateTime.now()) {
+        val s = JSONObject().put("date", start.toLocalDate().key()).put("start", start.format(Fmt.HM))
+            .put("reason", reason).put("quick", quick).put("minutes", minutes).put("seconds", 0.0)
+        session = s
+        usage.add(s)
+        usageDirty = true
+    }
+
+    /** 实际联网的秒数 (不乘快速访问倍数), 跨零点自动拆到新的一天. */
+    private fun countOnline(dt: Double) {
+        val s = session ?: return
+        if (dt <= 0) return
+        val now = LocalDateTime.now()
+        if (s.optString("date") != now.toLocalDate().key())
+            openSession(s.optString("reason"), s.optBoolean("quick"), s.optInt("minutes"), now.floorDay())
+        val cur = session!!
+        cur.put("seconds", Math.round((cur.dbl("seconds") + dt) * 10) / 10.0)
+        usageDirty = true
+    }
+
+    /** 设备同步: 子端第一次绑定时清掉自己的联网会话记录 (今天已用的额度保留). */
+    fun clearUsageForSync() {
+        usage.clear()
+        session = null
+        usageDirty = true
+        saveUsage()
+    }
+
+    fun usageByReason(prefix: String): List<Pair<String, Double>> =
+        (usage + peerUsage()).filter { it.optString("date").startsWith(prefix) }.map { it.optString("reason") to it.dbl("seconds") }
+
+    fun log(text: String) {
+        if (!dead) Store.append(logFile, text)
+    }
+
+    // ---- 申请 ----
+
+    fun canBorrow(minutes: Double): String? {
+        val add = maxOf(0.0, minutes) * 60
+        if (add <= 0) return tr("最少 1 分钟.")
+        if (add > loanLeft + 1e-6) {
+            if (loanLeft < 60) return tr("明天的额度已经借完了.")
+            return tr("今天最多还能借 {max}(明天剩余 {left},每借 1 分钟扣 {rate} 分钟).",
+                "max" to fmtHm(loanLeft), "left" to fmtHm(tomorrowRemaining), "rate" to numText(loanRate))
+        }
+        return null
+    }
+
+    /** 紧急借贷: 立即给今天加额度, 代价是明天扣 LOAN_RATE 倍. 不联网. */
+    fun borrow(minutes: Int, reason: String): String? {
+        if (devMode) return tr("开发者模式已开启:不断网,不计时.")
+        canBorrow(minutes.toDouble())?.let { return it }
+        val add = minutes * 60.0
+        bonus += add
+        tomorrowUsed += add * loanRate
+        save()
+        log("LOAN     +$minutes min today, -${(minutes * loanRate).toInt()} min tomorrow  reason: $reason")
+        return null
+    }
+
+    fun canQuick(minutes: Double): String? {
+        val need = maxOf(0.0, minutes) * 60
+        if (need <= 0) return tr("最少 1 分钟.")
+        if (need * quickMult > remaining + 1e-6) {
+            if (quickLeft < 60) return tr("今天剩余的额度不够快速访问了.")
+            return tr("快速访问最多还能用 {max}(今日剩余 {left},按 ×{a} 消耗).",
+                "max" to fmtHm(quickLeft), "left" to fmtHm(remaining), "a" to numText(quickMult))
+        }
+        return null
+    }
+
+    fun request(minutes: Int, reason: String, quick: Boolean = false, cooldownRate: Double = 1.0): String? {
+        if (devMode) return tr("开发者模式已开启:不断网,不计时.")
+        if (online) return tr("已经在联网中.")
+        if (pending != null) return tr("已经有一个申请在等待中.")
+        if (minutes < 1) return tr("最少 1 分钟.")
+        if (quick) {
+            canQuick(minutes.toDouble())?.let { return it }
+            pending = NetRequest(minutes, clock(), reason, true)
+            log("QUICK    $minutes min (cost ${(minutes * quickMult).toInt()} min quota)  reason: $reason")
+            return null
+        }
+        if (minutes * 60 > remaining) {
+            var extra = ""
+            if (loanLeft >= 60) extra = tr("紧急借贷最多还能借 {max}.", "max" to fmtHm(loanLeft))
+            return tr("今天只剩 {left} 了.", "left" to fmtHm(remaining)) + extra
+        }
+        val rate = cooldownRate.coerceIn(0.0, 1.0)
+        pending = NetRequest(minutes, clock() + (cooldown * rate * 1000).toLong(), reason, false)
+        log("REQUEST  $minutes min" + (if (rate < 1.0) " (on break, cooldown ${numText(rate)}x)" else "") + "  reason: $reason")
+        return null
+    }
+
+    fun convertToQuick(): String? {
+        val p = pending ?: return tr("没有等待中的申请.")
+        if (p.quick) return tr("这个申请已经是快速访问了.")
+        canQuick(p.minutes.toDouble())?.let { return it }
+        pending = NetRequest(p.minutes, clock(), p.reason, true)
+        log("QUICK    upgrade ${p.minutes} min (cost ${(p.minutes * quickMult).toInt()} min quota)")
+        return null
+    }
+
+    fun cancel() {
+        pending?.let { log("CANCEL   ${it.minutes} min ${if (it.quick) "quick " else ""}request") }
+        pending = null
+    }
+
+    fun endEarly() {
+        if (devMode) return
+        if (online) log("END      early, ${grantLeft.toInt()}s unused")
+        resetGrant()
+        backend(false)
+        save()
+    }
+
+    private fun resetGrant() {
+        grantLeft = 0.0
+        grantRate = 1.0
+        grantQuick = false
+        if (session != null) {
+            session = null
+            saveUsage()
+        }
+    }
+
+    /** 程序启动 / 结束时: 排队中的申请取消, 进行中的会话结束, 断网. */
+    fun shutdown() {
+        pending = null
+        resetGrant()
+        save()
+        backend(false)
+    }
+
+    /** 重置: 不再记录任何东西. */
+    fun release() {
+        dead = true
+        pending = null
+        grantLeft = 0.0
+    }
+
+    fun devChanged() {
+        pending = null
+        resetGrant()
+        sinceEnforce = 0.0
+        log(if (devMode) "DEV      network restrictions released" else "DEV      fail-closed restored")
+        backend(false)
+    }
+
+    private fun rollover(today: String) {
+        date = today
+        debt = maxOf(0.0, tomorrowUsed)
+        tomorrowUsed = 0.0
+        bonus = 0.0
+        used = 0.0
+        save()
+    }
+
+    /** 大约每秒调用一次. 返回 "started" / "ended" / null. */
+    fun tick(dtIn: Double): String? {
+        if (dead) return null
+        if (devMode) {
+            if (pending != null) {
+                pending = null
+                log("DEV      pending request dropped (developer mode)")
+            }
+            return null
+        }
+        val today = LocalDate.now().key()
+        if (today != date) rollover(today)
+
+        var event: String? = null
+        val p = pending
+        if (p != null && clock() >= p.at) {
+            pending = null
+            resetGrant()
+            val rate = if (p.quick) maxOf(1.0, quickMult) else 1.0
+            val secs = minOf(p.minutes * 60.0, remaining / rate)
+            if (secs > 0) {
+                grantLeft = secs
+                grantRate = rate
+                grantQuick = p.quick
+                openSession(p.reason, p.quick, p.minutes)
+                backend(false)
+                save()
+                log("START    ${(secs / 60).toInt()} min granted" + if (p.quick) " (quick, ${numText(rate)}x)" else "")
+                event = "started"
+            }
+        }
+
+        val dtRaw = maxOf(0.0, dtIn)
+        sinceEnforce += dtRaw
+        if (grantLeft > 0) {
+            val dt = minOf(dtRaw, tickClamp, grantLeft)
+            grantLeft -= dt
+            countOnline(dt)
+            used += dt * grantRate
+            sinceSave += dt
+            if (grantLeft <= 1e-6) {
+                resetGrant()
+                backend(false)
+                save()
+                log("END      time is up")
+                event = "ended"
+            } else if (sinceSave >= 5) {
+                save()
+            }
+        }
+        if (sinceEnforce >= enforceEvery) {
+            sinceEnforce = 0.0
+            backend(true)
+        }
+        return event
+    }
+}

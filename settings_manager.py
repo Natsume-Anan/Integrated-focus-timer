@@ -188,6 +188,20 @@ SETTINGS_SCHEMA = [
         "desc": "即时生效.界面配色:经典蓝白,或参考 Claude 的米白 / 炭灰配色.",
     },
     {
+        "key": "UPDATE_CHECK", "label": "打开时检查更新",
+        "kind": "choice", "apply": APPLY_INSTANT,
+        "choices": [("1", "开启 (ON)"), ("0", "关闭 (OFF)")],
+        "fmt": lambda v: "ON" if v else "OFF",
+        "desc": "即时生效.每次打开程序时从 GitHub 检查有没有新版本.",
+    },
+    {
+        "key": "UPDATE_AUTO", "label": "自动更新",
+        "kind": "choice", "apply": APPLY_INSTANT,
+        "choices": [("1", "开启 (ON)"), ("0", "关闭 (OFF)")],
+        "fmt": lambda v: "ON" if v else "OFF",
+        "desc": "即时生效.发现新版本时自动下载并安装, 重启后生效.",
+    },
+    {
         "key": "CHIME_WAV", "label": "整点提示音",
         "kind": "combo", "apply": APPLY_INSTANT,
         "choices": [

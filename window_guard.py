@@ -18,6 +18,13 @@ foreground_program() 返回当前前台窗口属于哪个程序 (exe 名, 不带
 桌面, 任务栏, 文件资源管理器, 命令行窗口, 锁屏, 以及没有前台窗口时返回 BLANK (空白).
 OIT 自己的窗口返回 "OIT". 记时间的部分在 DataManager.add_window_time.
 
+Rules 页的应用名单 (前台窗口)
+────────────────────────────
+check_focus_rules() 每秒看一次前台窗口: 它的程序在黑名单里 (黑名单模式), 或者不在白名单里
+(白名单模式, 离线时) 就立即关掉它 (发给它的顶层窗口, 同样是 WM_CLOSE).
+系统界面, 文件资源管理器, 命令行, 任务管理器, 设置, OIT 自己 (含卸载程序) 永远不关;
+前台是对话框 (例如"是否保存") 时先不关, 等对话框关掉再说.
+
     python window_guard.py          自检 (用假的窗口列表, 不碰真实窗口)
 """
 
@@ -206,6 +213,63 @@ def foreground_program() -> str:
     return classify_foreground(foreground_window())
 
 
+# ───────────────────────── 应用名单: 关掉前台窗口 ─────────────────────────
+
+# 不管名单怎么写都不关的程序: 系统界面, 资源管理器, 命令行, 任务管理器, 设置, 登录 / 权限确认
+PROTECTED_EXES = BLANK_EXES | {
+    "taskmgr.exe", "systemsettings.exe", "searchhost.exe", "searchapp.exe",
+    "startmenuexperiencehost.exe", "shellexperiencehost.exe", "applicationframehost.exe",
+    "textinputhost.exe", "dwm.exe", "csrss.exe", "winlogon.exe", "logonui.exe",
+    "consent.exe", "credentialuibroker.exe", "lockapp.exe",
+}
+
+
+def focus_violation(w, allowed, own_pid: int = None, app_name: str = "Obliphur's Integrated Terminal"):
+    """w: {hwnd, root, cls, pid, exe, title, owned}; allowed(exe) -> (允许?, 原因).
+    该关时返回原因, 否则 None."""
+    own_pid = os.getpid() if own_pid is None else own_pid
+    if not w or not w.get("hwnd"):
+        return None
+    if w.get("cls") in BLANK_CLASSES or (w.get("pid") and w.get("pid") == own_pid):
+        return None
+    exe = str(w.get("exe") or "").strip().lower()
+    if not exe or exe in PROTECTED_EXES:
+        return None
+    # 单独运行的卸载程序也是 OIT 的窗口
+    if exe in ("python.exe", "pythonw.exe") and app_name in str(w.get("title") or ""):
+        return None
+    if w.get("owned"):
+        return None
+    ok, why = allowed(exe)
+    return None if ok else why
+
+
+def _root_window(hwnd):
+    _ct, _wt, user32, _dwm, _p = _load_api()
+    user32.GetAncestor.argtypes = [_wt.HWND, _wt.UINT]
+    user32.GetAncestor.restype = _wt.HWND
+    return user32.GetAncestor(hwnd, 3) or hwnd          # GA_ROOTOWNER
+
+
+def check_focus_rules(allowed, close=close_window):
+    """前台窗口违反应用名单就关掉它. 返回 (exe, 标题, 原因) 或 None."""
+    w = foreground_window()
+    if not w:
+        return None
+    try:
+        d = _describe(w["hwnd"])
+        w.update(title=d["title"], owned=d["owned"])
+    except Exception:
+        pass
+    why = focus_violation(w, allowed)
+    if why is None:
+        return None
+    root = _root_window(w["hwnd"])
+    if not close(root):
+        return None
+    return w.get("exe") or "", str(w.get("title") or ""), why
+
+
 # ───────────────────────── 检查一次 ─────────────────────────
 
 def taskbar_windows(windows=None, own_pid: int = None) -> list:
@@ -306,6 +370,23 @@ def _selftest():
                                   exe="WindowsTerminal.exe"), own_pid=99) == BLANK
     assert classify_foreground(fg(pid=99, exe="python.exe"), own_pid=99) == OWN_NAME
     assert classify_foreground(fg(exe=""), own_pid=99) == UNKNOWN
+
+    # 应用名单: 前台窗口
+    black = lambda exe: (exe != "steam.exe", "blacklist-app")
+    white = lambda exe: (exe in ("code.exe",), "not-whitelisted")
+    assert focus_violation(fg(exe="steam.exe"), black, own_pid=99) == "blacklist-app"
+    assert focus_violation(fg(exe="Steam.EXE"), black, own_pid=99) == "blacklist-app"
+    assert focus_violation(fg(exe="chrome.exe"), black, own_pid=99) is None
+    assert focus_violation(fg(exe="chrome.exe"), white, own_pid=99) == "not-whitelisted"
+    assert focus_violation(fg(exe="code.exe"), white, own_pid=99) is None
+    for safe in ("explorer.exe", "taskmgr.exe", "cmd.exe", "SystemSettings.exe"):
+        assert focus_violation(fg(exe=safe), white, own_pid=99) is None, safe
+    assert focus_violation(fg(pid=99, exe="python.exe"), white, own_pid=99) is None, "OIT 自己"
+    assert focus_violation(dict(fg(exe="python.exe"), title="Uninstall Obliphur's Integrated Terminal"),
+                           white, own_pid=99) is None, "卸载程序"
+    assert focus_violation(dict(fg(exe="steam.exe"), owned=True), black, own_pid=99) is None, "对话框先不关"
+    assert focus_violation(fg(exe=""), white, own_pid=99) is None, "查不到程序的不关"
+    assert focus_violation(None, white, own_pid=99) is None
     return "window_guard selftest OK"
 
 

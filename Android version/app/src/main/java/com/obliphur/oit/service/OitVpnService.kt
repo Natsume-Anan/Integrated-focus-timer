@@ -1,0 +1,379 @@
+package com.obliphur.oit.service
+
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
+import android.net.VpnService
+import android.os.ParcelFileDescriptor
+import android.os.SystemClock
+import android.system.Os
+import android.system.OsConstants
+import android.system.StructPollfd
+import com.obliphur.oit.OitApp
+import com.obliphur.oit.core.VpnPlan
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.InetAddress
+import java.net.InetSocketAddress
+import java.time.LocalDateTime
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
+
+/** 拦截记录: 本次运行的放行 / 拦截次数和最近的拦截 (MECHANICS 4.6). 只在内存里. */
+object BlockLog {
+    class Event(val host: String, val app: String, var time: LocalDateTime, var count: Int, var mono: Long)
+
+    @Volatile var allowed = 0L
+    @Volatile var blocked = 0L
+    val events = ArrayDeque<Event>()
+    /** 本次运行查询过的域名和次数, 给 AI 建议用 (不写文件). */
+    val domains = ConcurrentHashMap<String, Int>()
+
+    @Synchronized
+    fun add(host: String, app: String) {
+        blocked++
+        val now = SystemClock.elapsedRealtime()
+        val last = events.firstOrNull()
+        // 同一个网站加同一个应用在 2 秒内重复被拦, 合并为一条
+        if (last != null && last.host == host && last.app == app && now - last.mono <= 2000) {
+            last.count++; last.mono = now; last.time = LocalDateTime.now(); return
+        }
+        events.addFirst(Event(host, app, LocalDateTime.now(), 1, now))
+        while (events.size > 200) events.removeLast()
+    }
+
+    fun seen(host: String) {
+        val h = host.removePrefix("www.")
+        if (domains.size < 3000 || domains.containsKey(h)) domains.merge(h, 1) { a, b -> a + b }
+    }
+
+    @Synchronized
+    fun recent(n: Int) = events.take(n).toList()
+
+    @Synchronized
+    fun clear() {
+        allowed = 0; blocked = 0; events.clear(); domains.clear()
+    }
+}
+
+/**
+ * 断网的实际执行者 (MECHANICS 14.2). 一个 VpnService, 按 [VpnPlan] 建立接口:
+ *  - BlockAll / BlockOnly: 默认路由进 VPN, 读出来的包直接丢掉 = 断网;
+ *  - Dns: 只把一个假的 DNS 地址路由进来, 按名单回 NXDOMAIN 或转发给真正的 DNS.
+ * 换计划时先建好新接口再关旧的, 切换过程中不留空档.
+ */
+class OitVpnService : VpnService() {
+    companion object {
+        const val ACTION_APPLY = "com.obliphur.oit.VPN_APPLY"
+        const val ACTION_STOP = "com.obliphur.oit.VPN_STOP"
+        const val ACTION_REBUILD = "com.obliphur.oit.VPN_REBUILD"
+
+        private const val V4_ADDR = "10.111.222.1"
+        private const val V4_DNS = "10.111.222.2"
+        private const val V6_ADDR = "fd00:111:222::1"
+        private const val V6_DNS = "fd00:111:222::2"
+
+        /** 0.0.0.0/0 去掉 10/8, 172.16/12, 192.168/16, 169.254/16, 127/8, 0/8 和 224/3 之后剩下的网段. */
+        private val WAN_V4 = listOf(
+            "1.0.0.0" to 8, "2.0.0.0" to 7, "4.0.0.0" to 6, "8.0.0.0" to 7, "11.0.0.0" to 8, "12.0.0.0" to 6,
+            "16.0.0.0" to 4, "32.0.0.0" to 3, "64.0.0.0" to 3, "96.0.0.0" to 4, "112.0.0.0" to 5, "120.0.0.0" to 6,
+            "124.0.0.0" to 7, "126.0.0.0" to 8, "128.0.0.0" to 3, "160.0.0.0" to 5, "168.0.0.0" to 8, "169.0.0.0" to 9,
+            "169.128.0.0" to 10, "169.192.0.0" to 11, "169.224.0.0" to 12, "169.240.0.0" to 13, "169.248.0.0" to 14,
+            "169.252.0.0" to 15, "169.255.0.0" to 16, "170.0.0.0" to 7, "172.0.0.0" to 12, "172.32.0.0" to 11,
+            "172.64.0.0" to 10, "172.128.0.0" to 9, "173.0.0.0" to 8, "174.0.0.0" to 7, "176.0.0.0" to 4,
+            "192.0.0.0" to 9, "192.128.0.0" to 11, "192.160.0.0" to 13, "192.169.0.0" to 16, "192.170.0.0" to 15,
+            "192.172.0.0" to 14, "192.176.0.0" to 12, "192.192.0.0" to 10, "193.0.0.0" to 8, "194.0.0.0" to 7,
+            "196.0.0.0" to 6, "200.0.0.0" to 5, "208.0.0.0" to 4,
+        )
+
+        @Volatile var instance: OitVpnService? = null
+        @Volatile var plan: VpnPlan? = null
+            private set
+        /** 自检发现断网没有生效 (离线时 OIT 自己还能连上外网). */
+        @Volatile var leak = false
+            private set
+        @Volatile var lastError: String? = null
+            private set
+
+        fun apply(ctx: Context) {
+            ctx.startService(Intent(ctx, OitVpnService::class.java).setAction(ACTION_APPLY))
+        }
+
+        /** 关掉现有的 VPN 再重新建立 (自检发现断网没有生效时). */
+        fun rebuild(ctx: Context) {
+            ctx.startService(Intent(ctx, OitVpnService::class.java).setAction(ACTION_REBUILD))
+        }
+
+        fun stop(ctx: Context) {
+            if (instance != null) ctx.startService(Intent(ctx, OitVpnService::class.java).setAction(ACTION_STOP))
+        }
+    }
+
+    private inner class Session(val pfd: ParcelFileDescriptor, val plan: VpnPlan) {
+        @Volatile var alive = true
+        private val out = FileOutputStream(pfd.fileDescriptor)
+        val thread = Thread({ loop() }, "oit-vpn").apply { isDaemon = true }
+
+        private fun loop() {
+            val input = FileInputStream(pfd.fileDescriptor)
+            val buf = ByteArray(32767)
+            val pfds = arrayOf(StructPollfd().apply { fd = pfd.fileDescriptor; events = OsConstants.POLLIN.toShort() })
+            while (alive) {
+                try {
+                    pfds[0].revents = 0
+                    if (Os.poll(pfds, 1000) <= 0) continue
+                    val n = input.read(buf)
+                    if (n <= 0) continue
+                    if (plan is VpnPlan.Dns) handle(buf, n, plan.filter)
+                    // BlockAll / BlockOnly: 丢掉
+                } catch (e: Exception) {
+                    if (!alive) break
+                    SystemClock.sleep(50)
+                }
+            }
+        }
+
+        private fun handle(buf: ByteArray, n: Int, filter: Boolean) {
+            val p = Packets.parseUdp(buf, n) ?: return
+            if (p.dstPort != 53) return
+            val host = Dns.qname(p.payload) ?: return
+            BlockLog.seen(host)
+            if (filter) {
+                val pkgs = owner(p)
+                val core = OitApp.instance.core
+                val (ok, _) = core.rules.snap.decide(host, pkgs, core.net.online, core.settings.str("FILTER_MODE"))
+                if (!ok) {
+                    BlockLog.add(host, pkgs.firstOrNull() ?: "?")
+                    Dns.nxdomain(p.payload)?.let { write(Packets.buildReply(p, it)) }
+                    return
+                }
+            }
+            BlockLog.allowed++
+            pool.execute { forward(p) }
+        }
+
+        fun write(b: ByteArray) {
+            if (!alive) return
+            synchronized(out) { runCatching { out.write(b) } }
+        }
+
+        private fun forward(p: UdpPacket) {
+            for (server in upstream()) {
+                try {
+                    DatagramSocket().use { s ->
+                        protect(s)
+                        s.soTimeout = 5000
+                        s.send(DatagramPacket(p.payload, p.payload.size, InetSocketAddress(server, 53)))
+                        val rb = ByteArray(4096)
+                        val r = DatagramPacket(rb, rb.size)
+                        s.receive(r)
+                        write(Packets.buildReply(p, rb.copyOf(r.length)))
+                        return
+                    }
+                } catch (_: Exception) {
+                }
+            }
+        }
+
+        fun close() {
+            alive = false
+            runCatching { pfd.close() }
+        }
+    }
+
+    private val pool = Executors.newFixedThreadPool(8)
+    private var session: Session? = null
+
+    // 发起 DNS 查询的应用: uid → 包名, 缓存 30 秒
+    private val uidCache = ConcurrentHashMap<Int, Pair<Long, List<String>>>()
+    private fun owner(p: UdpPacket): List<String> {
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val uid = try {
+            cm.getConnectionOwnerUid(OsConstants.IPPROTO_UDP,
+                InetSocketAddress(p.srcAddr, p.srcPort), InetSocketAddress(p.dstAddr, p.dstPort))
+        } catch (e: Exception) {
+            -1
+        }
+        if (uid < 0) return emptyList()
+        val now = SystemClock.elapsedRealtime()
+        uidCache[uid]?.let { if (now - it.first < 30_000) return it.second }
+        val pkgs = packageManager.getPackagesForUid(uid)?.toList() ?: emptyList()
+        uidCache[uid] = now to pkgs
+        return pkgs
+    }
+
+    // 真正的 DNS: 底层网络 (Wi-Fi / 移动数据) 的 DNS, 缓存 10 秒; 拿不到就用公共 DNS
+    private var upCache: Pair<Long, List<InetAddress>>? = null
+    private fun upstream(): List<InetAddress> {
+        val now = SystemClock.elapsedRealtime()
+        upCache?.let { if (now - it.first < 10_000) return it.second }
+        val cm = getSystemService(ConnectivityManager::class.java)
+        val found = mutableListOf<InetAddress>()
+        @Suppress("DEPRECATION")
+        for (n in cm.allNetworks) {
+            val caps = cm.getNetworkCapabilities(n) ?: continue
+            if (caps.hasTransport(NetworkCapabilities.TRANSPORT_VPN)) continue
+            if (!caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET)) continue
+            cm.getLinkProperties(n)?.dnsServers?.let { found.addAll(it) }
+        }
+        found.addAll(listOf("223.5.5.5", "1.1.1.1", "8.8.8.8").map { InetAddress.getByName(it) })
+        val list = found.distinct()
+        upCache = now to list
+        return list
+    }
+
+    override fun onCreate() {
+        super.onCreate()
+        instance = this
+    }
+
+    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // stopSelf(startId): 之后又收到 APPLY (例如重置后马上重新接管) 时不会把新的 VPN 关掉
+        if (intent?.action == ACTION_STOP) {
+            teardown()
+            stopSelf(startId)
+            return START_NOT_STICKY
+        }
+        // ACTION_APPLY, 或系统 (始终开启的 VPN) 拉起的
+        val app = OitApp.instance
+        val want = app.core.vpnPlan(::installed, packageName)
+        if (want == VpnPlan.None) {
+            teardown(); stopSelf(startId); return START_NOT_STICKY
+        }
+        when {
+            intent?.action == ACTION_REBUILD -> {
+                teardown(); establish(want)
+            }
+            want != plan || session == null -> establish(want)
+            else -> if (want !is VpnPlan.Dns) verifyBlocked(retry = !leak)
+        }
+        return START_STICKY
+    }
+
+    private fun installed(pkg: String): Boolean = try {
+        packageManager.getPackageInfo(pkg, 0); true
+    } catch (e: PackageManager.NameNotFoundException) {
+        false
+    }
+
+    private fun blocking(p: VpnPlan?) = p is VpnPlan.BlockAll || p is VpnPlan.BlockOnly
+
+    private fun establish(want: VpnPlan, retry: Boolean = true) {
+        val p = want
+        // 在"只接管 DNS"和"全部路由进 VPN"之间切换时, 先关掉旧接口再建新的.
+        // 原地更新路由在部分系统上不生效, 会出现"断网方式是 Adapter 但离线时仍能上网".
+        if (session != null && blocking(plan) != blocking(p)) {
+            session?.close()
+            session = null
+            plan = null
+        }
+        val b = Builder().setSession("OIT").setMtu(1500).setBlocking(false)
+        b.setMetered(false)
+        b.addAddress(V4_ADDR, 32)
+        b.addAddress(V6_ADDR, 128)
+        when (p) {
+            is VpnPlan.BlockAll -> {
+                if (p.keepLan) {
+                    // 除了局域网 / 链路本地 / 组播以外的全部地址 (Proxy 模式下设备同步还要用局域网)
+                    for ((a, n) in WAN_V4) b.addRoute(a, n)
+                    b.addRoute("2000::", 3)
+                } else {
+                    b.addRoute("0.0.0.0", 0); b.addRoute("::", 0)
+                }
+                p.exclude.forEach { runCatching { b.addDisallowedApplication(it) } }
+            }
+            is VpnPlan.BlockOnly -> {
+                b.addRoute("0.0.0.0", 0); b.addRoute("::", 0)
+                val n = p.include.count { runCatching { b.addAllowedApplication(it) }.isSuccess }
+                if (n == 0) return establish(VpnPlan.Dns(false, 0))
+            }
+            is VpnPlan.Dns -> {
+                b.addDnsServer(V4_DNS); b.addRoute(V4_DNS, 32)
+                b.addDnsServer(V6_DNS); b.addRoute(V6_DNS, 128)
+            }
+            VpnPlan.None -> return
+        }
+        val pfd = try {
+            b.establish()
+        } catch (e: Exception) {
+            lastError = e.toString()
+            null
+        }
+        if (pfd == null) {
+            if (lastError == null) lastError = "establish() returned null"
+            // 没有 VPN 权限 (被别的 VPN 应用占用或被撤销): 交给界面提示
+            OitApp.instance.vpnFailed()
+            return
+        }
+        lastError = null
+        val old = session
+        session = Session(pfd, p).also { it.thread.start() }
+        plan = p
+        old?.close()
+        leak = false
+        OitApp.instance.vpnChanged()
+        if (blocking(p)) verifyBlocked(retry)
+    }
+
+    /**
+     * 自检: 全部断网时 OIT 自己也在 VPN 里, 直接连一个公共 DNS 的 53 端口应该连不上.
+     * 连上了说明系统没有按 VPN 的路由走 —— 关掉重建一次, 还不行就在界面上标出来.
+     */
+    private fun verifyBlocked(retry: Boolean = false) {
+        val p = plan as? VpnPlan.BlockAll ?: return
+        if (packageName in p.exclude) return
+        Thread({
+            SystemClock.sleep(1500)
+            val leaked = listOf("223.5.5.5", "1.1.1.1").any { ip ->
+                runCatching {
+                    java.net.Socket().use { it.connect(InetSocketAddress(ip, 53), 2500) }
+                    true
+                }.getOrDefault(false)
+            }
+            android.os.Handler(mainLooper).post {
+                if (plan != p) return@post
+                if (leaked && retry) {
+                    teardown(); establish(p, retry = false)
+                } else if (leak != leaked) {
+                    leak = leaked
+                    if (leaked) lastError = "traffic is not going through the VPN"
+                    OitApp.instance.vpnChanged()
+                }
+            }
+        }, "oit-vpn-check").apply { isDaemon = true }.start()
+    }
+
+    private fun teardown() {
+        leak = false
+        session?.close()
+        session = null
+        plan = null
+        uidCache.clear()
+        OitApp.instance.vpnChanged()
+    }
+
+    override fun onRevoke() {
+        teardown()
+        OitApp.instance.vpnFailed()
+        stopSelf()
+    }
+
+    override fun onDestroy() {
+        teardown()
+        pool.shutdownNow()
+        if (instance === this) instance = null
+        super.onDestroy()
+    }
+}
+
+/** 规则页显示用: 一个包名的应用名; 没装就原样返回. */
+fun appLabel(ctx: Context, pkg: String): String = try {
+    val pm = ctx.packageManager
+    pm.getApplicationLabel(pm.getApplicationInfo(pkg, 0)).toString()
+} catch (e: Exception) {
+    pkg
+}

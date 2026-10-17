@@ -86,7 +86,10 @@ def daily_quota(day) -> float:
 
 
 
-APP_NAME = "Obliphur's Integrated Terminal"   
+APP_NAME = "Obliphur's Integrated Terminal"
+APP_VERSION = "1.1.0"                         # 和 GitHub 上发布的版本号比较 (见 updater.py)
+UPDATE_CHECK = 1                              # 打开程序时检查更新
+UPDATE_AUTO = 1                               # 发现新版本时自动下载安装
 OLD_APP_DIR = "mrsTimer"
 FILL_WINDOW = timedelta(hours=1)              
 AUTO_TEXT = "Sleeping"
@@ -218,6 +221,8 @@ DEFAULT_SETTINGS = {
     "WINDOW_LIMIT": WINDOW_LIMIT,
     "WINDOW_FOCUS_ENABLED": WINDOW_FOCUS_ENABLED,
     "FONT_SCALE": 0.9,
+    "UPDATE_CHECK": UPDATE_CHECK,
+    "UPDATE_AUTO": UPDATE_AUTO,
     "THEME": "classic",
     "TICK_CLAMP": TICK_CLAMP,
     "FILL_WINDOW": int(FILL_WINDOW.total_seconds()),

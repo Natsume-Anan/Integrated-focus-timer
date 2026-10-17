@@ -13,6 +13,9 @@ import config
 import i18n
 import toast
 import window_guard
+import devsync
+import updater
+from sync_local import PcLocal
 from config import (
     COLORS, APP_NAME, IDLE, RUNNING, READY_BREAK, ON_BREAK,
     ensure_builtin_chime, load_json_file, save_json_file,
@@ -124,6 +127,12 @@ class BreakTimerApp:
         self.window_job = None        # 任务栏窗口数上限的检查 (与界面无关, 重建界面时不中断)
         self.window_focus_job = None  # 窗口使用时间统计: 每隔几秒看一次前台程序
         self._window_focus_ticks = 0
+        self.app_rules_job = None     # Rules 页的应用名单: 每秒看一次前台窗口
+        # 设备同步 (MECHANICS 15): 计时器此刻的状态是几台设备共用的
+        self.timer_owner = ""         # 最后改动计时器状态的设备 (空 = 本机)
+        self.break_end_wall = None    # 这次休息结束的时刻 (墙上时间, 同步用)
+        self.last_op = time.time() * 1000   # 本机最后一次有人操作的时刻 (毫秒)
+        self._app_rules_toast = {}    # exe -> 上次提示的时刻 (同一个程序 5 秒内只提示一次)
         self.next_hour = None
         self.current_page = "timer"
 
@@ -143,6 +152,16 @@ class BreakTimerApp:
         self._apply_theme()
         self.dm.hour_enabled = bool(self.settings.value("HOUR_LOG_ENABLED"))
         self.net = NetGuard(self.dm.data_dir)
+        # 设备同步 (MECHANICS 15): 其他设备的账并进额度和统计
+        self.sync_runner = devsync.MainRunner()
+        self.sync = devsync.SyncService(self.dm.data_dir, PcLocal(self), self.sync_runner)
+        self.dm.peer_ledgers = self.sync.peer_ledgers
+        self.net.peer_net = lambda: devsync.peer_net(self.sync.peer_ledgers(), self.net.date)
+        self.net.peer_usage = lambda: [r for led in self.sync.peer_ledgers()
+                                       for r in (led.get("usage") or [])]
+        self.sync_job = None
+        self.updater = updater.Updater()
+        self._update_retry = False     # 打开时检查失败了 (例如 Adapter 离线): 下一次联网时再查
         self._net_view = None
         self._net_last = time.monotonic()
         self._apply_notice = None
@@ -171,8 +190,18 @@ class BreakTimerApp:
         self._net_tick()
         self.window_job = self.root.after(5000, self._schedule_window_guard)
         self.window_focus_job = self.root.after(self._window_focus_ms(), self._window_focus_tick)
+        self.app_rules_job = self.root.after(1000, self._schedule_app_rules)
+        try:
+            self.sync.start()
+        except Exception as e:
+            self._log_window(f"ERROR    sync start {type(e).__name__}: {e}")
+        self._pump_sync()
+        if getattr(config, "UPDATE_CHECK", 1):
+            self.root.after(3000, lambda: self.check_update(auto=True))
 
         self.root.bind("<Map>", self._on_window_map)
+        self.root.bind_all("<ButtonPress>", self._touch, add="+")
+        self.root.bind_all("<KeyPress>", self._touch, add="+")
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
         # 关机 / 注销时 Windows 会先通知窗口; 程序因异常退出时 atexit 也会跑. 都先存下专注状态
         self.root.protocol("WM_SAVE_YOURSELF", self._save_focus_now)
@@ -442,12 +471,15 @@ class BreakTimerApp:
             on_language=self.on_language_changed,
             on_font_scale=self.on_font_scale_changed,
             on_theme=self.on_theme_changed,
-            on_end_setup=self.end_setup_period
+            on_end_setup=self.end_setup_period,
+            updater=self.updater,
+            on_update_check=lambda: self.check_update(auto=False),
+            on_update_install=self.install_update
         )
         self._prepare_page(self.pages["settings"])
         yield
         self.pages["rules"] = RulesPage(
-            self.content, self.net.proxy, settings=self.settings,
+            self.content, self.net.proxy, settings=self.settings, sync=self.sync,
             on_changed=self.on_settings_changed,
             on_open_settings=lambda: self.show_page("settings")
         )
@@ -540,7 +572,9 @@ class BreakTimerApp:
         for job in (self.midnight_job, self.hourly_job, self.update_job,
                     self.net_job, getattr(self, "apply_job", None),
                     getattr(self, "window_job", None),
-                    getattr(self, "window_focus_job", None)):
+                    getattr(self, "window_focus_job", None),
+                    getattr(self, "app_rules_job", None),
+                    getattr(self, "sync_job", None)):
             if not job:
                 continue
             try:
@@ -549,6 +583,7 @@ class BreakTimerApp:
                 pass
         self.midnight_job = self.hourly_job = self.update_job = None
         self.net_job = self.apply_job = self.window_job = self.window_focus_job = None
+        self.app_rules_job = None
 
     def show_page(self, key: str):
         # 先在冻结状态下刷新目标页、再置顶, 最后整窗一次性显示 —— 避免切换时的撕裂
@@ -650,6 +685,10 @@ class BreakTimerApp:
             fg=COLORS["text_dim"], font=config.font("body")
         )
         self.lbl_yesterday.pack(side="left")
+        # 绑定的其他设备此刻的状态 (MECHANICS 15)
+        self.lbl_peers = tk.Label(inner, text="", bg=card, fg=COLORS["text_dim"],
+                                  font=config.font("small"), anchor="w", justify="left")
+        self.lbl_peers.pack(anchor="w", pady=(6, 0))
 
         btn_row = tk.Frame(body, bg=bg)
         btn_row.pack(fill="x", padx=26, pady=(6, 22))
@@ -687,6 +726,7 @@ class BreakTimerApp:
     def on_action(self):
         """主按钮: 空闲 → 开始专注; 专注中 → 结束专注 (直接进入休息);
         休息中 → 暂停休息并马上开始专注."""
+        self._mine()
         if self.state == IDLE:
             self._enter_focus(datetime.now(), time.monotonic())
 
@@ -719,6 +759,7 @@ class BreakTimerApp:
 
     def on_break_button(self):
         """副按钮: 空闲 → 用积攒的休息时间直接开始休息; 休息中 → 暂停休息."""
+        self._mine()
         if self.state == IDLE:
             if self.break_carry <= 0:
                 toast.info(tr("还没有积攒的休息时间."))
@@ -823,8 +864,11 @@ class BreakTimerApp:
         d = self._bonus_state()
         used = int(d.get("bonus_used", 0) or 0) if d.get("bonus_week") == week else 0
         self._timer_extra = {"bonus_week": week, "bonus_used": used + add}
+        self._mine()
         if self.state == ON_BREAK:
             self.countdown_seconds += add          # 正在休息: 直接加到这次休息里
+            if self.break_end_wall is not None:
+                self.break_end_wall += timedelta(seconds=add)
             self._bonus_break_active = True
             self._save_timer_state()
             where = tr("已加到这次休息里.")
@@ -861,7 +905,8 @@ class BreakTimerApp:
             self._set_break_carry(0)
         self.countdown_seconds = total
         self.state = ON_BREAK
-        self.break_start_wall = datetime.now()
+        self.break_start_wall = datetime.now().replace(microsecond=0)
+        self.break_end_wall = self.break_start_wall + timedelta(seconds=total)
         if bonus:
             toast.info(tr("这次休息可以随时暂停,剩余时间不打折."),
                        timeout=8000)
@@ -915,6 +960,8 @@ class BreakTimerApp:
         if not silent and self._break_locked():
             toast.warn(tr("网络正在使用,不能暂停休息."))
             return
+        if silent and not self._timer_auto_ok():
+            self.break_start_wall = None
         self._record_break_end()
         left = max(0, int(self.countdown_seconds))
         full = self._bonus_break_active
@@ -958,6 +1005,8 @@ class BreakTimerApp:
         if self.state != IDLE:
             self.idle_since = None          # 已经开始下一轮 (或别的状态), 不再提醒
             return
+        if not self.sync.is_latest_active():
+            return                          # 只在最后有人操作的设备上提醒
         now = datetime.now()
         first = timedelta(seconds=max(1, int(config.IDLE_NUDGE_FIRST)))
         every = timedelta(seconds=max(60, int(config.IDLE_NUDGE_EVERY)))
@@ -1130,6 +1179,7 @@ class BreakTimerApp:
             return
         if self._check_win is not None and not self._check_win.alive():
             self._check_win = None             # 被手动关掉了 = 人还在
+            self._mine()
             self._focus_checks += 1
             self._focus_ok = time.monotonic() - self.start_mono
             self._save_timer_state()
@@ -1138,7 +1188,8 @@ class BreakTimerApp:
         elapsed = time.monotonic() - self.start_mono
         mark = every * (self._focus_checks + 1)
         if elapsed >= mark + grace:
-            self._auto_end_focus(mark + grace)
+            if self._timer_auto_ok():          # 别的设备是主人时等它结束, 结果同步过来
+                self._auto_end_focus(mark + grace)
             return
         if elapsed >= mark and self._check_win is None:
             due = datetime.now() + timedelta(seconds=mark + grace - elapsed)
@@ -1224,6 +1275,8 @@ class BreakTimerApp:
                 self.countdown_seconds -= 1
                 self.update_job = self.root.after(1000, self.update)
             else:
+                if not self._timer_auto_ok():
+                    self.break_start_wall = None      # 这一段由开始休息的那台设备记
                 self._record_break_end()
                 self._bonus_break_active = False
                 toast.success(tr("休息结束,可以开始下一轮了!"))
@@ -1296,7 +1349,9 @@ class BreakTimerApp:
         if not self.dm.hour_enabled:
             self.update_log_badge()
             return
-        self._wait_chime(self._play_chime(), slot)
+        # 绑定了其他设备时, 只有最后有人操作的那台响 (其他设备只标出待填写)
+        chime = self._play_chime() if self.sync.is_latest_active() else None
+        self._wait_chime(chime, slot)
 
     def _play_chime(self):
         if sys.platform != "win32":
@@ -1400,6 +1455,224 @@ class BreakTimerApp:
             lines.append("…")
         toast.warn(tr("窗口超过上限 {x} 个,关闭了:\n{titles}",
                       n=n, x=limit, k=len(closed), titles="\n".join(lines)))
+
+    # ---- 设备同步 (MECHANICS 15) ----
+
+    def _pump_sync(self):
+        """后台线程交过来的改动在这里 (界面线程) 执行."""
+        if self.shutting_down:
+            return
+        self.sync_runner.pump()
+        self.sync_job = self.root.after(100, self._pump_sync)
+
+    # ---- 设备同步: 计时器此刻的状态 (MECHANICS 15.2) ----
+
+    def _touch(self, _e=None):
+        self.last_op = time.time() * 1000
+
+    def _mine(self):
+        """本机改动了计时器状态: 本机成为这个状态的主人 (自动结束 / 记录由主人做)."""
+        self.timer_owner = self.sync.my_id
+        self.last_op = time.time() * 1000
+
+    def _timer_auto_ok(self) -> bool:
+        """自动结束专注, 记下休息这类没人按按钮的操作, 由状态的主人做;
+        主人不在线 (2 分钟没同步) 时本机来做."""
+        owner = self.timer_owner
+        if not owner or owner == self.sync.my_id:
+            return True
+        now = time.time() * 1000
+        return not any(st.get("id") == owner and now - float(st.get("ts", 0)) < devsync.FRESH_MS
+                       for st in self.sync.peer_status())
+
+    def timer_live(self) -> dict:
+        owner = self.timer_owner or self.sync.my_id
+        if self.state == RUNNING and self.start_wall is not None:
+            return {"state": "running", "owner": owner,
+                    "start": self.start_wall.replace(microsecond=0).isoformat(timespec="seconds"),
+                    "checks": int(self._focus_checks), "ok": int(self._focus_ok)}
+        if self.state == ON_BREAK and self.break_end_wall is not None and self.break_start_wall is not None:
+            return {"state": "break", "owner": owner,
+                    "break_start": self.break_start_wall.isoformat(timespec="seconds"),
+                    "break_end": self.break_end_wall.isoformat(timespec="seconds"),
+                    "bonus": bool(self._bonus_break_active)}
+        return {"state": "idle", "owner": owner}
+
+    def adopt_timer(self, live: dict):
+        """别的设备上更新的计时器状态: 照着切换, 不记录本机原来那一段 (那台设备会记)."""
+        if not isinstance(live, dict):
+            return
+        cur = self.timer_live()
+        st, owner = live.get("state"), str(live.get("owner") or "")
+        if st == cur["state"] and live.get("start") == cur.get("start") \
+                and live.get("break_end") == cur.get("break_end"):
+            if st == "running" and int(live.get("checks", 0)) > self._focus_checks:
+                self._close_check_win()         # 在别的设备上确认过"还在吗"了
+                self._focus_checks = int(live.get("checks", 0))
+                self._focus_ok = float(live.get("ok", 0))
+            self.timer_owner = owner
+            self._save_timer_state()
+            return
+        self._close_check_win()
+        self.cancel_update()
+        self.idle_since = None
+        now = datetime.now()
+        try:
+            if st == "running":
+                start = datetime.fromisoformat(live["start"])
+                self.break_start_wall = None
+                self._enter_focus(start, time.monotonic() - (now - start).total_seconds(),
+                                  int(live.get("checks", 0)), float(live.get("ok", 0)))
+            elif st == "break":
+                end = datetime.fromisoformat(live["break_end"])
+                left = int((end - now).total_seconds())
+                if left <= 0:
+                    self.reset_to_idle()
+                else:
+                    self.state = ON_BREAK
+                    self.start_wall = None
+                    self.break_start_wall = datetime.fromisoformat(live["break_start"])
+                    self.break_end_wall = end
+                    self.countdown_seconds = left
+                    self._bonus_break_active = bool(live.get("bonus"))
+                    self._show_on_break()
+                    self.schedule_update()
+            else:
+                self.break_start_wall = None
+                self.reset_to_idle()
+        except (KeyError, TypeError, ValueError):
+            return
+        self.timer_owner = owner
+        self._save_timer_state()
+        self.refresh_display()
+
+    # ---- 更新 (MECHANICS 16) ----
+
+    def _on_main(self, fn):
+        """后台线程完成后回到界面线程."""
+        try:
+            self.sync_runner.call(fn)
+        except Exception:
+            pass
+
+    def check_update(self, auto: bool):
+        if self.shutting_down:
+            return
+        self.updater.check(done=lambda u: self._on_main(lambda: self._after_check(auto)))
+        self._refresh_if_visible("settings")
+
+    def _after_check(self, auto: bool):
+        u = self.updater
+        self._refresh_if_visible("settings")
+        if u.state == "available":
+            if auto and getattr(config, "UPDATE_AUTO", 1):
+                self.install_update()
+                return
+            toast.notice(tr("⬆  发现新版本"),
+                         tr("当前版本 {v}", v=config.APP_VERSION) + "\n" + tr("发现新版本 {v}", v=u.latest_text), [
+                             (tr("立即更新"), self.install_update, True), (tr("稍后"), None, False)])
+        elif u.state == "latest" and not auto:
+            toast.info(tr("已是最新版本") + f" ({config.APP_VERSION})")
+        elif u.state == "error":
+            if auto:
+                self._update_retry = True
+            else:
+                toast.warn(tr("检查 / 更新失败: {e}", e=u.error))
+
+    def install_update(self):
+        if self.updater.state != "available":
+            return
+        toast.info(tr("正在下载更新…"))
+        self.updater.install(done=lambda u: self._on_main(self._after_install))
+        self._refresh_if_visible("settings")
+
+    def _after_install(self):
+        u = self.updater
+        self._refresh_if_visible("settings")
+        if u.state == "installed":
+            self._log_notice(f"UPDATE installed {u.latest_text}")
+            toast.notice(tr("⬆  已更新"), tr("已更新到 {v}, 重启后生效", v=u.latest_text), [
+                (tr("立即重启"), self._restart_for_update, True), (tr("稍后"), None, False)])
+        elif u.state == "dev":
+            toast.warn(tr("这是 git 仓库里的开发版本, 不会自动覆盖, 请用 git pull 更新"))
+        elif u.state == "error":
+            toast.warn(tr("检查 / 更新失败: {e}", e=u.error))
+
+    def _restart_for_update(self):
+        self.restart_requested = True       # main.py 在主循环结束后重新打开程序
+        self.on_close()
+
+    def on_sync_changed(self):
+        self.refresh_display()
+        self.update_log_badge()
+        self.update_settings_badge()
+        self._refresh_if_visible("rules", "stats", "cal", "log")
+
+    def after_sync_settings(self, keys):
+        """同步来的设置生效之后: 和本机修改生效时一样刷新."""
+        if "LANGUAGE" in keys or "THEME" in keys:
+            i18n.init_from_config()
+            self.root.after(50, self.rebuild_ui)
+            return
+        if "HOUR_LOG_ENABLED" in keys:
+            self._sync_hour_log_setting()
+        if "FILTER_MODE" in keys and "rules" in self.pages:
+            self.pages["rules"].refresh(force=True)
+        if "settings" in self.pages:
+            self.pages["settings"].refresh()
+        self.update_settings_badge()
+        self.refresh_net(force=True)
+
+    def _peer_line(self) -> str:
+        lines = []
+        now = time.time() * 1000
+        for st in self.sync.peer_status():
+            if now - float(st.get("ts", 0)) > 60_000:
+                continue
+            t = {"running": tr("专注中…"), "break": tr("休息中 ☕")}.get(st.get("timer"), tr("准备就绪"))
+            if st.get("timer") == "running" and st.get("since"):
+                try:
+                    mins = (datetime.now() - datetime.fromisoformat(st["since"])).total_seconds() / 60
+                    t += f" {mins:.0f} min"
+                except ValueError:
+                    pass
+            net = {"online": tr("联网中"), "pending": tr("冷静期中")}.get(st.get("net"), "")
+            lines.append(f"🔗 {st.get('name', '?')}: {t}" + (f" · {net}" if net else ""))
+        return "\n".join(lines)
+
+    # ---- Rules 页的应用名单: 前台窗口的程序被禁用时立即关掉 (MECHANICS 4.7) ----
+
+    def _schedule_app_rules(self):
+        if self.shutting_down:
+            return
+        try:
+            self._check_app_rules()
+        except Exception as e:
+            self._log_window(f"ERROR    app rules {type(e).__name__}: {e}")
+        self.app_rules_job = self.root.after(1000, self._schedule_app_rules)
+
+    def _check_app_rules(self):
+        """只在 Proxy 断网方式下生效; 开发者模式下不管 (和网络限制一样解除)."""
+        if self.dm.resetting or self.net.dev_mode or self.net.net_mode != "proxy":
+            return
+        rules = self.net.proxy.rules
+        mode = getattr(config, "FILTER_MODE", "blacklist")
+        online = self.net.online
+        hit = window_guard.check_focus_rules(lambda exe: rules.app_allowed(exe, online, mode))
+        if not hit:
+            return
+        exe, title, why = hit
+        self._log_window(f"RULES    {why}  {exe}  {title}")
+        try:
+            self.net.proxy._on_event(f"🪟 {title[:40]}", exe, False, why)
+        except Exception:
+            pass
+        now = time.monotonic()
+        if now - self._app_rules_toast.get(exe, -99.0) >= 5:
+            self._app_rules_toast[exe] = now
+            msg = (tr("{exe} 在黑名单里,已关闭窗口.", exe=exe) if why == "blacklist-app"
+                   else tr("{exe} 不在白名单里,已关闭窗口.", exe=exe))
+            toast.warn(msg)
 
     # ---- 窗口使用时间统计 ----
 
@@ -1526,6 +1799,7 @@ class BreakTimerApp:
         self._save_focus_now()      # 专注中关闭: 状态留在文件里, 下次打开时接着算 (见 _recover_focus)
         self.end_break_early(silent=True)
         self._cancel_jobs()
+        self.sync.stop()
         self.net.shutdown()
         self.root.destroy()
 
@@ -1748,7 +2022,7 @@ class BreakTimerApp:
             title=tr("紧急借贷"), danger=True
         ):
             return
-        before = self.net.tomorrow_used
+        before = self.net.tomorrow_used_all
         ok, msg = self.net.borrow(minutes, reason)
         if not ok:
             toast.warn(tr(msg))
@@ -1765,7 +2039,7 @@ class BreakTimerApp:
         if limit <= 0:
             return
         line = limit * float(config.LOAN_WARN_SHARE)
-        after = self.net.tomorrow_used
+        after = self.net.tomorrow_used_all
         if not (before < line <= after):
             return
         granted = self.settings.grant_free_change("DAILY_LIMIT")
@@ -1925,12 +2199,12 @@ class BreakTimerApp:
         if abs(mult - 1.0) > 1e-9:
             bits.append(tr("今天的联网倍率 ×{m}: 每日额度 {base} → 今天 {quota}").format(
                 m=f"{mult:g}", base=fmt_hm(float(config.DAILY_LIMIT)), quota=fmt_hm(n.limit)))
-        if n.bonus > 0:
+        if n.bonus_all > 0:
             bits.append(tr("今天已借 {bonus},明天将扣 {cost}(明天剩余 {left})").format(
-                bonus=fmt_hm(n.bonus), cost=fmt_hm(n.tomorrow_used),
+                bonus=fmt_hm(n.bonus_all), cost=fmt_hm(n.tomorrow_used_all),
                 left=fmt_hm(n.tomorrow_remaining)))
-        if n.debt > 0:
-            bits.append(tr("今天要先还昨天借的 {debt}").format(debt=fmt_hm(n.debt)))
+        if n.debt_all > 0:
+            bits.append(tr("今天要先还昨天借的 {debt}").format(debt=fmt_hm(n.debt_all)))
         cfg(self.net_lbl_debt, text="\n".join(bits))
 
     def _safe_minutes(self):
@@ -1950,6 +2224,11 @@ class BreakTimerApp:
         self._sync_break_lock()
         if self.current_page == "rules" and "rules" in self.pages:
             self.pages["rules"].refresh()
+        if event == "started" and self._update_retry and getattr(config, "UPDATE_CHECK", 1):
+            self._update_retry = False
+            self.check_update(auto=True)
+        if self.current_page == "timer" and hasattr(self, "lbl_peers"):
+            cfg(self.lbl_peers, text=self._peer_line())
         self.net_job = self.root.after(1000, self._net_tick)
 
         if event:
@@ -2019,6 +2298,7 @@ class BreakTimerApp:
         self.dm.resetting = True
         self._cancel_jobs()
         self._close_check_win()
+        self.sync.stop()
         self.net.release()
         self.dm.erase_all_data()
         self.restart_requested = True      # main.py 在主循环结束后重新打开程序

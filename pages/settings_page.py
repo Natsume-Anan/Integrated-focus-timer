@@ -16,9 +16,14 @@ from .widgets import (ScrollArea, Switch, wrap_label, frozen, smooth, cfg, set_v
 class SettingsPage(tk.Frame):
     def __init__(self, master, settings, on_changed=None, on_sound=None,
                  on_dev_mode=None, on_language=None, on_font_scale=None,
-                 on_theme=None, on_end_setup=None):
+                 on_theme=None, on_end_setup=None, updater=None, on_update_check=None,
+                 on_update_install=None):
         super().__init__(master, bg=COLORS["bg"])
         self.sm = settings
+        self.updater = updater
+        self.on_update_check = on_update_check
+        self.on_update_install = on_update_install
+        self.update_card = None
         self.on_changed = on_changed
         self.on_sound = on_sound
         self.on_dev_mode = on_dev_mode
@@ -95,6 +100,7 @@ class SettingsPage(tk.Frame):
         self._build_setup_card(body)
         self._build_dev_mode(body)
         self._build_page_items("basic")
+        self._build_update_card(body)
         # 作者的话: 为什么设置要等 48 小时 (MECHANICS.md 1.1)
         for i, zh in enumerate((
                 "在设计预期上 只要不是有绝对的正当理由 应该很少有改变能坚持过48h的等待期.\n这是一个理智与本能的抗争的常见结果.\n这个软件的一个理念就是放大理智优势,保留本能空间.",
@@ -294,6 +300,61 @@ class SettingsPage(tk.Frame):
         if self.on_end_setup:
             self.on_end_setup()
         self.refresh()
+
+    def _build_update_card(self, body):
+        """更新 (MECHANICS 16): 当前版本, GitHub 上的最新版本, 检查 / 立即更新."""
+        if self.updater is None:
+            return
+        card = COLORS["bg_card"]
+        fr = tk.Frame(body, bg=card, highlightbackground=COLORS["border"], highlightthickness=1)
+        fr.pack(fill="x", pady=(2, 8))
+        self.update_card = fr
+        row = tk.Frame(fr, bg=card)
+        row.pack(fill="x", padx=12, pady=(10, 2))
+        self._track(tk.Label(row, text=tr("⬆  更新"), bg=card, fg=COLORS["text"],
+                             font=config.font("body", bold=True)), "⬆  更新").pack(side="left")
+        self.lbl_update = tk.Label(fr, text="", bg=card, fg=COLORS["text_dim"],
+                                   font=config.font("small"), anchor="w", justify="left")
+        self.lbl_update.pack(fill="x", padx=12)
+        btns = tk.Frame(fr, bg=card)
+        btns.pack(fill="x", padx=12, pady=(6, 10))
+        self._track(ttk.Button(btns, text=tr("检查更新"),
+                               command=lambda: self.on_update_check and self.on_update_check()),
+                    "检查更新").pack(side="left")
+        self.btn_update_now = self._track(ttk.Button(
+            btns, text=tr("立即更新"), style="Accent.TButton",
+            command=lambda: self.on_update_install and self.on_update_install()), "立即更新")
+
+        def open_page():
+            import webbrowser
+            import updater
+            webbrowser.open(updater.RELEASES_PAGE)
+        self._track(ttk.Button(btns, text=tr("发布页"), command=open_page), "发布页").pack(
+            side="right")
+
+    def _refresh_update_card(self):
+        u = self.updater
+        if u is None or self.update_card is None:
+            return
+        text = tr("当前版本 {v}", v=config.APP_VERSION)
+        state = {
+            "checking": tr("正在检查…"),
+            "latest": tr("已是最新版本"),
+            "available": tr("发现新版本 {v}", v=u.latest_text),
+            "downloading": tr("正在下载更新…"),
+            "installed": tr("已更新到 {v}, 重启后生效", v=u.latest_text),
+            "dev": tr("这是 git 仓库里的开发版本, 不会自动覆盖, 请用 git pull 更新"),
+            "error": tr("检查 / 更新失败: {e}", e=u.error),
+        }.get(u.state, "")
+        if state:
+            text += "  ·  " + state
+        cfg(self.lbl_update, text=text,
+            fg=COLORS["accent"] if u.state in ("available", "installed") else
+            (COLORS["warn"] if u.state in ("error", "dev") else COLORS["text_dim"]))
+        if u.state == "available":
+            show_pack(self.btn_update_now, side="left", padx=(8, 0))
+        else:
+            hide_pack(self.btn_update_now)
 
     def _build_dev_mode(self, body):
         if not config.dev_mode_defined():
@@ -569,6 +630,7 @@ class SettingsPage(tk.Frame):
 
 
     def refresh(self):
+        self._refresh_update_card()
         # 文字翻译不用每次刷新都重设: 换语言时整个界面会重建.
         # 下面只改真正变了的属性 (cfg), 避免每次刷新把几十个控件全部重画一遍.
         if self.setup_card is not None:

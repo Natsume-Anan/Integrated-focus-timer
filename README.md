@@ -30,7 +30,7 @@
 | --- | --- |
 | **⏱ Timer** | 专注计时,结束后给出建议休息时长 |
 | **🌐 Network** | 申请制联网:冷静期后自动联网,到点断网;另有快速访问与紧急借贷 |
-| **🛡 Rules** | Proxy 模式下的网站 / 应用黑白名单,可让 AI 给出建议 |
+| **🛡 Rules** | Proxy 模式下的网站 / 应用黑白名单 (被禁用的程序窗口一到前台就关掉),可让 AI 给出建议;局域网内多台设备 (电脑 / 手机) 绑定同步 |
 | **📝 Hour Log** | 每个整点提示记录上一小时做了什么 |
 | **📅 Calendar** | 按日查看学习时长 |
 | **📊 Statistics** | 活动, 联网理由与各程序前台时间的分布 |
@@ -53,6 +53,14 @@
 python main.py
 ```
 
+## 更新
+
+每次打开程序时从 GitHub 的最新发布检查更新, 可以在 设置 → 基本设置 里关闭自动检查 / 自动更新. 规则见 `MECHANICS.md` 第 16 节.
+
+## Android 版
+
+`Android version/` 是 Android 版 (Kotlin + Jetpack Compose, Android 10 及以上), 用本地 VPN 断网. 构建方法见其中的 `README.md`, 和桌面版的差别见 `MECHANICS.md` 第 14 节.
+
 ## 开发
 
-各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`, `python -m netproxy.selftest`, `python window_guard.py`, `python uninstall.py --selftest`.
+各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`, `python -m netproxy.selftest`, `python window_guard.py`, `python devsync.py`, `python uninstall.py --selftest`.

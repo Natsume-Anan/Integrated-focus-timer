@@ -40,6 +40,10 @@ class NetGuard:
         self.grant_left = 0.0
         self.grant_rate = 1.0
         self.pending = None
+        # 设备同步: 其他设备今天的 {used, bonus, tomorrow_used, debt} 之和 (见 devsync.peer_net)
+        self.peer_net = lambda: {"used": 0.0, "bonus": 0.0, "tomorrow_used": 0.0, "debt": 0.0}
+        # 设备同步: 其他设备的联网会话 (按理由统计用)
+        self.peer_usage = lambda: []
         self.proxy = ProxyController(
             data_dir, mode_getter=lambda: getattr(config, "FILTER_MODE", "blacklist"),
             dev_getter=config.changes_instant)
@@ -89,18 +93,44 @@ class NetGuard:
     def tick_clamp(self) -> float:
         return float(config.TICK_CLAMP)
 
+    _ZERO = {"used": 0.0, "bonus": 0.0, "tomorrow_used": 0.0, "debt": 0.0}
+
+    def _pn(self) -> dict:
+        fn = getattr(self, "peer_net", None)
+        try:
+            return fn() if fn else self._ZERO
+        except Exception:
+            return self._ZERO
+
+    # 绑定了其他设备时, 额度是所有设备共用的: 下面的 *_all 是所有设备的合计
+    @property
+    def bonus_all(self) -> float:
+        return self.bonus + self._pn()["bonus"]
+
+    @property
+    def tomorrow_used_all(self) -> float:
+        return self.tomorrow_used + self._pn()["tomorrow_used"]
+
+    @property
+    def debt_all(self) -> float:
+        return self.debt + self._pn()["debt"]
+
+    @property
+    def used_all(self) -> float:
+        return self.used + self._pn()["used"]
+
     @property
     def today_total(self) -> float:
         """今天的总额度 = 每日额度 + 今天借到的."""
-        return self.limit + self.bonus
+        return self.limit + self.bonus_all
 
     @property
     def remaining(self) -> float:
-        return max(0.0, self.today_total - self.used - self.debt)
+        return max(0.0, self.today_total - self.used_all - self.debt_all)
 
     @property
     def tomorrow_remaining(self) -> float:
-        return max(0.0, self.tomorrow_limit - self.tomorrow_used)
+        return max(0.0, self.tomorrow_limit - self.tomorrow_used_all)
 
     @property
     def quick_left(self) -> float:
@@ -143,7 +173,7 @@ class NetGuard:
 
     @property
     def quota_used(self) -> float:
-        return min(self.today_total, self.used + self.debt)
+        return min(self.today_total, self.used_all + self.debt_all)
 
 
     def _load(self):
@@ -249,8 +279,10 @@ class NetGuard:
 
     def usage_by_reason(self, prefix: str):
         """某个月 [(理由, 实际联网秒数)]."""
+        peer = getattr(self, "peer_usage", None)
+        recs = list(self.usage) + list((peer() if peer else None) or [])
         return [(r.get("reason", ""), float(r.get("seconds", 0)))
-                for r in self.usage if str(r.get("date", "")).startswith(prefix)]
+                for r in recs if isinstance(r, dict) and str(r.get("date", "")).startswith(prefix)]
 
     def _log(self, text: str):
         if self.dead:
