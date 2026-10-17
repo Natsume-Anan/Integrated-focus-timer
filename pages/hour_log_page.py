@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 import config
 from config import COLORS
 from i18n import tr
-from .widgets import wrap_label, cfg
+from .widgets import cfg
 
 
 class HourLogPage(tk.Frame):
@@ -36,19 +36,6 @@ class HourLogPage(tk.Frame):
             left, text=tr("📝  整点记录"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
         ).pack(anchor="w")
-
-        self.lbl_hint = tk.Label(
-            left, text="", bg=bg, fg=COLORS["text_dim"],
-            font=config.font("body"), justify="left", anchor="w"
-        )
-        self.lbl_hint.pack(anchor="w", fill="x", pady=(4, 0))
-        wrap_label(self.lbl_hint, 12)
-        self.lbl_syntax = tk.Label(
-            left, text=tr("✎ 填写格式:一小时内做了多项活动时用 / 连接,如「学习/吃饭」(统计时均分这一小时)."),
-            bg=bg, fg=COLORS["accent"], font=config.font("small"), justify="left", anchor="w"
-        )
-        self.lbl_syntax.pack(anchor="w", fill="x", pady=(4, 0))
-        wrap_label(self.lbl_syntax, 12)
 
         right = tk.Frame(hdr, bg=bg)
         right.pack(side="right", anchor="ne", pady=(2, 0))
@@ -155,26 +142,12 @@ class HourLogPage(tk.Frame):
         now = datetime.now()
         self.view_date = self.dm.today_date
         enabled = bool(self.dm.hour_enabled)
-        auto_text = self.dm.auto_text
-        fill_hours = f"{config.FILL_WINDOW.total_seconds() / 3600:g}"
 
-        cfg(self.lbl_state, 
+        cfg(self.lbl_state,
             text=tr("当前: {state}").format(state=tr("开启") if enabled else tr("关闭_状态")),
             fg=COLORS["success"] if enabled else COLORS["text_dim"]
         )
-        if enabled:
-            cfg(self.lbl_hint, 
-                text=(tr("每次提示音后填写上一小时做了什么;每行时间是该小时的结束时刻(00:00 = 昨天 23:00–24:00);")
-                      + " " + tr("留空 {h} 小时 → 自动记为「{text}」.").format(
-                          h=fill_hours, text=auto_text)
-                      + " " + tr("(开关在 Settings 页,改动 48 小时后生效)"))
-            )
-        else:
-            cfg(self.lbl_hint, 
-                text=(tr("整点记录已关闭 —— 不响铃,不自动补记,也不记录任何内容.")
-                      + " " + tr("(开关在 Settings 页,改动 48 小时后生效)"))
-            )
-        cfg(self.lbl_date, 
+        cfg(self.lbl_date,
             text=tr("{date}(今天)").format(date=self.view_date)
                  + ("" if enabled else tr("   ·  记录已关闭"))
         )

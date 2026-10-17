@@ -96,6 +96,16 @@ LANGUAGE = "zh"
 NET_MODE = "proxy"                            # "adapter" 禁用网卡 / "proxy" 本地代理过滤
 FILTER_MODE = "blacklist"                     # proxy 模式下生效的名单:"blacklist" / "whitelist"
 
+# 任务栏窗口数上限: 每 WINDOW_CHECK_EVERY 秒数一次任务栏上的窗口 (同一程序的多个窗口各算一个),
+# 超过 WINDOW_LIMIT 个就随机关掉多出来的 (见 window_guard.py)
+WINDOW_LIMIT_ENABLED = 1
+WINDOW_LIMIT = 4
+WINDOW_CHECK_EVERY = 30
+# 窗口使用时间统计: 每 WINDOW_FOCUS_EVERY 秒看一次前台窗口属于哪个程序, 把这几秒记给它
+# (见 window_guard.foreground_program, DataManager.add_window_time). 桌面,文件资源管理器和命令行窗口记为空白.
+WINDOW_FOCUS_ENABLED = 1
+WINDOW_FOCUS_EVERY = 10
+
 
 
 
@@ -204,6 +214,9 @@ DEFAULT_SETTINGS = {
     "LANGUAGE": LANGUAGE,
     "NET_MODE": NET_MODE,
     "FILTER_MODE": FILTER_MODE,
+    "WINDOW_LIMIT_ENABLED": WINDOW_LIMIT_ENABLED,
+    "WINDOW_LIMIT": WINDOW_LIMIT,
+    "WINDOW_FOCUS_ENABLED": WINDOW_FOCUS_ENABLED,
     "FONT_SCALE": 0.9,
     "THEME": "classic",
     "TICK_CLAMP": TICK_CLAMP,

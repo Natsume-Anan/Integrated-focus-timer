@@ -37,8 +37,8 @@ def _num_text(x: float) -> str:
 
 
 def _num(key: str, label: str, unit: str, scale: float, lo: float, hi: float,
-         integer: bool, desc: str, page: str = "detail", short: str = None):
-    """「具体设置」页的数值项.
+         integer: bool, desc: str, page: str, short: str = None, group: str = None):
+    """数值项: 显示在所属模块页的下半部分, 直接填写.
 
     unit/scale: 界面上按 unit 填写, 存储值 = 填写值 × scale (例如按分钟填, 按秒存).
     lo/hi: 允许范围, 按界面单位 (unit) 计.
@@ -53,45 +53,48 @@ def _num(key: str, label: str, unit: str, scale: float, lo: float, hi: float,
         "key": key, "label": label, "kind": "num", "apply": APPLY_DELAY,
         "page": page, "unit": unit, "scale": scale, "min": lo, "max": hi,
         "integer": integer, "fmt": fmt, "desc": desc, "short": short or label,
+        "group": group,
     }
 
 
 SETTINGS_SCHEMA = [
     _num("DAILY_LIMIT", "每日联网额度", "min", 60, 0, 1440, True,
-         "每天最多能联网多久."),
+         "每天最多能联网多久.", page="net"),
     _num("COOLDOWN", "联网冷静期", "min", 60, 0, 240, True,
-         "提出申请后等多久才真的联网.想立刻联网请用快速访问."),
+         "提出申请后等多久才真的联网.想立刻联网请用快速访问.", page="net"),
     _num("ENFORCE_EVERY", "断网复查间隔", "s", 1, 5, 3600, True,
-         "离线时每隔多久强制复查并重新断网.越小越难绕开,但更频繁调用系统命令."),
+         "离线时每隔多久强制复查并重新断网.越小越难绕开,但更频繁调用系统命令.", page="net"),
     _num("TICK_CLAMP", "计时单步上限", "s", 1, 1, 300, True,
-         "联网计时每一步最多计入多少秒;电脑睡眠或卡顿后醒来,不会一次计入一大段."),
+         "联网计时每一步最多计入多少秒;电脑睡眠或卡顿后醒来,不会一次计入一大段.", page="net"),
     _num("QUICK_MULTIPLIER", "快速访问消耗倍率", "×", 1, 1, 10, False,
-         "快速访问免冷静期,每联网 1 分钟消耗多少分钟今日额度."),
+         "快速访问免冷静期,每联网 1 分钟消耗多少分钟今日额度.", page="net"),
     _num("LOAN_RATE", "紧急借贷偿还倍率", "×", 1, 1, 10, False,
-         "今天借 1 分钟额度,明天要扣多少分钟."),
+         "今天借 1 分钟额度,明天要扣多少分钟.", page="net"),
     _num("BREAK_COOLDOWN_RATE", "休息中冷静期倍率", "×", 1, 0, 1, False,
-         "休息倒计时中提交的普通申请,若时长不超过剩余休息时间,冷静期乘以这个倍率."),
+         "休息倒计时中提交的普通申请,若时长不超过剩余休息时间,冷静期乘以这个倍率.", page="net"),
     _num("BREAK_TIME_SCALE", "休息时间倍率", "×", 1, 0.1, 5, False,
-         "计时器给出的建议休息时长乘以这个倍率;之前暂停休息结转的时间不受影响."),
+         "计时器给出的建议休息时长乘以这个倍率;之前暂停休息结转的时间不受影响.", page="timer"),
     _num("BREAK_CARRY_RATE", "暂停休息结转比例", "×", 1, 0, 1, False,
-         "暂停休息(或关闭程序)时,剩余休息时间按这个比例计入下一次休息."),
+         "暂停休息(或关闭程序)时,剩余休息时间按这个比例计入下一次休息.", page="timer"),
     _num("FILL_WINDOW", "整点记录补填时限", "min", 60, 1, 1440, True,
-         "整点过后多久之内还能补填;超时自动记为「超时自动记录内容」."),
-    # ---- 星期倍率页: 当天联网额度 = 每日联网额度 × 当天倍率 ----
-    _num("QUOTA_MULT_MON", "周一联网倍率", "×", 1, 0, 10, False, "", page="weekday",
-         short="周一"),
-    _num("QUOTA_MULT_TUE", "周二联网倍率", "×", 1, 0, 10, False, "", page="weekday",
-         short="周二"),
-    _num("QUOTA_MULT_WED", "周三联网倍率", "×", 1, 0, 10, False, "", page="weekday",
-         short="周三"),
-    _num("QUOTA_MULT_THU", "周四联网倍率", "×", 1, 0, 10, False, "", page="weekday",
-         short="周四"),
-    _num("QUOTA_MULT_FRI", "周五联网倍率", "×", 1, 0, 10, False, "", page="weekday",
-         short="周五"),
-    _num("QUOTA_MULT_SAT", "周六联网倍率", "×", 1, 0, 10, False, "", page="weekday",
-         short="周六"),
-    _num("QUOTA_MULT_SUN", "周日联网倍率", "×", 1, 0, 10, False, "", page="weekday",
-         short="周日"),
+         "整点过后多久之内还能补填;超时自动记为「超时自动记录内容」.", page="log"),
+    _num("WINDOW_LIMIT", "窗口数上限", "", 1, 1, 50, True,
+         "任务栏上最多同时开着几个窗口;超过时一次随机关掉多出来的.", page="window"),
+    # ---- 星期倍率 (联网页的第二块): 当天联网额度 = 每日联网额度 × 当天倍率 ----
+    _num("QUOTA_MULT_MON", "周一联网倍率", "×", 1, 0, 10, False, "", page="net",
+         group="weekday", short="周一"),
+    _num("QUOTA_MULT_TUE", "周二联网倍率", "×", 1, 0, 10, False, "", page="net",
+         group="weekday", short="周二"),
+    _num("QUOTA_MULT_WED", "周三联网倍率", "×", 1, 0, 10, False, "", page="net",
+         group="weekday", short="周三"),
+    _num("QUOTA_MULT_THU", "周四联网倍率", "×", 1, 0, 10, False, "", page="net",
+         group="weekday", short="周四"),
+    _num("QUOTA_MULT_FRI", "周五联网倍率", "×", 1, 0, 10, False, "", page="net",
+         group="weekday", short="周五"),
+    _num("QUOTA_MULT_SAT", "周六联网倍率", "×", 1, 0, 10, False, "", page="net",
+         group="weekday", short="周六"),
+    _num("QUOTA_MULT_SUN", "周日联网倍率", "×", 1, 0, 10, False, "", page="net",
+         group="weekday", short="周日"),
     {
         "key": "NET_MODE", "label": "断网方式",
         "kind": "choice", "apply": APPLY_DELAY,
@@ -101,6 +104,7 @@ SETTINGS_SCHEMA = [
         ],
         "fmt": lambda v: "Proxy" if v == "proxy" else "Adapter",
         "desc": "Adapter:离线时直接禁用物理网卡.Proxy:网卡保持开启,由本地代理按 Rules 页的黑白名单放行 / 拦截.",
+        "page": "net",
     },
     {
         "key": "FILTER_MODE", "label": "过滤名单模式",
@@ -111,6 +115,23 @@ SETTINGS_SCHEMA = [
         ],
         "fmt": lambda v: "Whitelist" if v == "whitelist" else "Blacklist",
         "desc": "仅 Proxy 断网方式下有效.黑名单模式:默认放行,只拦名单内.白名单模式:默认拦截,离线只放行名单内,联网会话中全放行.",
+        "page": "rules",
+    },
+    {
+        "key": "WINDOW_LIMIT_ENABLED", "label": "任务栏窗口数上限",
+        "kind": "choice", "apply": APPLY_DELAY,
+        "choices": [("1", "开启 (ON)"), ("0", "关闭 (OFF)")],
+        "fmt": lambda v: "ON" if v else "OFF",
+        "desc": "每 30 秒数一次任务栏上的窗口,超过「窗口数上限」就随机关掉多出来的.",
+        "page": "window",
+    },
+    {
+        "key": "WINDOW_FOCUS_ENABLED", "label": "窗口使用时间统计",
+        "kind": "choice", "apply": APPLY_DELAY,
+        "choices": [("1", "开启 (ON)"), ("0", "关闭 (OFF)")],
+        "fmt": lambda v: "ON" if v else "OFF",
+        "desc": "每 10 秒看一次当前在前台的程序,把这 10 秒记给它;桌面,文件资源管理器和命令行窗口记为空白.结果在 Statistics 页的「窗口」.",
+        "page": "window",
     },
     {
         "key": "HOUR_LOG_ENABLED", "label": "整点记录开关",
@@ -118,6 +139,7 @@ SETTINGS_SCHEMA = [
         "choices": [("1", "开启 (ON)"), ("0", "关闭 (OFF)")],
         "fmt": lambda v: "ON" if v else "OFF",
         "desc": "程序启动时整点记录的初始状态;启动后仍可在 Hour Log 页直接切换.",
+        "page": "log",
     },
     {
         "key": "AUTO_TEXT", "label": "超时自动记录内容",
@@ -130,9 +152,11 @@ SETTINGS_SCHEMA = [
         ],
         "fmt": lambda v: str(v),
         "desc": "整点后一小时内没填写,就自动记成这段文字.这一项可以立即修改.",
+        "page": "log",
     },
     {
-        "key": "LANGUAGE", "label": "界面语言",
+        # 不管当前是哪种语言都显示 "Language": 看不懂当前语言的人也能找到这一项
+        "key": "LANGUAGE", "label": "Language",
         "kind": "choice", "apply": APPLY_INSTANT,
         "choices": [("zh", "中文"), ("en", "English")],
         "fmt": lambda v: "中文" if str(v).startswith("zh") else "English",
@@ -173,16 +197,35 @@ SETTINGS_SCHEMA = [
         "fmt": lambda v: "内置三音提示音" if str(v).strip() in ("", "__builtin__") else (
             "Windows 蜂鸣声" if str(v) == "__beep__" else str(v)),
         "desc": "即时生效.可粘贴本地 .wav / .mp3 的完整路径.",
+        "page": "log",
     },
 ]
 
 for _s in SETTINGS_SCHEMA:
     _s.setdefault("page", "basic")
 
+# 设置页按模块分页, 顺序和左侧导航一致; 基本设置 (整个程序的外观) 永远是第一页.
+# 每页上半部分是选项 / 开关, 下半部分是数值.
+SETTINGS_PAGES = [
+    ("basic", "基本设置"),
+    ("timer", "计时器"),
+    ("net", "联网"),
+    ("rules", "规则"),
+    ("log", "整点记录"),
+    ("window", "窗口"),
+]
+
 SCHEMA_BY_KEY = {s["key"]: s for s in SETTINGS_SCHEMA}
-BASIC_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "basic"]
-DETAIL_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "detail"]
-WEEKDAY_SPECS = [s for s in SETTINGS_SCHEMA if s["page"] == "weekday"]
+assert {s["page"] for s in SETTINGS_SCHEMA} <= {k for k, _ in SETTINGS_PAGES}
+
+
+def page_specs(page: str):
+    """(选项类, 数值类) 两组设置项, 各自按 SETTINGS_SCHEMA 里的顺序."""
+    specs = [s for s in SETTINGS_SCHEMA if s["page"] == page]
+    return ([s for s in specs if s["kind"] != "num"],
+            [s for s in specs if s["kind"] == "num"])
+
+
 DELAYED_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_DELAY]
 INSTANT_KEYS = [s["key"] for s in SETTINGS_SCHEMA if s["apply"] == APPLY_INSTANT]
 
@@ -411,7 +454,7 @@ class SettingsManager:
         lo, hi = spec["min"], spec["max"]
         if x < lo - 1e-9 or x > hi + 1e-9:
             unit = spec["unit"]
-            rng = (f"{_num_text(lo)} ~ {_num_text(hi)}" if unit == "×"
+            rng = (f"{_num_text(lo)} ~ {_num_text(hi)}" if unit in ("×", "")
                    else f"{_num_text(lo)} ~ {_num_text(hi)} {unit}")
             return False, tr("{label} 允许的范围是 {rng}.", label=label, rng=rng)
         return True, ""

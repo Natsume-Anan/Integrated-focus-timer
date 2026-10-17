@@ -1,0 +1,317 @@
+"""
+任务栏窗口数上限
+────────────────
+每隔 WINDOW_CHECK_EVERY 秒数一次任务栏上的窗口 (同一个程序的多个窗口各算一个),
+超过 WINDOW_LIMIT 个就一次随机关掉多出来的那几个, 让窗口数回到上限.
+关闭是发 WM_CLOSE —— 和点右上角的 ✕ 一样, 有未保存内容的程序会照常弹出"是否保存".
+
+"在任务栏上" 的判定 (和 Windows 自己的规则一致):
+  · 可见, 没有被 DWM 隐藏 (cloaked: 其他虚拟桌面上的窗口, 挂起的 UWP 窗口等);
+  · 没有所有者窗口 (对话框之类不算), 或者带 WS_EX_APPWINDOW;
+  · 不是工具窗口 (WS_EX_TOOLWINDOW) 或不可激活窗口 (WS_EX_NOACTIVATE), 除非带 WS_EX_APPWINDOW;
+  · 有标题; 不是桌面 / 任务栏本身.
+OIT 自己的窗口不计数, 也不会被关.
+
+前台程序 (窗口使用时间统计)
+──────────────────────────
+foreground_program() 返回当前前台窗口属于哪个程序 (exe 名, 不带 .exe);
+桌面, 任务栏, 文件资源管理器, 命令行窗口, 锁屏, 以及没有前台窗口时返回 BLANK (空白).
+OIT 自己的窗口返回 "OIT". 记时间的部分在 DataManager.add_window_time.
+
+    python window_guard.py          自检 (用假的窗口列表, 不碰真实窗口)
+"""
+
+import os
+import sys
+import random
+
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_APPWINDOW = 0x00040000
+WS_EX_NOACTIVATE = 0x08000000
+GWL_EXSTYLE = -20
+GW_OWNER = 4
+DWMWA_CLOAKED = 14
+WM_CLOSE = 0x0010
+
+# 桌面, 任务栏, 开始菜单之类: 满足上面的条件也不算
+SHELL_CLASSES = {
+    "Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd",
+    "Windows.UI.Core.CoreWindow",
+}
+
+
+def is_taskbar_window(w: dict) -> bool:
+    """w: {visible, cloaked, owned, exstyle, title, cls}"""
+    if not w.get("visible") or w.get("cloaked"):
+        return False
+    if not str(w.get("title") or "").strip():
+        return False
+    if w.get("cls") in SHELL_CLASSES:
+        return False
+    ex = int(w.get("exstyle") or 0)
+    if ex & WS_EX_APPWINDOW:
+        return True
+    if w.get("owned"):
+        return False
+    if ex & (WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE):
+        return False
+    return True
+
+
+# ───────────────────────── Windows API ─────────────────────────
+
+_api = None
+
+
+def _load_api():
+    global _api
+    if _api is not None:
+        return _api
+    import ctypes
+    from ctypes import wintypes
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    dwmapi = ctypes.WinDLL("dwmapi")
+    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    user32.EnumWindows.argtypes = [proc, wintypes.LPARAM]
+    user32.IsWindowVisible.argtypes = [wintypes.HWND]
+    user32.IsWindow.argtypes = [wintypes.HWND]
+    user32.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user32.GetWindow.restype = wintypes.HWND
+    user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    user32.GetWindowLongW.restype = ctypes.c_long
+    # InternalGetWindowText 不给目标窗口发消息, 遇到卡死的程序也不会把 OIT 一起卡住
+    user32.InternalGetWindowText.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
+    user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    user32.GetForegroundWindow.restype = wintypes.HWND
+    user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM,
+                                    wintypes.LPARAM]
+    dwmapi.DwmGetWindowAttribute.argtypes = [wintypes.HWND, wintypes.DWORD,
+                                             ctypes.c_void_p, wintypes.DWORD]
+    _api = (ctypes, wintypes, user32, dwmapi, proc)
+    return _api
+
+
+def _describe(hwnd) -> dict:
+    ctypes, wintypes, user32, dwmapi, _proc = _load_api()
+    buf = ctypes.create_unicode_buffer(256)
+    user32.InternalGetWindowText(hwnd, buf, 256)
+    title = buf.value
+    cbuf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, cbuf, 256)
+    cloaked = ctypes.c_int(0)
+    try:
+        if dwmapi.DwmGetWindowAttribute(hwnd, DWMWA_CLOAKED, ctypes.byref(cloaked),
+                                        ctypes.sizeof(cloaked)) != 0:
+            cloaked.value = 0
+    except OSError:
+        cloaked.value = 0
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return {
+        "hwnd": hwnd,
+        "visible": bool(user32.IsWindowVisible(hwnd)),
+        "cloaked": bool(cloaked.value),
+        "owned": bool(user32.GetWindow(hwnd, GW_OWNER)),
+        "exstyle": user32.GetWindowLongW(hwnd, GWL_EXSTYLE) & 0xFFFFFFFF,
+        "title": title,
+        "cls": cbuf.value,
+        "pid": int(pid.value),
+    }
+
+
+def list_top_windows() -> list:
+    """全部顶层窗口的信息 (还没筛选). 非 Windows 返回空表."""
+    if sys.platform != "win32":
+        return []
+    ctypes, _wt, user32, _dwm, proc = _load_api()
+    hwnds = []
+
+    def cb(hwnd, _lp):
+        hwnds.append(hwnd)
+        return True
+
+    user32.EnumWindows(proc(cb), 0)
+    out = []
+    for h in hwnds:
+        try:
+            out.append(_describe(h))
+        except Exception:
+            continue
+    return out
+
+
+def exe_name(pid: int) -> str:
+    try:
+        from netproxy.procinfo import _exe_for_pid
+        return _exe_for_pid(pid) if pid else ""
+    except Exception:
+        return ""
+
+
+def close_window(hwnd) -> bool:
+    if sys.platform != "win32":
+        return False
+    _ct, _wt, user32, _dwm, _p = _load_api()
+    return bool(user32.PostMessageW(hwnd, WM_CLOSE, 0, 0))
+
+
+# ───────────────────────── 前台程序 ─────────────────────────
+
+BLANK = ""              # 空白: 桌面 / 命令行 / 锁屏 / 没有前台窗口
+UNKNOWN = "?"           # 有前台窗口, 但查不到是哪个程序 (例如权限不够)
+OWN_NAME = "OIT"
+
+# 桌面, 任务栏, 开始菜单, 以及命令行窗口 (conhost 的经典控制台)
+BLANK_CLASSES = SHELL_CLASSES | {"ConsoleWindowClass"}
+# 命令提示符 / Windows Terminal 里的命令行, 锁屏, 文件资源管理器 (explorer.exe 的所有窗口)
+BLANK_EXES = {"cmd.exe", "conhost.exe", "openconsole.exe", "windowsterminal.exe",
+              "lockapp.exe", "explorer.exe"}
+
+
+def classify_foreground(w, own_pid: int = None) -> str:
+    """w: {hwnd, cls, pid, exe} 或 None. 返回程序名 / BLANK / UNKNOWN / OWN_NAME."""
+    own_pid = os.getpid() if own_pid is None else own_pid
+    if not w or not w.get("hwnd"):
+        return BLANK
+    if w.get("cls") in BLANK_CLASSES:
+        return BLANK
+    if w.get("pid") and w.get("pid") == own_pid:
+        return OWN_NAME
+    exe = str(w.get("exe") or "").strip().lower()
+    if not exe:
+        return UNKNOWN
+    if exe in BLANK_EXES:
+        return BLANK
+    return exe[:-4] if exe.endswith(".exe") else exe
+
+
+def foreground_window():
+    """当前前台窗口的 {hwnd, cls, pid, exe}; 没有前台窗口或非 Windows 返回 None."""
+    if sys.platform != "win32":
+        return None
+    ctypes, wintypes, user32, _dwm, _p = _load_api()
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return None
+    cbuf = ctypes.create_unicode_buffer(256)
+    user32.GetClassNameW(hwnd, cbuf, 256)
+    pid = wintypes.DWORD(0)
+    user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+    return {"hwnd": hwnd, "cls": cbuf.value, "pid": int(pid.value),
+            "exe": exe_name(int(pid.value))}
+
+
+def foreground_program() -> str:
+    return classify_foreground(foreground_window())
+
+
+# ───────────────────────── 检查一次 ─────────────────────────
+
+def taskbar_windows(windows=None, own_pid: int = None) -> list:
+    """任务栏上的窗口 (不含 OIT 自己的)."""
+    own_pid = os.getpid() if own_pid is None else own_pid
+    windows = list_top_windows() if windows is None else windows
+    return [w for w in windows if is_taskbar_window(w) and w.get("pid") != own_pid]
+
+
+def enforce(limit: int, windows=None, own_pid: int = None, close=close_window,
+            rng=random):
+    """窗口数超过 limit 时, 一次随机关掉多出来的 (n - limit) 个.
+    返回 (窗口数, [关掉了的窗口]); 没超过或上限不合法时列表为空."""
+    wins = taskbar_windows(windows, own_pid)
+    n = len(wins)
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        return n, []
+    if limit < 1 or n <= limit:
+        return n, []
+    victims = rng.sample(wins, n - limit)
+    return n, [w for w in victims if close(w["hwnd"])]
+
+
+def _selftest():
+    def win(hwnd, title="w", pid=100, visible=True, cloaked=False, owned=False, ex=0,
+            cls="AppWindow"):
+        return {"hwnd": hwnd, "title": title, "pid": pid, "visible": visible,
+                "cloaked": cloaked, "owned": owned, "exstyle": ex, "cls": cls}
+
+    # 判定规则
+    assert is_taskbar_window(win(1))
+    assert not is_taskbar_window(win(1, visible=False))
+    assert not is_taskbar_window(win(1, cloaked=True))
+    assert not is_taskbar_window(win(1, title="  "))
+    assert not is_taskbar_window(win(1, owned=True)), "对话框不算"
+    assert is_taskbar_window(win(1, owned=True, ex=WS_EX_APPWINDOW))
+    assert not is_taskbar_window(win(1, ex=WS_EX_TOOLWINDOW))
+    assert not is_taskbar_window(win(1, ex=WS_EX_NOACTIVATE))
+    assert is_taskbar_window(win(1, ex=WS_EX_TOOLWINDOW | WS_EX_APPWINDOW))
+    assert not is_taskbar_window(win(1, title="Program Manager", cls="Progman"))
+    assert not is_taskbar_window(win(1, cls="Shell_TrayWnd"))
+
+    # 同一个程序的多个窗口各算一个; OIT 自己的窗口不算, 也不会被关
+    ws = [win(1, pid=5), win(2, pid=5), win(3, pid=6), win(4, pid=7),
+          win(5, pid=99), win(6, pid=8, owned=True), win(7, pid=8, cloaked=True)]
+    assert len(taskbar_windows(ws, own_pid=99)) == 4
+
+    closed = []
+    n, vs = enforce(4, ws, own_pid=99, close=lambda h: closed.append(h) or True)
+    assert n == 4 and vs == [] and not closed, "等于上限不关"
+
+    ws.append(win(8, pid=9))
+    for _ in range(50):
+        closed.clear()
+        n, vs = enforce(4, ws, own_pid=99, close=lambda h: closed.append(h) or True)
+        assert n == 5 and len(vs) == 1 and closed == [vs[0]["hwnd"]]
+        assert vs[0]["hwnd"] in (1, 2, 3, 4, 8), "只能关任务栏上的, 且不能关 OIT 自己"
+
+    # 随机: 多次检查应该关到不同的窗口
+    seen = set()
+    for i in range(200):
+        _n, vs = enforce(4, ws, own_pid=99, close=lambda h: True, rng=random.Random(i))
+        seen.add(vs[0]["hwnd"])
+    assert seen == {1, 2, 3, 4, 8}, seen
+
+    # 超出很多: 一次关到上限, 不重复关同一个
+    many = [win(i, pid=i) for i in range(1, 20)]
+    for i in range(20):
+        closed.clear()
+        n, vs = enforce(4, many, own_pid=0, close=lambda h: closed.append(h) or True,
+                        rng=random.Random(i))
+        assert n == 19 and len(vs) == 15 and len(set(closed)) == 15
+        assert len(taskbar_windows([w for w in many if w["hwnd"] not in closed], 0)) == 4
+
+    # 关闭失败的不算进结果 / 上限不合法
+    n, vs = enforce(4, many, own_pid=0, close=lambda h: h % 2 == 0)
+    assert all(w["hwnd"] % 2 == 0 for w in vs) and len(vs) < 15
+    assert enforce(4, many, own_pid=0, close=lambda h: False)[1] == []
+    assert enforce("x", many, own_pid=0, close=lambda h: True)[1] == []
+    assert enforce(0, many, own_pid=0, close=lambda h: True)[1] == []
+
+    # 前台程序
+    def fg(cls="Chrome_WidgetWin_1", pid=100, exe="chrome.exe", hwnd=1):
+        return {"hwnd": hwnd, "cls": cls, "pid": pid, "exe": exe}
+    assert classify_foreground(fg(), own_pid=99) == "chrome"
+    assert classify_foreground(fg(exe="Code.EXE"), own_pid=99) == "code"
+    assert classify_foreground(None, own_pid=99) == BLANK
+    assert classify_foreground(fg(hwnd=0), own_pid=99) == BLANK
+    assert classify_foreground(fg(cls="Progman", exe="explorer.exe"), own_pid=99) == BLANK
+    assert classify_foreground(fg(cls="WorkerW", exe="explorer.exe"), own_pid=99) == BLANK
+    assert classify_foreground(fg(cls="CabinetWClass", exe="explorer.exe"),
+                               own_pid=99) == BLANK, "文件资源管理器也记为空白"
+    assert classify_foreground(fg(cls="CabinetWClass", exe="Explorer.EXE"), own_pid=99) == BLANK
+    assert classify_foreground(fg(cls="ConsoleWindowClass", exe="cmd.exe"), own_pid=99) == BLANK
+    assert classify_foreground(fg(cls="CASCADIA_HOSTING_WINDOW_CLASS",
+                                  exe="WindowsTerminal.exe"), own_pid=99) == BLANK
+    assert classify_foreground(fg(pid=99, exe="python.exe"), own_pid=99) == OWN_NAME
+    assert classify_foreground(fg(exe=""), own_pid=99) == UNKNOWN
+    return "window_guard selftest OK"
+
+
+if __name__ == "__main__":
+    print(_selftest())
+    if sys.platform == "win32" and "--list" in sys.argv:
+        for w in taskbar_windows():
+            print(w["hwnd"], exe_name(w["pid"]), w["title"])
+        print("foreground:", repr(foreground_program()))

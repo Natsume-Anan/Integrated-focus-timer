@@ -50,6 +50,10 @@ class DataManager:
         # 计时器的每一段专注 / 休息 (起止时刻), Statistics 页画每天的时间分布用; 只留最近 7 天
         self.focus_file = os.path.join(self.data_dir, 'focus_log.json')
         self.focus_sessions = []
+        # 窗口使用时间: {日期: {程序名: 秒}}, 程序名 "" 是空白; 只留本月和上月
+        self.window_file = os.path.join(self.data_dir, 'window_usage.json')
+        self.window_days: Dict[str, Dict[str, float]] = {}
+        self._window_dirty = False
 
         self.study_data: Dict[str, float] = {}
         self.hour_days: Dict[str, Dict[str, str]] = {}
@@ -65,6 +69,7 @@ class DataManager:
         self.load_hour_log()
         self.finalize_hours()
         self.load_focus_log()
+        self.load_window_usage()
 
 
     @property
@@ -233,6 +238,74 @@ class DataManager:
             study[h] = min(3600.0, study[h])
             rest[h] = min(3600.0 - study[h], rest[h])
         return list(zip(study, rest))
+
+    # ---- 窗口使用时间: 每隔几秒看一次前台程序, 把这几秒记给它 ----
+
+    def load_window_usage(self):
+        try:
+            with open(self.window_file, 'r', encoding='utf-8') as f:
+                d = json.load(f)
+            days = d.get("days", {}) if isinstance(d, dict) else {}
+        except Exception:
+            days = {}
+        out = {}
+        for ds, day in (days.items() if isinstance(days, dict) else ()):
+            if not isinstance(day, dict):
+                continue
+            clean = {}
+            for name, sec in day.items():
+                try:
+                    sec = float(sec)
+                except (TypeError, ValueError):
+                    continue
+                if sec > 0:
+                    clean[str(name)] = sec
+            if clean:
+                out[str(ds)] = clean
+        self.window_days = out
+        self._prune_windows()
+
+    def _prune_windows(self):
+        keep = month_prefixes()
+        self.window_days = {k: v for k, v in self.window_days.items() if k[:7] in keep}
+
+    def add_window_time(self, name: str, seconds: float, end: datetime = None):
+        """把截止到 end 的这 seconds 秒记给程序 name; 跨过零点的部分记到前一天."""
+        if seconds <= 0:
+            return
+        end = end or datetime.now()
+        start = end - timedelta(seconds=seconds)
+        while start < end:
+            day0 = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            cut = min(end, day0 + timedelta(days=1))
+            day = self.window_days.setdefault(start.strftime('%Y-%m-%d'), {})
+            day[name] = day.get(name, 0.0) + (cut - start).total_seconds()
+            start = cut
+        self._window_dirty = True
+
+    def window_seconds(self, prefix: str) -> Dict[str, float]:
+        """某个月每个程序的前台时间 (秒); 键 "" 是空白."""
+        out: Dict[str, float] = {}
+        for ds, day in self.window_days.items():
+            if ds.startswith(prefix):
+                for name, sec in day.items():
+                    out[name] = out.get(name, 0.0) + sec
+        return out
+
+    def save_window_usage(self, force: bool = False):
+        if self.resetting or not (self._window_dirty or force):
+            return
+        self._prune_windows()
+        try:
+            tmp = self.window_file + ".tmp"
+            with open(tmp, 'w', encoding='utf-8') as f:
+                json.dump({"days": {k: {n: round(v, 1) for n, v in day.items()}
+                                    for k, day in self.window_days.items()}},
+                          f, ensure_ascii=False, indent=1)
+            os.replace(tmp, self.window_file)
+            self._window_dirty = False
+        except (IOError, OSError):
+            pass
 
     def load_hour_log(self):
         try:

@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, time as dt_time
 import config
 import i18n
 import toast
+import window_guard
 from config import (
     COLORS, APP_NAME, IDLE, RUNNING, READY_BREAK, ON_BREAK,
     ensure_builtin_chime, load_json_file, save_json_file,
@@ -22,7 +23,7 @@ from net_guard import NetGuard
 from data_manager import DataManager
 from settings_manager import SettingsManager
 from pages import CalendarPage, HourLogPage, SettingsPage, RulesPage, StatsPage
-from pages.widgets import (wrap_label, frozen, LoadingCover, cfg, flavor,
+from pages.widgets import (frozen, LoadingCover, cfg, flavor,
                            show_pack, hide_pack)
 
 
@@ -120,6 +121,9 @@ class BreakTimerApp:
         self.midnight_job = None
         self.hourly_job = None
         self.net_job = None
+        self.window_job = None        # 任务栏窗口数上限的检查 (与界面无关, 重建界面时不中断)
+        self.window_focus_job = None  # 窗口使用时间统计: 每隔几秒看一次前台程序
+        self._window_focus_ticks = 0
         self.next_hour = None
         self.current_page = "timer"
 
@@ -165,6 +169,8 @@ class BreakTimerApp:
         self._schedule_hourly()
         self._schedule_apply_check()
         self._net_tick()
+        self.window_job = self.root.after(5000, self._schedule_window_guard)
+        self.window_focus_job = self.root.after(self._window_focus_ms(), self._window_focus_tick)
 
         self.root.bind("<Map>", self._on_window_map)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
@@ -532,7 +538,9 @@ class BreakTimerApp:
     def _cancel_jobs(self):
         self.shutting_down = True
         for job in (self.midnight_job, self.hourly_job, self.update_job,
-                    self.net_job, getattr(self, "apply_job", None)):
+                    self.net_job, getattr(self, "apply_job", None),
+                    getattr(self, "window_job", None),
+                    getattr(self, "window_focus_job", None)):
             if not job:
                 continue
             try:
@@ -540,7 +548,7 @@ class BreakTimerApp:
             except Exception:
                 pass
         self.midnight_job = self.hourly_job = self.update_job = None
-        self.net_job = self.apply_job = None
+        self.net_job = self.apply_job = self.window_job = self.window_focus_job = None
 
     def show_page(self, key: str):
         # 先在冻结状态下刷新目标页、再置顶, 最后整窗一次性显示 —— 避免切换时的撕裂
@@ -595,10 +603,6 @@ class BreakTimerApp:
             hdr, text=tr("⏱  Focus Timer"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
         ).pack(anchor="w")
-        tk.Label(
-            hdr, text=tr("开始工作 → 结束 → 休息"),
-            bg=bg, fg=COLORS["text_dim"], font=config.font("body")
-        ).pack(anchor="w", pady=(4, 0))
 
         ttk.Separator(body, orient="horizontal", style="UI.TSeparator").pack(fill="x", padx=26)
 
@@ -666,8 +670,9 @@ class BreakTimerApp:
         self.lbl_bonus.pack(side="left", padx=(24, 0))
         self._bonus_show(self._bonus_idle_text())
 
-        # 作者的话 (MECHANICS.md 6.2): 只在专注 15 ~ 150 分钟 (休息越学越多的那一段) 时显示
-        self.fv_focus = flavor(body, tr("学的时间越长得到的休息时间越长.请尽量长时间地专注."), bg=bg)
+        # 作者的话 (MECHANICS.md 6.2): 一直显示在页面下方的空白处
+        flavor(body, tr("学的时间越长得到的休息时间越长.请尽量长时间地专注."), bg=bg).pack(
+            side="bottom", fill="x", padx=26, pady=(0, 22))
         self._sync_timer_buttons()
 
         self._set_dot(COLORS["text_dim"])
@@ -984,11 +989,10 @@ class BreakTimerApp:
         return None
 
     def _idle_sub_text(self) -> str:
-        text = tr("开始专注时按 [开始专注].")
         if self.break_carry > 0:
-            text += "\n" + tr("积攒的休息时间 {c}:下次休息时自动加上,也可以按 [开始休息] 直接使用.").format(
+            return tr("积攒的休息时间 {c}:下次休息时自动加上,也可以按 [开始休息] 直接使用.").format(
                 c=fmt_ms(self.break_carry))
-        return text
+        return ""
 
     def _load_break_carry(self) -> int:
         d = load_json_file(self.timer_file, {})
@@ -1025,6 +1029,7 @@ class BreakTimerApp:
                 "ok": int(self._focus_ok)}
 
     def _save_focus_now(self):
+        self.dm.save_window_usage()
         if self.state == RUNNING and not self.dm.resetting:
             try:
                 self._save_timer_state()
@@ -1040,7 +1045,7 @@ class BreakTimerApp:
         self._close_check_win()
         self.state = RUNNING
         self._status(tr("专注中…"), COLORS["accent"])
-        self.lbl_sub.config(text=tr("计时中 —— 结束时按 [结束专注]."))
+        self.lbl_sub.config(text="")
         self._sync_timer_buttons()
         self._save_timer_state()
         self.schedule_update()
@@ -1196,14 +1201,11 @@ class BreakTimerApp:
             self.update_job = None
 
     def update(self):
-        if self.state != RUNNING:
-            self._sync_focus_flavor()
         if self.state == RUNNING:
             elapsed = time.monotonic() - self.start_mono
             cur_m = elapsed / 60.0
             self.lbl_time.config(text=f"{cur_m:.2f} min")
             rem = compute_F(cur_m) * float(config.BREAK_TIME_SCALE)
-            self._sync_focus_flavor(cur_m)
             if rem > 0:
                 self.lbl_sub.config(text=tr("预计停止时的休息时长:  {m:.2f} 分钟").format(m=rem))
             else:
@@ -1230,21 +1232,8 @@ class BreakTimerApp:
         else:
             self.cancel_update()
 
-    def _sync_focus_flavor(self, minutes: float = None):
-        w = getattr(self, "fv_focus", None)
-        if w is None:
-            return
-        try:
-            if minutes is not None and 15.0 <= minutes < 150.0:
-                show_pack(w, fill="x", padx=26, pady=(0, 16))
-            else:
-                hide_pack(w)
-        except tk.TclError:
-            pass
-
     def reset_to_idle(self):
         self.cancel_update()
-        self._sync_focus_flavor()
         self.state = IDLE
         self.start_mono = None
         self.start_wall = None
@@ -1374,6 +1363,70 @@ class BreakTimerApp:
         self._check_setup_period()
         self.apply_job = self.root.after(5000, self._schedule_apply_check)
 
+    # ---- 任务栏窗口数上限 (window_guard.py) ----
+
+    @staticmethod
+    def _window_check_ms() -> int:
+        return int(max(5.0, float(getattr(config, "WINDOW_CHECK_EVERY", 30))) * 1000)
+
+    def _schedule_window_guard(self):
+        if self.shutting_down:
+            return
+        self._check_windows()
+        self.window_job = self.root.after(self._window_check_ms(), self._schedule_window_guard)
+
+    def _check_windows(self):
+        """超过上限就一次随机关掉多出来的任务栏窗口 (开发者模式下也照常检查)."""
+        if not getattr(config, "WINDOW_LIMIT_ENABLED", 0) or self.dm.resetting:
+            return
+        limit = int(getattr(config, "WINDOW_LIMIT", 4))
+        try:
+            n, closed = window_guard.enforce(limit)
+        except Exception as e:
+            self._log_window(f"ERROR    {type(e).__name__}: {e}")
+            return
+        if not closed:
+            return
+        lines = []
+        for w in closed:
+            title = str(w.get("title") or "").strip()
+            exe = window_guard.exe_name(w.get("pid") or 0)
+            self._log_window(f"CLOSE    {n} > {limit}  {exe or '?'}  {title}")
+            if len(title) > 50:
+                title = title[:47] + "..."
+            if len(lines) < 8:
+                lines.append(f"• {title} ({exe})" if exe else f"• {title}")
+        if len(closed) > 8:
+            lines.append("…")
+        toast.warn(tr("任务栏上有 {n} 个窗口,超过上限 {x} 个,随机关闭了 {k} 个:\n{titles}",
+                      n=n, x=limit, k=len(closed), titles="\n".join(lines)))
+
+    # ---- 窗口使用时间统计 ----
+
+    @staticmethod
+    def _window_focus_sec() -> float:
+        return max(1.0, float(getattr(config, "WINDOW_FOCUS_EVERY", 10)))
+
+    def _window_focus_ms(self) -> int:
+        return int(self._window_focus_sec() * 1000)
+
+    def _window_focus_tick(self):
+        """看一次前台程序, 视为用户在过去这几秒一直在用它 (桌面 / 命令行记为空白).
+        电脑睡眠时 after 不会触发, 所以睡眠的时间不会被算进去."""
+        if self.shutting_down:
+            return
+        try:
+            if getattr(config, "WINDOW_FOCUS_ENABLED", 0) and not self.dm.resetting:
+                self.dm.add_window_time(window_guard.foreground_program(),
+                                        self._window_focus_sec())
+                self._window_focus_ticks += 1
+                if self._window_focus_ticks % 6 == 0:      # 大约每分钟写一次文件
+                    self.dm.save_window_usage()
+                    self._refresh_if_visible("stats")
+        except Exception as e:
+            self._log_window(f"ERROR    focus {type(e).__name__}: {e}")
+        self.window_focus_job = self.root.after(self._window_focus_ms(), self._window_focus_tick)
+
     # ---- 配置期 ----
 
     def _show_welcome(self):
@@ -1449,6 +1502,15 @@ class BreakTimerApp:
             self.pages["log"].refresh()
         self._refresh_if_visible("stats")
         self.update_log_badge()
+
+    def _log_window(self, text: str):
+        """任务栏窗口数上限的流水: 关掉了哪些窗口, 以及检查出错的原因."""
+        try:
+            with open(os.path.join(self.dm.data_dir, "window_guard.log"),
+                      'a', encoding='utf-8') as f:
+                f.write(f"{datetime.now():%Y-%m-%d %H:%M:%S}  {text}\n")
+        except IOError:
+            pass
 
     def _log_notice(self, text: str):
         try:
@@ -1540,12 +1602,6 @@ class BreakTimerApp:
             hdr, text=tr("🌐  联网申请"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
         ).pack(anchor="w")
-        self.net_lbl_header = tk.Label(
-            hdr, text="", bg=bg, fg=COLORS["text_dim"], font=config.font("body"),
-            anchor="w", justify="left"
-        )
-        self.net_lbl_header.pack(anchor="w", fill="x", pady=(4, 0))
-        wrap_label(self.net_lbl_header, 8)
 
         ttk.Separator(page, orient="horizontal", style="UI.TSeparator").pack(fill="x", padx=26)
 
@@ -1611,10 +1667,6 @@ class BreakTimerApp:
         row2.pack(anchor="w", pady=(0, 12))
         ttk.Label(row2, text=tr("理由"), style="UI.TLabel", width=8).pack(side="left")
         ttk.Entry(row2, textvariable=self.var_reason, width=30).pack(side="left")
-        tk.Label(
-            row2, text=tr("多个理由用 / 连接,如「查资料/下载课件」"),
-            bg=bg, fg=COLORS["text_dim"], font=config.font("small")
-        ).pack(side="left", padx=(10, 0))
 
         btns = tk.Frame(self.net_form, bg=bg)
         btns.pack(anchor="w")
@@ -1633,13 +1685,6 @@ class BreakTimerApp:
             command=self.on_net_loan
         )
         self.btn_net_loan.pack(side="left", padx=(8, 0))
-
-        self.net_loan_hint = tk.Label(
-            self.net_form, text="", bg=bg, fg=COLORS["text_dim"],
-            font=config.font("small"), anchor="w", justify="left", wraplength=520
-        )
-        self.net_loan_hint.pack(anchor="w", fill="x", pady=(8, 0))
-        wrap_label(self.net_loan_hint, 24)
         self.net_form.pack_configure(anchor="w", fill="x")
 
         self.net_ctrl = tk.Frame(area, bg=bg)
@@ -1653,11 +1698,6 @@ class BreakTimerApp:
             style="Danger.TButton",
             command=self.on_net_upgrade
         )
-        self.net_ctrl_hint = tk.Label(
-            self.net_ctrl, text="", bg=bg, fg=COLORS["text_dim"],
-            font=config.font("small"), anchor="w", justify="left", wraplength=520
-        )
-        wrap_label(self.net_ctrl_hint, 24)
 
     def on_net_request(self):
         ok, minutes, reason = self._read_net_form()
@@ -1740,7 +1780,7 @@ class BreakTimerApp:
                 self.pages["settings"].refresh()
         msg = tr("明天的联网额度已经借掉了 {pct} ({used} / {limit}).").format(
             pct=f"{after / limit:.0%}", used=fmt_hm(after), limit=fmt_hm(limit))
-        msg += "\n\n" + tr("借得这么多,也许是休息不够.不妨在 设置 → 具体设置 里调高「休息时间倍率」.")
+        msg += "\n\n" + tr("借得这么多,也许是休息不够.不妨在 设置 → 计时器 里调高「休息时间倍率」.")
         msg += "\n\n" + tr("另外,下一次修改「每日联网额度」会立即生效,不必等 48 小时.")
         toast.notice(tr("💳  借得有点多了"), msg, [
             (tr("去设置"), self._open_detail_settings, True), (tr("知道了"), None, False)])
@@ -1748,7 +1788,7 @@ class BreakTimerApp:
     def _open_detail_settings(self):
         self.show_page("settings")
         try:
-            self.pages["settings"].show_tab("detail")
+            self.pages["settings"].show_tab("timer")
         except Exception:
             pass
 
@@ -1809,32 +1849,19 @@ class BreakTimerApp:
     def refresh_net(self, force: bool = False):
         n = self.net
         mode = n.mode
-        cooldown = int(self.settings.value("COOLDOWN"))
-        cooldown_m = f"{cooldown / 60:g}"
-
-        header = (tr("申请 → {min} 分钟冷静期 → 联网 → 到点自动断网").format(min=cooldown_m)
-                  + "    ·    " + tr("⚡ 快速访问免冷静期(×{a:g})  ·  💳 借 1 分钟扣明天 {b:g} 分钟").format(
-                      a=config.QUICK_MULTIPLIER, b=config.LOAN_RATE))
-        if self.state == ON_BREAK:
-            header += "\n" + tr("☕ 休息中提交申请,冷静期 ×{r:g}: 只需 {t}").format(
-                r=config.BREAK_COOLDOWN_RATE, t=fmt_ms(cooldown * config.BREAK_COOLDOWN_RATE)) \
-                + tr("(申请时长不超过剩余休息 {left} 时生效)").format(
-                    left=fmt_ms(self.countdown_seconds))
-        cfg(self.net_lbl_header, text=header, justify="left")
-
         if mode == "dev":
 
 
             self._net_set_status("Developer mode — network unrestricted", COLORS["warn"])
             cfg(self.net_lbl_time, text="DEV")
-            cfg(self.net_lbl_sub, 
+            cfg(self.net_lbl_sub,
                 text=tr("开发者模式已开启:本程序不会断网,也不会申请/计时.\n"
                         "调试完成后请到 Settings 页关掉它.")
             )
             hide_pack(self.net_form)
             hide_pack(self.net_ctrl)
             self._net_bar_set(n)
-            cfg(self.net_lbl_quota, 
+            cfg(self.net_lbl_quota,
                 text=f"Used today: {fmt_hm(n.quota_used)} / {fmt_hm(n.today_total)}"
                      f"     (developer mode — not counting)"
             )
@@ -1850,17 +1877,15 @@ class BreakTimerApp:
             else:
                 hide_pack(self.net_form)
                 show_pack(self.net_ctrl, anchor="w")
-                cfg(self.btn_net_ctrl, 
+                cfg(self.btn_net_ctrl,
                     text=tr("✕  取消申请") if mode == "pending" else tr("■  结束本次会话")
                 )
                 if mode == "pending":
-                    cfg(self.btn_net_upgrade, 
+                    cfg(self.btn_net_upgrade,
                         text=tr("⚡  改为快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER))
                     show_pack(self.btn_net_upgrade, side="left", padx=(8, 0))
-                    show_pack(self.net_ctrl_hint, anchor="w", pady=(8, 0))
                 else:
                     hide_pack(self.btn_net_upgrade)
-                    hide_pack(self.net_ctrl_hint)
 
         if mode == "offline":
             self._net_set_status(tr("离线"), COLORS["text_dim"])
@@ -1869,68 +1894,34 @@ class BreakTimerApp:
                 cfg(self.net_lbl_sub, text=tr("今天的额度已用完."))
                 cfg(self.btn_net_req, state="disabled")
             else:
-                cfg(self.net_lbl_sub, 
-                    text=tr("在下面提交申请,冷静期结束后自动联网.")
-                )
+                cfg(self.net_lbl_sub, text="")
                 cfg(self.btn_net_req, state="!disabled")
-            cfg(self.btn_net_quick, 
+            cfg(self.btn_net_quick,
                 text=tr("⚡  快速访问(×{a:g})").format(a=config.QUICK_MULTIPLIER),
                 state="!disabled" if n.quick_left >= 60 else "disabled")
-            cfg(self.btn_net_loan, 
+            cfg(self.btn_net_loan,
                 state="!disabled" if n.loan_left >= 60 else "disabled")
         elif mode == "pending":
             p = n.pending
             self._net_set_status(tr("冷静期中 —— 仍可取消"), COLORS["warn"])
             cfg(self.net_lbl_time, text=fmt_ms(p["at"] - time.time()))
             start_at = datetime.fromtimestamp(p["at"]).strftime("%H:%M")
-            cfg(self.net_lbl_sub, 
+            cfg(self.net_lbl_sub,
                 text=tr("已申请 {m} 分钟 · {at} 联网").format(m=p['minutes'], at=start_at)
             )
-            ok, msg = n.can_quick(p["minutes"])
-            if ok:
-                cfg(self.net_ctrl_hint, 
-                    text=tr("⚡ 可改为快速访问立刻联网:消耗 {cost} 今日额度(×{a:g}).").format(
-                        cost=fmt_hm(p["minutes"] * 60 * config.QUICK_MULTIPLIER), a=config.QUICK_MULTIPLIER),
-                    fg=COLORS["text_dim"]
-                )
-            else:
-                cfg(self.net_ctrl_hint, text="⚡ " + msg, fg=COLORS["text_dim"])
         else:
             self._net_set_status(tr("联网中"), COLORS["success"])
             cfg(self.net_lbl_time, text=fmt_ms(n.grant_left))
             if n.grant_quick:
-                cfg(self.net_lbl_sub, 
+                cfg(self.net_lbl_sub,
                     text=tr("⚡ 快速访问 —— 额度按 ×{a:g} 消耗,归零自动断网.").format(
                         a=n.grant_rate)
                 )
             else:
-                cfg(self.net_lbl_sub, 
-                    text=tr("本次会话剩余时间,归零自动断网.")
-                )
-
-
-        if mode == "offline":
-            usermin = self._safe_minutes()
-            parts = []
-            if usermin and n.can_quick(usermin)[0]:
-                parts.append(tr("⚡ 快速访问 {m} 分钟:立刻联网,消耗 {cost} 今日额度.").format(
-                    m=usermin, cost=fmt_hm(usermin * 60 * config.QUICK_MULTIPLIER)))
-            else:
-                parts.append(tr("⚡ 快速访问:跳过冷静期,额度按 ×{a:g} 消耗;最多 {cap}.").format(
-                    a=config.QUICK_MULTIPLIER, cap=fmt_hm(n.quick_left)))
-            if n.loan_left < 60:
-                parts.append(tr("💳 明天的额度已经借完了."))
-            elif usermin and n.can_borrow(usermin)[0]:
-                parts.append(tr("💳 借 {m} 分钟:今天额度 +{add},明天额度 -{cost}.最多可借 {cap}.").format(
-                    m=usermin, add=fmt_hm(usermin * 60),
-                    cost=fmt_hm(usermin * 60 * config.LOAN_RATE), cap=fmt_hm(n.loan_left)))
-            else:
-                parts.append(tr("💳 紧急借贷:今天额度 +1 分钟,明天额度 -{b:g} 分钟;最多可借 {cap}.").format(
-                    b=config.LOAN_RATE, cap=fmt_hm(n.loan_left)))
-            cfg(self.net_loan_hint, text="\n".join(parts), fg=COLORS["text_dim"])
+                cfg(self.net_lbl_sub, text="")
 
         self._net_bar_set(n)
-        cfg(self.net_lbl_quota, 
+        cfg(self.net_lbl_quota,
             text=tr("今日已用: {used} / {total}     今日剩余: {left}     可快速访问: {quick}").format(
                 used=fmt_hm(n.quota_used), total=fmt_hm(n.today_total),
                 left=fmt_hm(n.remaining), quick=fmt_hm(n.quick_left))
@@ -1985,10 +1976,6 @@ class BreakTimerApp:
             hdr, text=tr("🔄  重置"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
         ).pack(anchor="w")
-        tk.Label(
-            hdr, text=tr("删除全部数据,让程序回到第一次打开时的样子."),
-            bg=bg, fg=COLORS["text_dim"], font=config.font("body")
-        ).pack(anchor="w", pady=(4, 0))
 
         ttk.Separator(page, orient="horizontal", style="UI.TSeparator").pack(fill="x", padx=26)
 
@@ -1998,15 +1985,7 @@ class BreakTimerApp:
             warn_fr, text=tr("⚠  警告:这会永久删除全部数据"),
             bg=COLORS["danger_bg"], fg=danger, font=config.font("body", bold=True),
             anchor="w"
-        ).pack(fill="x", padx=16, pady=(10, 2))
-        tk.Label(
-            warn_fr, justify="left", anchor="w", bg=COLORS["danger_bg"], fg=COLORS["text"],
-            font=config.font("small"),
-            text=tr("• 学习记录、日历、整点记录、统计、联网额度与日志、名单、AI 配置等全部删除,不留任何记录.\n"
-                    "• 所有设置恢复默认值,名单清空,系统代理先还原再按默认设置重新接管.\n"
-                    "• 进行中的专注不会被记录.\n"
-                    "• 无法撤销.程序会自动重新打开,像第一次安装一样弹出介绍窗口,重新开始配置期.")
-        ).pack(fill="x", padx=16, pady=(0, 10))
+        ).pack(fill="x", padx=16, pady=10)
 
         form = tk.Frame(page, bg=bg)
         form.pack(fill="x", padx=26, pady=(0, 16))

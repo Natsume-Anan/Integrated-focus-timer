@@ -4,10 +4,11 @@ from datetime import datetime, timedelta
 from tkinter import ttk
 
 import config
+import window_guard
 from config import COLORS, fmt_hm
 from data_manager import month_prefixes, tally_items
 from i18n import tr, is_en
-from .widgets import ScrollArea, wrap_label, smooth, cfg, show_pack, hide_pack
+from .widgets import ScrollArea, smooth, cfg, show_pack, hide_pack
 
 
 # 图表颜色都跟随当前主题 (config.CHART_PALETTE / COLORS 会在切换主题时原地更新)
@@ -23,7 +24,7 @@ WEEKDAYS_EN = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 
 class StatsPage(tk.Frame):
-    """📊 Statistics:上月 / 本月的整点记录活动与联网理由,饼状图 + 图例.
+    """📊 Statistics:上月 / 本月的整点记录活动, 联网理由与各程序的前台时间, 饼状图 + 图例.
 
     第一页(整点记录)只在整点记录开启时出现;每一页可单独切换「占比 / 总时间」."""
 
@@ -33,7 +34,7 @@ class StatsPage(tk.Frame):
         self.net = net_guard
         self.focus_live = focus_live
         self.page = "log"
-        self.mode = {"log": "pct", "net": "pct"}
+        self.mode = {"log": "pct", "net": "pct", "window": "pct"}
         self._tabs_log_on = None
         self._focus_days = []
         self._focus_geom = None
@@ -49,18 +50,12 @@ class StatsPage(tk.Frame):
             hdr, text=tr("📊  统计"), bg=bg, fg=COLORS["text"],
             font=config.font("h1", bold=True)
         ).pack(anchor="w")
-        self.lbl_note = tk.Label(
-            hdr, text="", bg=bg, fg=COLORS["text_dim"],
-            font=config.font("body"), justify="left", anchor="w"
-        )
-        self.lbl_note.pack(anchor="w", fill="x", pady=(4, 0))
-        wrap_label(self.lbl_note, 12)
 
         bar = tk.Frame(self, bg=bg)
         bar.pack(fill="x", padx=26, pady=(8, 8))
         self.tab_btns = {}
         for key, text in (("log", tr("📝  整点记录")), ("net", tr("🌐  联网理由")),
-                          ("focus", tr("⏱  专注计时"))):
+                          ("focus", tr("⏱  专注计时")), ("window", tr("🪟  窗口"))):
             b = tk.Button(
                 bar, text=text, relief="flat", bd=0, padx=14, pady=6,
                 font=config.font("body", bold=True), cursor="hand2",
@@ -125,7 +120,7 @@ class StatsPage(tk.Frame):
             legend.pack(fill="both", expand=True, padx=8, pady=(0, 8))
             self.cols.append({"title": title, "total": total, "canvas": canvas,
                               "size": size, "legend": legend,
-                              "rows": [], "empty": None, "sig": None})
+                              "rows": [], "empty": None, "sig": None, "keys": None})
         body.rowconfigure(0, weight=1)
 
 
@@ -157,7 +152,16 @@ class StatsPage(tk.Frame):
     def _data(self, prefix: str):
         if self.page == "log":
             return self.dm.hour_activity_seconds(prefix)
+        if self.page == "window":
+            names = {window_guard.BLANK: tr("空白"), window_guard.UNKNOWN: tr("未知程序")}
+            return {names.get(k, k): v for k, v in self.dm.window_seconds(prefix).items()}
         return tally_items(self.net.usage_by_reason(prefix))
+
+    def _color(self, i: int, name: str) -> str:
+        """第 i 项的颜色. 窗口页的「空白」和专注计时页一样用空白色, 不占调色板."""
+        if self.page == "window" and name == tr("空白"):
+            return _c("chart_empty")
+        return PALETTE[i] if i < len(PALETTE) else _c("chart_other")
 
     def refresh(self):
         log_on = bool(self.dm.hour_enabled)
@@ -172,6 +176,7 @@ class StatsPage(tk.Frame):
                 self.tab_btns["log"].pack(side="left", padx=(0, 4))
             self.tab_btns["net"].pack(side="left", padx=(0, 4))
             self.tab_btns["focus"].pack(side="left", padx=(0, 4))
+            self.tab_btns["window"].pack(side="left", padx=(0, 4))
         self._style_buttons()
 
         if self.page == "focus":
@@ -179,8 +184,6 @@ class StatsPage(tk.Frame):
             show_pack(self.focus_legend, side="right")
             hide_pack(self.pie_body)
             show_pack(self.focus_body, fill="both", expand=True, padx=26, pady=(10, 16))
-            cfg(self.lbl_note, text=tr(
-                "最近 7 天计时器的专注与休息.每根条是一个小时,按比例分成专注、休息与空白;鼠标停在条上可查看分钟数."))
             self._load_focus()
             self._draw_focus()
             return
@@ -188,13 +191,6 @@ class StatsPage(tk.Frame):
         hide_pack(self.focus_body)
         show_pack(self.mode_bar, side="right")
         show_pack(self.pie_body, fill="both", expand=True, padx=20, pady=(10, 16))
-
-        if self.page == "log":
-            cfg(self.lbl_note, text=tr(
-                "整点记录里每一项活动的总时间.一小时写了多项(用 / 连接)时,这一小时均分给每一项."))
-        else:
-            cfg(self.lbl_note, text=tr(
-                "每个联网理由的实际联网时间,不计快速访问的倍数.一次申请写了多个理由(用 / 连接)时均分."))
 
         this, last = month_prefixes()
         for col, (name, prefix) in zip(self.cols, ((tr("上月"), last), (tr("本月"), this))):
@@ -213,7 +209,7 @@ class StatsPage(tk.Frame):
         cfg(col["title"], text=title)
         cfg(col["total"], text=tr("合计 {t} · {n} 项").format(t=fmt_hm(total), n=len(items)))
 
-        slices = [(k, v, PALETTE[i]) for i, (k, v) in enumerate(items[:len(PALETTE)])]
+        slices = [(k, v, self._color(i, k)) for i, (k, v) in enumerate(items[:len(PALETTE)])]
         rest = sum(v for _, v in items[len(PALETTE):])
         if rest > 0:
             slices.append((tr("其他"), rest, _c("chart_other")))
@@ -252,14 +248,17 @@ class StatsPage(tk.Frame):
                 hide_pack(row)
                 continue
             k, v = items[i]
-            color = PALETTE[i] if i < len(PALETTE) else _c("chart_other")
-            cfg(sw, bg=color)
+            cfg(sw, bg=self._color(i, k))
             cfg(val, text=f"{v / total * 100:.1f}%" if pct_mode else fmt_hm(v))
             cfg(name, text=k)
             show_pack(row, fill="x", padx=4, pady=1)
         if created:
             col["legend"].bind_children()
-        col["legend"].scroll_to_top()
+        # 只有项目或顺序变了才滚回顶部; 窗口页每分钟刷新一次, 不要打断正在看的图例
+        keys = tuple(k for k, _ in items)
+        if col["keys"] != keys:
+            col["keys"] = keys
+            col["legend"].scroll_to_top()
 
     @staticmethod
     def _draw_pie(cv: tk.Canvas, size: int, slices, total: float, pct_mode: bool):
@@ -285,11 +284,12 @@ class StatsPage(tk.Frame):
                 mid = math.radians(start + extent / 2.0)
                 rr = 0.62 * r if len(slices) > 1 else 0.0
                 text = f"{v / total * 100:.0f}%" if pct_mode else fmt_hm(v)
-                labels.append((cx + rr * math.cos(mid), cy - rr * math.sin(mid), text))
+                # 空白色很浅, 上面的字用暗色
+                fg = COLORS["text_dim"] if color == _c("chart_empty") else COLORS["on_accent"]
+                labels.append((cx + rr * math.cos(mid), cy - rr * math.sin(mid), text, fg))
             start += extent
-        for x, y, text in labels:
-            cv.create_text(x, y, text=text, fill=COLORS["on_accent"],
-                           font=config.font("tiny", bold=True))
+        for x, y, text, fg in labels:
+            cv.create_text(x, y, text=text, fill=fg, font=config.font("tiny", bold=True))
 
     # ---- 专注计时 ----
 

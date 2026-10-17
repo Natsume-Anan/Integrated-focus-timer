@@ -25,16 +25,11 @@ _WHY_TEXT = {
 }
 
 _PANELS = (
-    (WHITE_DOMAINS, "✅  白名单 · 网站", "离线时也放行.写域名即可,子域名自动包含."),
-    (WHITE_APPS, "✅  白名单 · 应用", "离线时也放行这个程序的全部联网.写 exe 名,如 code.exe."),
-    (BLACK_DOMAINS, "⛔  黑名单 · 网站", "禁止访问.写域名即可,子域名自动包含."),
-    (BLACK_APPS, "⛔  黑名单 · 应用", "禁止这个程序联网.写 exe 名,如 steam.exe."),
+    (WHITE_DOMAINS, "✅  白名单 · 网站"),
+    (WHITE_APPS, "✅  白名单 · 应用"),
+    (BLACK_DOMAINS, "⛔  黑名单 · 网站"),
+    (BLACK_APPS, "⛔  黑名单 · 应用"),
 )
-
-_MODE_TEXT = {
-    MODE_BLACKLIST: "黑名单模式:默认放行,只拦名单里的网站 / 应用.",
-    MODE_WHITELIST: "白名单模式:默认拦截,离线时只放行名单里的网站 / 应用;联网会话中全部放行.",
-}
 
 
 class RulesPage(tk.Frame):
@@ -65,10 +60,6 @@ class RulesPage(tk.Frame):
         hdr.pack(fill="x", padx=28, pady=(18, 6))
         tk.Label(hdr, text=tr("🛡  规则"), bg=bg, fg=COLORS["text"],
                  font=config.font("h1", bold=True)).pack(anchor="w")
-        self.lbl_sub = tk.Label(hdr, bg=bg, fg=COLORS["text_dim"], font=config.font("body"),
-                                anchor="w", justify="left", text="")
-        self.lbl_sub.pack(anchor="w", pady=(4, 0), fill="x")
-        wrap_label(self.lbl_sub, 24)
 
         self.area = ScrollArea(self, height=420, bg=bg)
         self.area.pack(fill="both", expand=True, padx=26, pady=(6, 4))
@@ -82,14 +73,10 @@ class RulesPage(tk.Frame):
                                  font=config.font("body", bold=True), anchor="w",
                                  justify="left")
         self.lbl_mode.pack(fill="x")
-        self.lbl_gate = tk.Label(stin, text="", bg=card, fg=COLORS["text_dim"],
-                                 font=config.font("small"), anchor="w", justify="left")
-        self.lbl_gate.pack(fill="x", pady=(2, 0))
         self.lbl_stats = tk.Label(stin, text="", bg=card, fg=COLORS["text_dim"],
                                   font=config.font("small"), anchor="w")
-        self.lbl_stats.pack(fill="x")
+        self.lbl_stats.pack(fill="x", pady=(2, 0))
         wrap_label(self.lbl_mode, 30)
-        wrap_label(self.lbl_gate, 30)
         self.btn_settings = ttk.Button(
             stin, text=tr("去设置里切换断网方式"),
             command=lambda: self.on_open_settings and self.on_open_settings())
@@ -118,16 +105,12 @@ class RulesPage(tk.Frame):
         grid.pack(fill="x")
         grid.grid_columnconfigure(0, weight=1, uniform="col")
         grid.grid_columnconfigure(1, weight=1, uniform="col")
-        for i, (key, title, hint) in enumerate(_PANELS):
-            self._make_panel(grid, key, title, hint, row=0,
+        for key, title in _PANELS:
+            self._make_panel(grid, key, title, row=0,
                              col=0 if key in (WHITE_DOMAINS, BLACK_DOMAINS) else 1)
 
         tk.Label(body, text=tr("⏳  等待生效的改动"), bg=bg, fg=COLORS["text"],
                  font=config.font("body", bold=True)).pack(anchor="w", pady=(10, 2))
-        self.lbl_setup = tk.Label(body, text="", bg=bg, fg=COLORS["text_dim"],
-                                  font=config.font("small"), anchor="w", justify="left")
-        self.lbl_setup.pack(fill="x")
-        wrap_label(self.lbl_setup, 24)
         pf = tk.Frame(body, bg=bg)
         pf.pack(fill="x", pady=(2, 0))
         self.lb_pending = tk.Listbox(pf, height=4, activestyle="none",
@@ -145,7 +128,7 @@ class RulesPage(tk.Frame):
         self.lb_events.pack(fill="x", pady=(0, 14))
         self.area.bind_children()
 
-    def _make_panel(self, parent, key, title, hint, row, col):
+    def _make_panel(self, parent, key, title, row, col):
         card = COLORS["bg_card"]
         fr = tk.Frame(parent, bg=card, highlightbackground=COLORS["border"],
                       highlightthickness=1)
@@ -155,10 +138,6 @@ class RulesPage(tk.Frame):
         tk.Label(fr, text=tr(title), bg=card, fg=COLORS["text"],
                  font=config.font("body", bold=True), anchor="w").pack(
             fill="x", padx=10, pady=(8, 0))
-        h = tk.Label(fr, text=tr(hint), bg=card, fg=COLORS["text_dim"],
-                     font=config.font("tiny"), anchor="w", justify="left")
-        h.pack(fill="x", padx=10)
-        wrap_label(h, 20)
 
         lf = tk.Frame(fr, bg=card)
         lf.pack(fill="both", expand=True, padx=10, pady=(6, 4))
@@ -328,7 +307,6 @@ class RulesPage(tk.Frame):
         mode = self._mode()
         active = keys_for_mode(mode)
 
-        cfg(self.lbl_sub, text=tr(_MODE_TEXT[mode]))
         for key, fr in self._frames.items():
             if key in active:
                 show_grid(fr)
@@ -339,7 +317,7 @@ class RulesPage(tk.Frame):
         staged = self.settings.staged("FILTER_MODE") if self.settings else None
         if staged:
             target = tr("白名单模式") if staged["value"] == MODE_WHITELIST else tr("黑名单模式")
-            cfg(self.lbl_pending_mode, 
+            cfg(self.lbl_pending_mode,
                 text=tr("待生效: 切换到{mode}   ·   {when}").format(
                     mode=target, when=self.settings.apply_at_text("FILTER_MODE")))
         else:
@@ -348,23 +326,16 @@ class RulesPage(tk.Frame):
         if proxy_on:
             hide_pack(self.btn_settings)
             run = tr("运行中") if c.running else tr("未运行")
-            cfg(self.lbl_mode, 
+            cfg(self.lbl_mode,
                 text=tr("Proxy 模式 · 本地代理 127.0.0.1:{port} · {run}").format(
                     port=c.port, run=run),
                 fg=COLORS["success"] if c.running else COLORS["warn"])
-            if mode == MODE_WHITELIST:
-                gate = (tr("联网中:全部放行.") if c.online
-                        else tr("离线:只放行白名单,其余一律拦截."))
-            else:
-                gate = tr("只拦黑名单里的网站 / 应用,其余放行.")
         else:
-            cfg(self.lbl_mode, 
+            cfg(self.lbl_mode,
                 text=tr("当前是 Adapter 模式 —— 规则已保存,但暂未启用."),
                 fg=COLORS["warn"])
             show_pack(self.btn_settings, anchor="w", pady=(6, 0))
-            gate = tr("在 Settings 里把「断网方式」改成 Proxy 后,这些规则才会生效.")
-        cfg(self.lbl_gate, text=gate)
-        cfg(self.lbl_stats, 
+        cfg(self.lbl_stats,
             text=tr("已放行 {a} 次 · 已拦截 {b} 次(本次运行)").format(a=c.allowed, b=c.blocked))
 
         if force or self._rules_version != r.version:
@@ -386,13 +357,7 @@ class RulesPage(tk.Frame):
             self.lb_pending.delete(0, "end")
             for line in pend:
                 self.lb_pending.insert("end", line)
-        if config.setup_active():
-            cfg(self.lbl_setup, text=tr("配置期内:名单的所有改动立即生效."))
-        elif r.dev_getter():
-            cfg(self.lbl_setup, text=tr("开发者模式:名单改动立即生效."))
-        else:
-            cfg(self.lbl_setup, text=tr(
-                "名单的所有改动 (加入和删除) 都要等 48 小时才生效."))
+
 
         seq = (c.event_seq, sum(e["count"] for e in c.events))
         if force or self._shown.get("_events") != seq:

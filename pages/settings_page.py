@@ -8,8 +8,7 @@ import config
 import toast
 from config import COLORS
 from i18n import tr
-from settings_manager import (APPLY_INSTANT, SCHEMA_BY_KEY, BASIC_SPECS, DETAIL_SPECS,
-                              WEEKDAY_SPECS)
+from settings_manager import APPLY_INSTANT, SCHEMA_BY_KEY, SETTINGS_PAGES, page_specs
 from .widgets import (ScrollArea, Switch, wrap_label, frozen, smooth, cfg, set_var, flavor,
                       show_pack, hide_pack, show_grid, hide_grid)
 
@@ -28,8 +27,9 @@ class SettingsPage(tk.Frame):
         self.on_theme = on_theme
         self.on_end_setup = on_end_setup
         self.setup_card = None
-        self._rows = {}          # 基本设置页的行
-        self._num_rows = {}      # 具体设置页 / 星期倍率页的行
+        self._rows = {}          # 选项类设置的行 (各页上半部分)
+        self._num_rows = {}      # 数值类设置的行 (各页下半部分)
+        self.areas = {}          # 每个模块一页
         self._tab = "basic"
         self._syncing = False
         self.sw_dev = None
@@ -71,11 +71,11 @@ class SettingsPage(tk.Frame):
             font=config.font("h1", bold=True)
         ), "⚙  设置").pack(side="left")
 
-        tabs = tk.Frame(hdr, bg=bg)
-        tabs.pack(side="left", padx=(24, 0))
+        # 一个模块一页, 顺序和左侧导航一致
+        tabs = tk.Frame(self, bg=bg)
+        tabs.pack(fill="x", padx=28, pady=(2, 4))
         self._tab_btns = {}
-        for key, text in (("basic", "基本设置"), ("detail", "具体设置"),
-                          ("weekday", "星期倍率")):
+        for key, text in SETTINGS_PAGES:
             b = self._track(tk.Label(
                 tabs, text=tr(text), font=config.font("body", bold=True),
                 padx=14, pady=4, cursor="hand2"), text)
@@ -86,13 +86,15 @@ class SettingsPage(tk.Frame):
         self.stack = tk.Frame(self, bg=bg)
         self.stack.pack(fill="both", expand=True, padx=26, pady=(6, 0))
 
-        # ---- 基本设置 ----
-        self.area = ScrollArea(self.stack, height=420, bg=bg)
+        for key, _text in SETTINGS_PAGES:
+            self.areas[key] = ScrollArea(self.stack, height=420, bg=bg)
+
+        # ---- 基本设置: 配置期, 开发者模式, 以及整个程序的外观 (语言 / 字号 / 主题) ----
+        self.area = self.areas["basic"]
         body = self.area.inner
         self._build_setup_card(body)
         self._build_dev_mode(body)
-        for spec in BASIC_SPECS:
-            self._build_row(body, spec)
+        self._build_page_items("basic")
         # 作者的话: 为什么设置要等 48 小时 (MECHANICS.md 1.1)
         for i, zh in enumerate((
                 "在设计预期上 只要不是有绝对的正当理由 应该很少有改变能坚持过48h的等待期.\n这是一个理智与本能的抗争的常见结果.\n这个软件的一个理念就是放大理智优势,保留本能空间.",
@@ -101,25 +103,11 @@ class SettingsPage(tk.Frame):
             self._track(fv.label, zh)
             fv.pack(fill="x", pady=(14 if i == 0 else 8, 6 if i else 0))
 
-        # ---- 具体设置 ----
-        self.area_num = ScrollArea(self.stack, height=420, bg=bg)
-        self._build_num_page(self.area_num.inner, DETAIL_SPECS, self.area_num)
+        # ---- 其余模块: 上面是选项, 下面是数值 ----
+        for key, _text in SETTINGS_PAGES[1:]:
+            self._build_page_items(key)
 
-        # ---- 星期倍率 ----
-        self.area_week = ScrollArea(self.stack, height=420, bg=bg)
-        intro = self._track(tk.Label(
-            self.area_week.inner, text=tr(
-                "当天的联网额度 = 每日联网额度 × 当天的倍率.例如每日额度 2 h,周六倍率 ×1.5,"
-                "周六就能联网 3 h;倍率 ×0 表示当天不能联网."),
-            bg=bg, fg=COLORS["text_dim"], font=config.font("small"), anchor="w",
-            justify="left"),
-            "当天的联网额度 = 每日联网额度 × 当天的倍率.例如每日额度 2 h,周六倍率 ×1.5,"
-            "周六就能联网 3 h;倍率 ×0 表示当天不能联网.")
-        intro.pack(fill="x", pady=(2, 6))
-        wrap_label(intro, 12)
-        self._build_num_page(self.area_week.inner, WEEKDAY_SPECS, self.area_week)
-
-        # ---- 两页共用的底栏 ----
+        # ---- 各页共用的底栏 ----
         foot = tk.Frame(self, bg=bg)
         foot.pack(fill="x", padx=28, pady=(4, 10))
         self.lbl_global = tk.Label(
@@ -136,10 +124,6 @@ class SettingsPage(tk.Frame):
             ttk.Button(btns, text=tr("↩ 取消全部待生效修改"), command=self._cancel_all),
             "↩ 取消全部待生效修改")
         self.btn_cancel_all.pack(side="left", padx=(8, 0))
-        self._track(tk.Label(
-            foot, text=tr("带 ⚡ 标记的项修改后立即生效;其余需等待 48 小时."),
-            bg=bg, fg=COLORS["text_dim"], font=config.font("small"), anchor="w"),
-            "带 ⚡ 标记的项修改后立即生效;其余需等待 48 小时.").pack(fill="x", pady=(6, 0))
 
         self.show_tab(self._tab)
 
@@ -148,12 +132,13 @@ class SettingsPage(tk.Frame):
         self.show_tab(key)
 
     def show_tab(self, key: str):
+        if key not in self.areas:
+            key = "basic"
         self._tab = key
-        areas = {"basic": self.area, "detail": self.area_num, "weekday": self.area_week}
-        for k, a in areas.items():
+        for k, a in self.areas.items():
             if k != key:
                 hide_pack(a)
-        show_pack(areas.get(key, self.area), fill="both", expand=True)
+        show_pack(self.areas[key], fill="both", expand=True)
         for k, b in self._tab_btns.items():
             if k == key:
                 cfg(b, bg=COLORS["accent"], fg=COLORS["on_accent"])
@@ -174,7 +159,23 @@ class SettingsPage(tk.Frame):
             return tr("⚡ 开发者模式: 即时"), COLORS["warn"]
         return "", COLORS["text_dim"]
 
-    # ---- 具体设置页: 数值直接填写, 一项一行 ----
+    # ---- 一个模块页: 选项 / 开关在上, 数值在下 ----
+
+    def _build_page_items(self, page: str):
+        area = self.areas[page]
+        body = area.inner
+        choices, nums = page_specs(page)
+        for spec in choices:
+            self._build_row(body, spec, area)
+        plain = [s for s in nums if not s.get("group")]
+        weekday = [s for s in nums if s.get("group") == "weekday"]
+        if plain:
+            self._build_num_page(body, plain, area)
+        if weekday:
+            self._build_num_page(body, weekday, area)
+        area.bind_children()
+
+    # ---- 数值项: 直接填写, 一项一行 ----
 
     def _build_num_page(self, body, specs, area):
         card = COLORS["bg_card"]
@@ -228,14 +229,7 @@ class SettingsPage(tk.Frame):
             pend.grid_remove()
             r += 1
 
-            if spec["desc"]:
-                desc = self._track(tk.Label(
-                    grid, text=tr(spec["desc"]), bg=card, fg=COLORS["text_dim"],
-                    font=small, anchor="w", justify="left"), spec["desc"])
-                desc.grid(row=r, column=0, columnspan=7, sticky="ew", padx=12, pady=(1, 7))
-                wrap_label(desc, 24)
-            else:
-                tk.Frame(grid, bg=card, height=6).grid(row=r, column=0, columnspan=7)
+            tk.Frame(grid, bg=card, height=6).grid(row=r, column=0, columnspan=7)
             r += 1
 
             self._num_rows[key] = {
@@ -336,7 +330,7 @@ class SettingsPage(tk.Frame):
             self.on_dev_mode(enabled)
         self.refresh()
 
-    def _build_row(self, body, spec):
+    def _build_row(self, body, spec, area):
         key, kind = spec["key"], spec["kind"]
         card = COLORS["bg_card"]
 
@@ -408,7 +402,7 @@ class SettingsPage(tk.Frame):
 
         self._choices_widgets.append((key, widget))
 
-        self.area.bind_children()
+        area.bind_children()
 
     def _widget_value(self, key: str):
         spec = SCHEMA_BY_KEY[key]
@@ -503,12 +497,11 @@ class SettingsPage(tk.Frame):
             self.on_changed("cancel", None)
 
     def _save_all(self):
-        if self._tab in ("detail", "weekday"):
-            self._save_all_num(DETAIL_SPECS if self._tab == "detail" else WEEKDAY_SPECS)
-            return
+        """保存当前这一页: 上半部分的选项和下半部分的数值一起提交."""
+        choices, nums = page_specs(self._tab)
         staged, instant, same = 0, 0, 0
-        ui_keys = []
-        for spec in BASIC_SPECS:
+        ui_keys, errors = [], []
+        for spec in choices:
             key = spec["key"]
             try:
                 value = self._widget_value(key)
@@ -523,17 +516,14 @@ class SettingsPage(tk.Frame):
             if value == self.sm.value(key):
                 same += 1
                 continue
-            status, _ = self.sm.stage(key, value)
+            status, msg = self.sm.stage(key, value)
             if status == "staged":
                 staged += 1
             elif status == "instant":
                 instant += 1
-        self._report_saved(staged, instant)
-        self._run_ui_hooks(ui_keys)
-
-    def _save_all_num(self, specs):
-        staged, instant, errors = 0, 0, []
-        for spec in specs:
+            elif status == "invalid":
+                errors.append(msg)
+        for spec in nums:
             key = spec["key"]
             if not self._num_edited(key):
                 continue
@@ -547,6 +537,7 @@ class SettingsPage(tk.Frame):
         if errors:
             toast.warn("\n".join(errors))
         self._report_saved(staged, instant, silent_if_none=bool(errors))
+        self._run_ui_hooks(ui_keys)
 
     def _report_saved(self, staged: int, instant: int, silent_if_none: bool = False):
         self.refresh()
@@ -584,9 +575,7 @@ class SettingsPage(tk.Frame):
             left = self.sm.setup_left_seconds()
             if left > 0:
                 h, rem = divmod(left, 3600)
-                cfg(self.lbl_setup, text=tr(
-                    "还剩 {h} 小时 {m} 分.配置期内,所有设置和名单的修改立即生效;"
-                    "结束后每次修改都要等 48 小时.").format(h=h, m=rem // 60))
+                cfg(self.lbl_setup, text=tr("还剩 {h} 小时 {m} 分.").format(h=h, m=rem // 60))
                 if self.setup_card.winfo_manager() != "pack":
                     others = [w for w in self.area.inner.pack_slaves() if w is not self.setup_card]
                     kw = {"before": others[0]} if others else {}
@@ -604,9 +593,7 @@ class SettingsPage(tk.Frame):
 
         self._syncing = True
         try:
-            for spec in BASIC_SPECS:
-                key = spec["key"]
-                row = self._rows[key]
+            for key, row in self._rows.items():
                 self._sync_widget(key)
                 cfg(row["lbl_current"],
                     text=f"{tr('当前')}: {tr(self.sm.display(key))}")
@@ -625,9 +612,8 @@ class SettingsPage(tk.Frame):
                     hide_pack(row["btn_cancel"])
 
             today = datetime.now().weekday()
-            for spec in DETAIL_SPECS + WEEKDAY_SPECS:
-                key = spec["key"]
-                row = self._num_rows[key]
+            for key, row in self._num_rows.items():
+                spec = row["spec"]
                 self._sync_num(key)
                 cur = f"{tr('当前')}: {self.sm.display(key)}"
                 if key in config.WEEKDAY_KEYS:

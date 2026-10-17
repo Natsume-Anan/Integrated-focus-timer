@@ -20,6 +20,7 @@
 
 - 本项目**包含 AI 生成的代码**,本文亦由 AI 整理.
 - 程序包含**关闭网卡等强制性断网措施**.
+- 任务栏窗口超过上限(默认 4 个)时,程序会**随机关闭多出来的窗口**(默认开启,可在设置里关闭).
 
 ---
 
@@ -32,11 +33,14 @@
 | **🛡 Rules** | Proxy 模式下的网站 / 应用黑白名单,可让 AI 给出建议 |
 | **📝 Hour Log** | 每个整点提示记录上一小时做了什么 |
 | **📅 Calendar** | 按日查看学习时长 |
-| **📊 Statistics** | 活动与联网理由的时间分布 |
-| **⚙ Settings** | 可调参数(含按星期调整联网额度的倍率);多数修改需要等待冷静期才生效 |
+| **📊 Statistics** | 活动, 联网理由与各程序前台时间的分布 |
+| **⚙ Settings** | 按模块分页的可调参数(含按星期调整联网额度的倍率);多数修改需要等待冷静期才生效 |
 | **🔄 Reset** | 恢复网络并清理数据 |
 
 断网有两种方式:**Adapter** 直接禁用网卡;**Proxy** 通过系统代理过滤,不读取系统代理的程序不受其限制.
+
+另有任务栏窗口数上限:每 30 秒检查一次,窗口超过上限就一次随机关掉多出来的窗口(和点 ✕ 一样,未保存的内容会询问是否保存).
+以及窗口使用时间统计:每 10 秒看一次前台程序并把这 10 秒记给它(桌面,文件资源管理器和命令行记为空白),在 Statistics 页查看(默认开启).
 
 ---
 
@@ -51,4 +55,4 @@ python main.py
 
 ## 开发
 
-各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`, `python -m netproxy.selftest`, `python uninstall.py --selftest`.
+各模块可单独自检,如 `python net_guard.py`, `python settings_manager.py`, `python -m netproxy.selftest`, `python window_guard.py`, `python uninstall.py --selftest`.
